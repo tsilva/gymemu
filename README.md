@@ -1,16 +1,20 @@
-# 🕹️ Gymnasium Emulator
+# 🕹️ gymnasium-emulator
+
+<p align="center">
+  <img src="logo.png" alt="Logo" width="400"/>
+</p>
 
 🔹 **A neural emulator for visualizing and interacting with latent dynamics of retro games using pre-trained models.**
 
 ## 📖 Overview
 
-Gymnasium Emulator is a tool for exploring the latent state space of classic video games, such as Tetris for Game Boy, using deep learning models. It leverages pre-trained autoencoder and dynamics models to reconstruct and predict game frames in real time based on user keyboard input. The emulator provides a visual interface powered by Pygame, allowing you to interact with the learned game dynamics without a traditional emulator or ROM.
+Gymnasium Emulator lets you explore the latent state space of classic video games—like Tetris for Game Boy—using deep learning models. It leverages pre-trained autoencoder and dynamics models to reconstruct and predict game frames in real time based on your keyboard input. With a simple Pygame interface, you can interact with learned game dynamics without needing a traditional emulator or ROM.
 
-The project downloads pre-trained models from Hugging Face, encodes an initial game frame, and lets you step through the game's latent space by pressing keys corresponding to game controls. Each action updates the latent state and displays the predicted next frame.
+The emulator downloads models from Hugging Face, encodes an initial game frame, and allows you to step through the game's latent space by pressing keys mapped to game controls. Each action updates the latent state and displays the predicted next frame.
 
 ## 🚀 Installation
 
-1. Ensure you have [Miniconda](https://docs.conda.io/en/latest/miniconda.html) installed.
+1. Ensure [Miniconda](https://docs.conda.io/en/latest/miniconda.html) is installed.
 2. Clone this repository and navigate to its directory.
 3. Run:
 
@@ -20,7 +24,7 @@ The project downloads pre-trained models from Hugging Face, encodes an initial g
 
    This will create and activate the `gymnasium-emulator` Conda environment with all dependencies.
 
-4. Copy `.env.example` to `.env` and add your Hugging Face API token:
+4. Copy the example environment file and add your Hugging Face API token:
 
    ```bash
    cp .env.example .env
@@ -29,19 +33,19 @@ The project downloads pre-trained models from Hugging Face, encodes an initial g
 
 ## 🛠️ Usage
 
-1. Ensure the environment is activated:
+1. Make sure the environment is activated:
 
    ```bash
    conda activate gymnasium-emulator
    ```
 
-2. Run the emulator:
+2. Start the emulator:
 
    ```bash
    python main.py
    ```
 
-3. Use the following keys to interact:
+3. Control the emulator using these keys:
 
    - **Z**: A button
    - **X**: B button
@@ -49,7 +53,7 @@ The project downloads pre-trained models from Hugging Face, encodes an initial g
    - **R**: Start
    - **Arrow keys**: Up, Down, Left, Right
 
-   The emulator will display the reconstructed game frame and respond to your inputs in real time.
+   The emulator displays the reconstructed game frame and responds to your inputs in real time.
 
 ## 📄 License
 
