@@ -1,60 +1,100 @@
-# 🕹️ gymnasium-emulator
+<div align="center">
+  <img src="logo.png" alt="gymnasium-emulator" width="256"/>
 
-<p align="center">
-  <img src="logo.png" alt="Logo" width="400"/>
-</p>
+  # gymnasium-emulator
 
-🔹 **A neural emulator for visualizing and interacting with latent dynamics of retro games using pre-trained models.**
+  [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+  [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg)](https://python.org)
+  [![PyTorch](https://img.shields.io/badge/PyTorch-CUDA_11.8-EE4C2C.svg)](https://pytorch.org)
+  [![Hugging Face](https://img.shields.io/badge/Models-Hugging_Face-FFD21E.svg)](https://huggingface.co/tsilva)
 
-## 📖 Overview
+  **🎮 Play retro games through learned latent dynamics—no ROM required 🧠**
 
-Gymnasium Emulator lets you explore the latent state space of classic video games—like Tetris for Game Boy—using deep learning models. It leverages pre-trained autoencoder and dynamics models to reconstruct and predict game frames in real time based on your keyboard input. With a simple Pygame interface, you can interact with learned game dynamics without needing a traditional emulator or ROM.
+  [How It Works](#how-it-works) · [Quick Start](#quick-start) · [Controls](#controls)
+</div>
 
-The emulator downloads models from Hugging Face, encodes an initial game frame, and allows you to step through the game's latent space by pressing keys mapped to game controls. Each action updates the latent state and displays the predicted next frame.
+---
 
-## 🚀 Installation
+## Overview
 
-1. Ensure [Miniconda](https://docs.conda.io/en/latest/miniconda.html) is installed.
-2. Clone this repository and navigate to its directory.
-3. Run:
+Gymnasium Emulator visualizes and interacts with the latent dynamics of retro games using pre-trained deep learning models. Instead of traditional emulation, it uses a convolutional autoencoder to encode game frames into a 32-dimensional latent space and a dynamics model to predict how that state changes with each action.
 
-   ```bash
-   source activate-env.sh
-   ```
+The result: real-time gameplay powered entirely by neural networks.
 
-   This will create and activate the `gymnasium-emulator` Conda environment with all dependencies.
+## How It Works
 
-4. Copy the example environment file and add your Hugging Face API token:
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│  Keyboard   │ ──▶ │   Dynamics   │ ──▶ │   Decoder   │ ──▶ Display
+│   Input     │     │    Model     │     │  (latent→   │
+│ (9 actions) │     │ (Δ latent)   │     │   frame)    │
+└─────────────┘     └──────────────┘     └─────────────┘
+                           │
+                    latent + Δlatent
+                           │
+                    ┌──────▼──────┐
+                    │   Current   │
+                    │   Latent    │
+                    │   State     │
+                    └─────────────┘
+```
 
-   ```bash
-   cp .env.example .env
-   # Edit .env and set HF_TOKEN=your-api-token
-   ```
+- **Autoencoder**: 3-layer convolutional network compresses 80×144 grayscale frames to 32 dimensions
+- **Dynamics Model**: Predicts the *change* in latent space given an action (residual connection)
+- **30 FPS**: Real-time visualization through Pygame
 
-## 🛠️ Usage
+Models are downloaded automatically from Hugging Face at runtime.
 
-1. Make sure the environment is activated:
+## Quick Start
 
-   ```bash
-   conda activate gymnasium-emulator
-   ```
+**Prerequisites**: [Miniconda](https://docs.conda.io/en/latest/miniconda.html), NVIDIA GPU with CUDA support
 
-2. Start the emulator:
+```bash
+# Clone and setup
+git clone https://github.com/tsilva/gymnasium-emulator.git
+cd gymnasium-emulator
 
-   ```bash
-   python main.py
-   ```
+# Create environment and install dependencies
+source activate-env.sh
 
-3. Control the emulator using these keys:
+# Configure Hugging Face token
+cp .env.example .env
+# Edit .env and add: HF_TOKEN=your-token
 
-   - **Z**: A button
-   - **X**: B button
-   - **Q**: Select
-   - **R**: Start
-   - **Arrow keys**: Up, Down, Left, Right
+# Run
+python main.py
+```
 
-   The emulator displays the reconstructed game frame and responds to your inputs in real time.
+## Controls
 
-## 📄 License
+| Key | Action |
+|-----|--------|
+| `Z` | A button |
+| `X` | B button |
+| `Q` | SELECT |
+| `R` | START |
+| `↑` `↓` `←` `→` | D-pad |
 
-This project is licensed under the [MIT License](LICENSE).
+## Requirements
+
+| Component | Requirement |
+|-----------|-------------|
+| Python | 3.11 |
+| GPU | NVIDIA with CUDA 11.8+ |
+| RAM | 8GB+ recommended |
+| Dependencies | PyTorch, Pygame, PIL, NumPy |
+
+## Project Structure
+
+```
+gymnasium-emulator/
+├── main.py           # Neural emulator with model definitions and game loop
+├── start.png         # Initial game frame (Tetris title screen)
+├── environment.yml   # Conda environment specification
+├── activate-env.sh   # Environment setup script
+└── .env.example      # Template for Hugging Face credentials
+```
+
+## License
+
+[MIT](LICENSE) © 2025 Tiago Silva
