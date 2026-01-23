@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo.png" alt="gymnasium-emulator" width="256"/>
+  <img src="logo.png" alt="gymnasium-emulator" width="512"/>
 
   # gymnasium-emulator
 
