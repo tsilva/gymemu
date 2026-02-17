@@ -47,7 +47,7 @@ Models are downloaded automatically from Hugging Face at runtime.
 
 ## Quick Start
 
-**Prerequisites**: [Miniconda](https://docs.conda.io/en/latest/miniconda.html), NVIDIA GPU with CUDA support
+**Prerequisites**: Python 3.11+, NVIDIA GPU with CUDA support
 
 ```bash
 # Clone and setup
@@ -55,7 +55,9 @@ git clone https://github.com/tsilva/gymnasium-emulator.git
 cd gymnasium-emulator
 
 # Create environment and install dependencies
-source activate-env.sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --extra-index-url https://download.pytorch.org/whl/cu118 -e .
 
 # Configure Hugging Face token
 cp .env.example .env
@@ -90,8 +92,7 @@ python main.py
 gymnasium-emulator/
 ├── main.py           # Neural emulator with model definitions and game loop
 ├── start.png         # Initial game frame (Tetris title screen)
-├── environment.yml   # Conda environment specification
-├── activate-env.sh   # Environment setup script
+├── pyproject.toml    # Project metadata and dependencies
 └── .env.example      # Template for Hugging Face credentials
 ```
 

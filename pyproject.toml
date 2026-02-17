@@ -1,0 +1,21 @@
+[project]
+name = "gymnasium-emulator"
+version = "0.1.0"
+description = "Play retro games through learned latent dynamics—no ROM required"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "torch",
+    "numpy",
+    "pillow",
+    "pygame",
+    "python-dotenv",
+    "huggingface_hub",
+    "vizdoom",
+    "ale-py",
+    "gymnasium[atari]",
+    "datasets",
+]
+
+[tool.pip]
+extra-index-url = ["https://download.pytorch.org/whl/cu118"]

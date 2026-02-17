@@ -15,25 +15,17 @@ Models are downloaded from Hugging Face repositories at runtime.
 
 ## Environment Setup
 
-**Create/activate environment:**
+**Create venv and install dependencies:**
 ```bash
-source activate-env.sh
-```
-
-This script:
-- Detects if `gymnasium-emulator` conda environment exists
-- Creates it from `environment.yml` if needed
-- Activates the environment
-
-**Manual activation:**
-```bash
-conda activate gymnasium-emulator
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --extra-index-url https://download.pytorch.org/whl/cu118 -e .
 ```
 
 **Environment configuration:**
-- Python 3.11
+- Python 3.11+
 - PyTorch with CUDA 11.8 support
-- Dependencies: pygame, PIL, numpy, huggingface_hub, datasets, gymnasium[atari]
+- Dependencies defined in `pyproject.toml`
 
 **Required setup:**
 ```bash
