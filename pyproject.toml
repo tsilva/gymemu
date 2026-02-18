@@ -1,5 +1,5 @@
 [project]
-name = "gymnasium-emulator"
+name = "gymemu"
 version = "0.1.0"
 description = "Play retro games through learned latent dynamics—no ROM required"
 requires-python = ">=3.11"

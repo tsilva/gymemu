@@ -1,7 +1,7 @@
 <div align="center">
-  <img src="logo.png" alt="gymnasium-emulator" width="512"/>
+  <img src="logo.png" alt="gymemu" width="512"/>
 
-  # gymnasium-emulator
+  # gymemu
 
   [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
   [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg)](https://python.org)
@@ -51,8 +51,8 @@ Models are downloaded automatically from Hugging Face at runtime.
 
 ```bash
 # Clone and setup
-git clone https://github.com/tsilva/gymnasium-emulator.git
-cd gymnasium-emulator
+git clone https://github.com/tsilva/gymemu.git
+cd gymemu
 
 # Create environment and install dependencies
 python3 -m venv .venv
@@ -89,7 +89,7 @@ python main.py
 ## Project Structure
 
 ```
-gymnasium-emulator/
+gymemu/
 ├── main.py           # Neural emulator with model definitions and game loop
 ├── start.png         # Initial game frame (Tetris title screen)
 ├── pyproject.toml    # Project metadata and dependencies
