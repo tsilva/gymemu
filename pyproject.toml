@@ -11,10 +11,8 @@ dependencies = [
     "pygame",
     "python-dotenv",
     "huggingface_hub",
-    "vizdoom",
-    "ale-py",
-    "gymnasium[atari]",
     "datasets",
+    "tqdm",
 ]
 
 [tool.pip]

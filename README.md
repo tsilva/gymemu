@@ -59,13 +59,64 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install --extra-index-url https://download.pytorch.org/whl/cu118 -e .
 
-# Configure Hugging Face token
+# Configure Hugging Face token (only for pre-trained models)
 cp .env.example .env
 # Edit .env and add: HF_TOKEN=your-token
 
-# Run
+# Run with pre-trained models
 python main.py
 ```
+
+## Training Your Own Models
+
+You can train neural emulator models on any Hugging Face dataset with the same format:
+
+```bash
+# Train on a dataset (e.g., Super Mario Bros)
+python train.py \
+    --dataset tsilva/gymnasium-recorder__SuperMarioBros_Nes_v0 \
+    --epochs 50 \
+    --batch-size 128 \
+    --latent-dim 32 \
+    --image-size 80
+```
+
+This creates two model files in `./models/`:
+- `{dataset}-representation.pt` (autoencoder)
+- `{dataset}-dynamics.pt` (dynamics model)
+
+### Using Trained Models
+
+Update `main.py` to use local models:
+
+```python
+# Line 17 in main.py
+use_local_models = True  # Changed from False
+
+# Line 9 in main.py - use sanitized dataset name
+ds_id = "tsilva__gymnasium-recorder__SuperMarioBros_Nes_v0"
+```
+
+Then run: `python main.py`
+
+### Training Configuration
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--dataset` | Required | Hugging Face dataset ID |
+| `--epochs` | 50 | Training epochs per phase |
+| `--batch-size` | 128 | Batch size |
+| `--latent-dim` | 32 | Latent space dimensionality |
+| `--image-size` | 80 | Input image size (80×80) |
+| `--output-dir` | ./models | Where to save models |
+
+### Two-Phase Training
+
+**Phase 1**: Autoencoder learns to compress game frames to latent space (L1 reconstruction loss)
+
+**Phase 2**: Dynamics model learns to predict latent deltas given actions (MSE loss)
+
+Validation runs every epoch for both phases, with best models saved automatically.
 
 ## Controls
 
@@ -90,10 +141,12 @@ python main.py
 
 ```
 gymemu/
-├── main.py           # Neural emulator with model definitions and game loop
+├── main.py           # Neural emulator inference (real-time gameplay)
+├── train.py          # Training script for autoencoder and dynamics models
 ├── start.png         # Initial game frame (Tetris title screen)
 ├── pyproject.toml    # Project metadata and dependencies
-└── .env.example      # Template for Hugging Face credentials
+├── .env.example      # Template for Hugging Face credentials
+└── models/           # Trained models (created by train.py)
 ```
 
 ## License

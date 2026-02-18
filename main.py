@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
@@ -20,11 +21,18 @@ train_learning_rate = 0.001
 train_drift = 1
 val_epochs = 10
 
+# Model loading configuration
+# Set use_local_models = True to load from ./models/ directory
+# Set use_local_models = False to download from Hugging Face
+use_local_models = False
+models_dir = "./models"
+
 image_channels = 1
 output_channels = 1
-image_height = 144
+image_height = 80
 image_width = 80
 use_bottleneck = True
+
 
 class ConvAutoencoder(nn.Module):
     def __init__(self):
@@ -36,7 +44,7 @@ class ConvAutoencoder(nn.Module):
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
             nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.ReLU()
+            nn.ReLU(),
         )
 
         with torch.no_grad():
@@ -55,7 +63,7 @@ class ConvAutoencoder(nn.Module):
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
             nn.ConvTranspose2d(32, output_channels, kernel_size=4, stride=2, padding=1),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
 
     def encode(self, x):
@@ -81,6 +89,7 @@ class ConvAutoencoder(nn.Module):
         out = self.decode(z_input)
         return out, z
 
+
 class DynamicsModel(nn.Module):
     def __init__(self, z_dim=32, n_actions=9):
         super().__init__()
@@ -90,7 +99,7 @@ class DynamicsModel(nn.Module):
             nn.GELU(),
             nn.Linear(128, 128),
             nn.GELU(),
-            nn.Linear(128, z_dim)
+            nn.Linear(128, z_dim),
         )
         nn.init.orthogonal_(self.net[1].weight)
         nn.init.zeros_(self.net[-1].bias)
@@ -98,32 +107,73 @@ class DynamicsModel(nn.Module):
     def forward(self, z_and_a):
         return self.net(z_and_a)
 
+
 # Model instantiation
 use_bottleneck = model_latent_dim > 0
 input_channels = image_channels
 output_channels = image_channels
 
-representation_model = ConvAutoencoder().to("cuda")
-representation_model = torch.compile(representation_model)
-
-model_path = hf_hub_download(
-    repo_id=f"{ds_id}-representation",
-    filename="model.pt",
+# Device selection: CUDA > MPS (Mac) > CPU
+device = torch.device(
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
 )
-print(f"Model downloaded to: {model_path}")
-representation_model_state_dict = torch.load(model_path)
+print(f"Using device: {device}")
+
+representation_model = ConvAutoencoder().to(device)
+if device.type == "cuda":
+    representation_model = torch.compile(representation_model)
+
+if use_local_models:
+    # Load from local models directory
+    model_path = os.path.join(
+        models_dir, f"{ds_id.replace('/', '__')}-representation.pt"
+    )
+    print(f"Loading local model from: {model_path}")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(
+            f"Local model not found: {model_path}. Train first with train.py"
+        )
+else:
+    # Download from Hugging Face
+    model_path = hf_hub_download(
+        repo_id=f"{ds_id}-representation",
+        filename="model.pt",
+    )
+    print(f"Model downloaded to: {model_path}")
+
+representation_model_state_dict = torch.load(
+    model_path, map_location=device, weights_only=True
+)
 representation_model.load_state_dict(representation_model_state_dict)
 representation_model.eval()
 
-dynamics_model = DynamicsModel(z_dim=model_latent_dim, n_actions=9).to("cuda")
-dynamics_model = torch.compile(dynamics_model)
+dynamics_model = DynamicsModel(z_dim=model_latent_dim, n_actions=9).to(device)
+if device.type == "cuda":
+    dynamics_model = torch.compile(dynamics_model)
 
-model_path = hf_hub_download(
-    repo_id=f"{ds_id}-dynamics",
-    filename="model.pt",
+if use_local_models:
+    # Load from local models directory
+    model_path = os.path.join(models_dir, f"{ds_id.replace('/', '__')}-dynamics.pt")
+    print(f"Loading local model from: {model_path}")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(
+            f"Local model not found: {model_path}. Train first with train.py"
+        )
+else:
+    # Download from Hugging Face
+    model_path = hf_hub_download(
+        repo_id=f"{ds_id}-dynamics",
+        filename="model.pt",
+    )
+    print(f"Model downloaded to: {model_path}")
+
+dynamics_model_state_dict = torch.load(
+    model_path, map_location=device, weights_only=True
 )
-print(f"Model downloaded to: {model_path}")
-dynamics_model_state_dict = torch.load(model_path)
 dynamics_model.load_state_dict(dynamics_model_state_dict)
 dynamics_model.eval()
 
@@ -136,7 +186,9 @@ pygame.display.set_caption("Latent Dynamics Viewer")
 # --- Load and preprocess start.jpg ---
 img = Image.open("start.png").convert("L").resize(win_size)
 img_np = np.array(img, dtype=np.float32) / 255.0  # Normalize to [0,1]
-img_tensor = torch.from_numpy(img_np).unsqueeze(0).unsqueeze(0).to("cuda")  # shape: (1, 1, H, W)
+img_tensor = (
+    torch.from_numpy(img_np).unsqueeze(0).unsqueeze(0).to(device)
+)  # shape: (1, 1, H, W)
 
 # --- Get initial latent vector ---
 with torch.no_grad():
@@ -145,7 +197,9 @@ with torch.no_grad():
 # Render the initial frame (start.png) before the loop
 recon_img = img_np  # Already normalized and loaded
 recon_img_disp = np.clip(recon_img * 255, 0, 255).astype(np.uint8)
-surf = pygame.surfarray.make_surface(np.repeat(recon_img_disp[:, :, None], 3, axis=2).swapaxes(0, 1))
+surf = pygame.surfarray.make_surface(
+    np.repeat(recon_img_disp[:, :, None], 3, axis=2).swapaxes(0, 1)
+)
 screen.blit(surf, (0, 0))
 pygame.display.flip()
 
@@ -179,9 +233,9 @@ while running:
 
     print(action)
 
-    #action = np.array([0, 0, 0, 0, 1, 0, 0, 0, 0])
-    action_tensor = torch.from_numpy(action).unsqueeze(0).to("cuda")  # shape: (1, 9)
-    #print(action_tensor)
+    # action = np.array([0, 0, 0, 0, 1, 0, 0, 0, 0])
+    action_tensor = torch.from_numpy(action).unsqueeze(0).to(device)  # shape: (1, 9)
+    # print(action_tensor)
     z_and_a = torch.cat([latent, action_tensor], dim=1)
 
     with torch.no_grad():
@@ -192,7 +246,9 @@ while running:
         recon_img = np.clip(recon_img * 255, 0, 255).astype(np.uint8)
 
     # Display the frame
-    surf = pygame.surfarray.make_surface(np.repeat(recon_img[:, :, None], 3, axis=2).swapaxes(0, 1))
+    surf = pygame.surfarray.make_surface(
+        np.repeat(recon_img[:, :, None], 3, axis=2).swapaxes(0, 1)
+    )
     screen.blit(surf, (0, 0))
     pygame.display.flip()
     clock.tick(30)  # Limit to 30 FPS
@@ -200,4 +256,3 @@ while running:
     latent = next_latent  # Update latent for next step
 
 pygame.quit()
-
