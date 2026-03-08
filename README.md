@@ -3,152 +3,117 @@
 
   # gymemu
 
-  [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-  [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg)](https://python.org)
-  [![PyTorch](https://img.shields.io/badge/PyTorch-CUDA_11.8-EE4C2C.svg)](https://pytorch.org)
-  [![Hugging Face](https://img.shields.io/badge/Models-Hugging_Face-FFD21E.svg)](https://huggingface.co/tsilva)
-
-  **🎮 Play retro games through learned latent dynamics—no ROM required 🧠**
-
-  [How It Works](#how-it-works) · [Quick Start](#quick-start) · [Controls](#controls)
+  Neural emulator training and playback for retro games recorded with Gymnasium/gymrec.
 </div>
 
----
+## Breakout Status
 
-## Overview
+This repo is now wired for the public dataset
+`tsilva/gymrec__BreakoutNoFrameskip_dash_v4`.
 
-Gymnasium Emulator visualizes and interacts with the latent dynamics of retro games using pre-trained deep learning models. Instead of traditional emulation, it uses a convolutional autoencoder to encode game frames into a 32-dimensional latent space and a dynamics model to predict how that state changes with each action.
+The current Breakout pipeline applies these simplifications before training:
 
-The result: real-time gameplay powered entirely by neural networks.
+- Crop the scoreboard off the top of each frame.
+- Keep only transitions whose playfield background is still black.
+- Convert frames to monochrome with two values: black and white.
+- Treat actions as Atari discrete actions with 4 classes: `NOOP`, `FIRE`, `RIGHT`, `LEFT`.
 
-## How It Works
+Those choices are implemented in shared preprocessing code so training and runtime use the same transform.
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│  Keyboard   │ ──▶ │   Dynamics   │ ──▶ │   Decoder   │ ──▶ Display
-│   Input     │     │    Model     │     │  (latent→   │
-│ (9 actions) │     │ (Δ latent)   │     │   frame)    │
-└─────────────┘     └──────────────┘     └─────────────┘
-                           │
-                    latent + Δlatent
-                           │
-                    ┌──────▼──────┐
-                    │   Current   │
-                    │   Latent    │
-                    │   State     │
-                    └─────────────┘
-```
+## Dataset Notes
 
-- **Autoencoder**: 3-layer convolutional network compresses 80×144 grayscale frames to 32 dimensions
-- **Dynamics Model**: Predicts the *change* in latent space given an action (residual connection)
-- **30 FPS**: Real-time visualization through Pygame
+The Hugging Face dataset currently contains:
 
-Models are downloaded automatically from Hugging Face at runtime.
+- 108,001 frames
+- 1 recorded episode
+- 210x160 image observations
+- `actions` stored as a one-element list containing the discrete action id
 
-## Quick Start
+Because it is a single-episode dataset, `train.py` now does a temporal train/validation split within that episode instead of assigning the whole episode to validation.
 
-**Prerequisites**: Python 3.11+, NVIDIA GPU with CUDA support
+## Setup
 
 ```bash
-# Clone and setup
-git clone https://github.com/tsilva/gymemu.git
-cd gymemu
-
-# Create environment and install dependencies
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --extra-index-url https://download.pytorch.org/whl/cu118 -e .
-
-# Configure Hugging Face token (only for pre-trained models)
-cp .env.example .env
-# Edit .env and add: HF_TOKEN=your-token
-
-# Run with pre-trained models
-python main.py
 ```
 
-## Training Your Own Models
+On Apple Silicon, the code now prefers PyTorch `mps` automatically and uses more conservative default training batches to fit a 16GB unified-memory machine better.
 
-You can train neural emulator models on any Hugging Face dataset with the same format:
+If you plan to pull or publish model artifacts on Hugging Face:
 
 ```bash
-# Train on a dataset (e.g., Super Mario Bros)
+cp .env.example .env
+# add HF_TOKEN=...
+```
+
+## Train Breakout Models
+
+The default training command is now Breakout-oriented:
+
+```bash
 python train.py \
-    --dataset tsilva/gymnasium-recorder__SuperMarioBros_Nes_v0 \
-    --epochs 50 \
-    --batch-size 128 \
-    --latent-dim 32 \
-    --image-size 80
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --game breakout \
+  --epochs 50 \
+  --latent-dim 32 \
+  --image-width 80 \
+  --image-height 96
 ```
 
-This creates two model files in `./models/`:
-- `{dataset}-representation.pt` (autoencoder)
-- `{dataset}-dynamics.pt` (dynamics model)
+For an M1 MacBook Pro with 16GB, the current defaults are tuned to be safer:
 
-### Using Trained Models
+- training batch size defaults to `64`
+- latent encoding batch size defaults to `64`
+- DataLoader workers stay at `0` to avoid macOS multiprocessing memory duplication
+- training and runtime both prefer `mps` over CPU when available
 
-Update `main.py` to use local models:
+Output files are saved in `./models/` as:
 
-```python
-# Line 17 in main.py
-use_local_models = True  # Changed from False
+- `tsilva__gymrec__BreakoutNoFrameskip_dash_v4-representation.pt`
+- `tsilva__gymrec__BreakoutNoFrameskip_dash_v4-dynamics.pt`
 
-# Line 9 in main.py - use sanitized dataset name
-ds_id = "tsilva__gymnasium-recorder__SuperMarioBros_Nes_v0"
+## Run The Emulator
+
+If you omit `--start-image`, the runtime fetches the first valid Breakout frame from the dataset and uses that as the initial latent state. You can still pass a local raw `210x160` Breakout frame if you want a specific start point.
+
+```bash
+python main.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --game breakout \
+  --use-local-models \
+  --models-dir ./models \
+  --image-width 80 \
+  --image-height 96
 ```
 
-Then run: `python main.py`
+Controls:
 
-### Training Configuration
+- `Space`: `FIRE`
+- `Right Arrow`: `RIGHT`
+- `Left Arrow`: `LEFT`
+- no key: `NOOP`
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--dataset` | Required | Hugging Face dataset ID |
-| `--epochs` | 50 | Training epochs per phase |
-| `--batch-size` | 128 | Batch size |
-| `--latent-dim` | 32 | Latent space dimensionality |
-| `--image-size` | 80 | Input image size (80×80) |
-| `--output-dir` | ./models | Where to save models |
+If you omit `--use-local-models`, `main.py` downloads models from:
 
-### Two-Phase Training
+- `tsilva/gymrec__BreakoutNoFrameskip_dash_v4-representation`
+- `tsilva/gymrec__BreakoutNoFrameskip_dash_v4-dynamics`
 
-**Phase 1**: Autoencoder learns to compress game frames to latent space (L1 reconstruction loss)
+## Files
 
-**Phase 2**: Dynamics model learns to predict latent deltas given actions (MSE loss)
+- `train.py`: trains the autoencoder and latent dynamics model
+- `main.py`: runs the neural emulator in Pygame
+- `game_config.py`: per-game preprocessing/action metadata
+- `preprocessing.py`: shared crop, validation, binarization, and action encoding
 
-Validation runs every epoch for both phases, with best models saved automatically.
+## Notes
 
-## Controls
-
-| Key | Action |
-|-----|--------|
-| `Z` | A button |
-| `X` | B button |
-| `Q` | SELECT |
-| `R` | START |
-| `↑` `↓` `←` `→` | D-pad |
-
-## Requirements
-
-| Component | Requirement |
-|-----------|-------------|
-| Python | 3.11 |
-| GPU | NVIDIA with CUDA 11.8+ |
-| RAM | 8GB+ recommended |
-| Dependencies | PyTorch, Pygame, PIL, NumPy |
-
-## Project Structure
-
-```
-gymemu/
-├── main.py           # Neural emulator inference (real-time gameplay)
-├── train.py          # Training script for autoencoder and dynamics models
-├── start.png         # Initial game frame (Tetris title screen)
-├── pyproject.toml    # Project metadata and dependencies
-├── .env.example      # Template for Hugging Face credentials
-└── models/           # Trained models (created by train.py)
-```
+- CUDA is still the intended fast path for training and playback.
+- Apple Silicon training/runtime use MPS automatically, with memory-oriented defaults for 16GB machines.
+- The runtime predicts latent deltas, then advances state with `latent = latent + delta`.
+- The corrupted magenta tail seen in the Breakout recording is filtered out during dataset ingestion.
 
 ## License
 
-[MIT](LICENSE) © 2025 Tiago Silva
+[MIT](LICENSE)
