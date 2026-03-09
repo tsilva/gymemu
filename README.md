@@ -81,6 +81,16 @@ cp .env.example .env
 # add HF_TOKEN=...
 ```
 
+`train.py` now also calls `load_dotenv()` on startup, so the same `.env` file can
+optionally enable Weights & Biases logging with:
+
+- `WANDB_MODE=online`, `offline`, or `disabled` (default)
+- `WANDB_PROJECT=gymemu` by default
+- optional `WANDB_ENTITY`, `WANDB_API_KEY`, `WANDB_RUN_NAME`, `WANDB_TAGS`, and `WANDB_NOTES`
+
+W&B auto-enables when `WANDB_MODE` is `online` or `offline`, or when
+`WANDB_API_KEY` is present. Otherwise training stays local-only.
+
 ## Train Breakout Models
 
 The default training command is now Breakout-oriented:
@@ -113,6 +123,21 @@ python train.py \
 `train.py` now monitors validation loss for both phases, saves the best checkpoint, and
 stops early after 5 non-improving epochs by default. Use
 `--early-stopping-patience 0` to disable this.
+
+When W&B is enabled, the trainer logs:
+
+- dataset health metrics under `data/*`
+- batch and epoch optimization metrics under `autoencoder/*`, `latent_dynamics/*`, or `pixel_dynamics/*`
+- fixed validation media panels so scalar changes can be compared against reconstructions and rollouts
+
+Offline example:
+
+```bash
+WANDB_MODE=offline WANDB_PROJECT=gymemu-dev python3 train.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --game breakout \
+  --epochs 1
+```
 
 For an M1 MacBook Pro with 16GB, the current defaults are tuned to be safer:
 

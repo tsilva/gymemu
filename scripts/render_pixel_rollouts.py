@@ -11,6 +11,7 @@ from pixel_feedback import (
     clear_ball_like_components,
     feedback_from_logits,
     init_breakout_ball_state,
+    init_breakout_paddle_state,
     overlay_breakout_ball,
     paddle_motion_mask,
     shift_paddle_frames,
@@ -165,8 +166,10 @@ def rollout_policy(
         1,
     )
     ball_state = None
+    paddle_state = None
     if breakout_ball_enabled:
         initial_binary = (history[0, -1] >= 0.5).float()
+        paddle_state = init_breakout_paddle_state(initial_binary)
         ball_state = init_breakout_ball_state(initial_binary)
         if ball_state is not None and ball_state.attached:
             for history_index in range(history.size(1)):
@@ -183,10 +186,11 @@ def rollout_policy(
         with torch.inference_mode():
             if breakout_ball_enabled:
                 action_id = int(action.argmax(dim=1).item())
-                next_binary_frame, ball_state, _ = step_breakout_scene(
+                next_binary_frame, ball_state, paddle_state, _ = step_breakout_scene(
                     history[0, -1],
                     action_id,
                     ball_state,
+                    paddle_state,
                     shift_pixels=paddle_shift,
                     launch_action_id=launch_action_id,
                     right_wall=history.size(-1) - 5,
