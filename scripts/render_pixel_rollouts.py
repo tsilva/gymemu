@@ -7,19 +7,10 @@ from datasets import load_dataset
 from PIL import Image, ImageDraw
 
 from game_config import BREAKOUT_CONFIG, infer_game_config
-from pixel_feedback import (
-    clear_ball_like_components,
-    feedback_from_logits,
-    init_breakout_ball_state,
-    init_breakout_paddle_state,
-    overlay_breakout_ball,
-    paddle_motion_mask,
-    shift_paddle_frames,
-    static_noop_mask,
-    step_breakout_scene,
-)
+from pixel_feedback import feedback_from_logits
 from pixel_model import FrameDynamicsModel
 from preprocessing import has_valid_black_background, preprocess_frame
+from spatial_model import SpatialLatentWorldModel, load_spatial_model_state_dict
 
 
 def parse_args():
@@ -29,29 +20,18 @@ def parse_args():
     parser.add_argument("--dataset", default=BREAKOUT_CONFIG.dataset_id)
     parser.add_argument("--game", default=BREAKOUT_CONFIG.name)
     parser.add_argument("--model-path", required=True)
+    parser.add_argument(
+        "--dynamics-mode",
+        choices=("pixel", "spatial"),
+        default="pixel",
+    )
     parser.add_argument("--history-length", type=int, default=4)
     parser.add_argument("--image-width", type=int, default=80)
     parser.add_argument("--image-height", type=int, default=96)
     parser.add_argument("--steps", type=int, default=16)
     parser.add_argument("--pixel-refine-blocks", type=int, default=0)
-    parser.add_argument(
-        "--pixel-static-noop-hold",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument("--pixel-static-history-threshold", type=float, default=40.0)
-    parser.add_argument(
-        "--pixel-static-predicted-diff-threshold",
-        type=float,
-        default=4.0,
-    )
-    parser.add_argument(
-        "--pixel-paddle-motion-hold",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument("--pixel-paddle-motion-threshold", type=float, default=24.0)
-    parser.add_argument("--pixel-paddle-shift", type=int, default=2)
+    parser.add_argument("--spatial-latent-channels", type=int, default=32)
+    parser.add_argument("--spatial-refine-blocks", type=int, default=4)
     parser.add_argument(
         "--feedback",
         choices=("soft", "hard"),
@@ -63,6 +43,12 @@ def parse_args():
         type=int,
         default=0,
         help="Skip this many valid history windows before choosing the rollout seed",
+    )
+    parser.add_argument(
+        "--prefer-moving-seed",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Prefer a seed window with recent motion instead of the first valid static window",
     )
     parser.add_argument(
         "--output",
@@ -129,7 +115,9 @@ def fetch_seed_history(args, game_config):
         if args.history_length >= 2:
             motion_pixels = np.abs(window[-1] - window[-2]).sum()
 
-        if valid_window_index >= args.start_valid_offset and motion_pixels > 0:
+        if valid_window_index >= args.start_valid_offset and (
+            motion_pixels > 0 or not args.prefer_moving_seed
+        ):
             return window
 
         valid_window_index += 1
@@ -143,90 +131,20 @@ def fetch_seed_history(args, game_config):
 
 def rollout_policy(
     model,
-    game_config,
     seed_history,
     policy_actions,
     steps,
     feedback,
-    static_noop_hold,
-    static_history_threshold,
-    static_predicted_diff_threshold,
-    paddle_motion_hold,
-    paddle_motion_threshold,
-    paddle_shift,
 ):
     history = torch.from_numpy(seed_history).unsqueeze(0).float()
-    breakout_ball_enabled = game_config.name == BREAKOUT_CONFIG.name
-    launch_action_id = next(
-        (
-            binding.action_id
-            for binding in game_config.key_bindings
-            if binding.label == "FIRE"
-        ),
-        1,
-    )
-    ball_state = None
-    paddle_state = None
-    if breakout_ball_enabled:
-        initial_binary = (history[0, -1] >= 0.5).float()
-        paddle_state = init_breakout_paddle_state(initial_binary)
-        ball_state = init_breakout_ball_state(initial_binary)
-        if ball_state is not None and ball_state.attached:
-            for history_index in range(history.size(1)):
-                cleaned_frame = clear_ball_like_components(history[0, history_index])
-                history[0, history_index] = overlay_breakout_ball(
-                    cleaned_frame,
-                    ball_state,
-                )
     frames = [history[0, -1].cpu().numpy()]
 
     for step in range(steps):
         action_index = min(step, len(policy_actions) - 1)
         action = torch.from_numpy(policy_actions[action_index]).unsqueeze(0).float()
         with torch.inference_mode():
-            if breakout_ball_enabled:
-                action_id = int(action.argmax(dim=1).item())
-                next_binary_frame, ball_state, paddle_state, _ = step_breakout_scene(
-                    history[0, -1],
-                    action_id,
-                    ball_state,
-                    paddle_state,
-                    shift_pixels=paddle_shift,
-                    launch_action_id=launch_action_id,
-                    right_wall=history.size(-1) - 5,
-                    bottom_wall=history.size(-2) - 1,
-                )
-                binary = next_binary_frame.unsqueeze(0).unsqueeze(0)
-                next_input = binary
-            else:
-                current_frame = history[:, -1:, :, :]
-                current_binary = (current_frame >= 0.5).float()
-                logits = model(history, action)
-                _, binary, next_input = feedback_from_logits(logits, feedback)
-                if static_noop_hold:
-                    hold_mask = static_noop_mask(history, action, static_history_threshold)
-                    if bool(hold_mask.any()):
-                        predicted_diff = (binary - current_binary).abs().sum(dim=(1, 2, 3))
-                        hold_mask = hold_mask & (
-                            predicted_diff <= static_predicted_diff_threshold
-                        )
-                        if bool(hold_mask.any()):
-                            hold_mask = hold_mask[:, None, None, None]
-                            binary = torch.where(hold_mask, current_binary, binary)
-                            next_input = torch.where(hold_mask, current_frame, next_input)
-                if paddle_motion_hold:
-                    paddle_mask = paddle_motion_mask(history, action, paddle_motion_threshold)
-                    if bool(paddle_mask.any()):
-                        shifted_binary, applied_mask = shift_paddle_frames(
-                            current_binary,
-                            action,
-                            shift_pixels=paddle_shift,
-                        )
-                        paddle_mask = paddle_mask & applied_mask
-                        if bool(paddle_mask.any()):
-                            paddle_mask = paddle_mask[:, None, None, None]
-                            binary = torch.where(paddle_mask, shifted_binary, binary)
-                            next_input = torch.where(paddle_mask, shifted_binary, next_input)
+            logits = model(history, action)
+            _, binary, next_input = feedback_from_logits(logits, feedback)
         history = torch.cat([history[:, 1:, :, :], next_input], dim=1)
         frames.append(binary[0, 0].cpu().numpy())
 
@@ -276,12 +194,24 @@ def frame_mae(frame_a, frame_b):
 def main():
     args = parse_args()
     game_config = infer_game_config(dataset_id=args.dataset, game=args.game)
-    model = FrameDynamicsModel(
-        history_length=args.history_length,
-        n_actions=game_config.n_actions,
-        refine_blocks=args.pixel_refine_blocks,
-    )
-    model.load_state_dict(torch.load(args.model_path, map_location="cpu", weights_only=True))
+    if args.dynamics_mode == "pixel":
+        model = FrameDynamicsModel(
+            history_length=args.history_length,
+            n_actions=game_config.n_actions,
+            refine_blocks=args.pixel_refine_blocks,
+        )
+    else:
+        model = SpatialLatentWorldModel(
+            history_length=args.history_length,
+            n_actions=game_config.n_actions,
+            latent_channels=args.spatial_latent_channels,
+            refine_blocks=args.spatial_refine_blocks,
+        )
+    state_dict = torch.load(args.model_path, map_location="cpu", weights_only=True)
+    if args.dynamics_mode == "spatial":
+        load_spatial_model_state_dict(model, state_dict)
+    else:
+        model.load_state_dict(state_dict)
     model.eval()
 
     seed_history = fetch_seed_history(args, game_config)
@@ -289,17 +219,10 @@ def main():
     rollouts = {
         label: rollout_policy(
             model,
-            game_config,
             seed_history,
             actions,
             args.steps,
             args.feedback,
-            args.pixel_static_noop_hold,
-            args.pixel_static_history_threshold,
-            args.pixel_static_predicted_diff_threshold,
-            args.pixel_paddle_motion_hold,
-            args.pixel_paddle_motion_threshold,
-            args.pixel_paddle_shift,
         )
         for label, actions in policies.items()
     }

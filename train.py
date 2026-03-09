@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_dataset
 from dotenv import load_dotenv
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from tqdm import tqdm
 
 from dataset_utils import infer_history_length
@@ -24,7 +24,7 @@ from game_config import BREAKOUT_CONFIG, infer_game_config
 from pixel_feedback import feedback_from_logits
 from pixel_model import FrameDynamicsModel
 from preprocessing import encode_action, has_valid_black_background, preprocess_frame
-from spatial_model import SpatialLatentWorldModel
+from spatial_model import SpatialLatentWorldModel, load_spatial_model_state_dict
 from wandb_utils import TrainingTracker, make_image_grid
 
 # =============================================================================
@@ -53,11 +53,17 @@ EARLY_STOPPING_MIN_DELTA = 0.0
 MAX_FOREGROUND_LOSS_WEIGHT = 64.0
 DICE_LOSS_WEIGHT = 1.0
 PIXEL_CHANGE_LOSS_WEIGHT = 24.0
+PIXEL_CHANGE_MAP_LOSS_WEIGHT = 32.0
+PIXEL_CHANGE_BCE_LOSS_WEIGHT = 4.0
+PIXEL_CHANGE_DICE_LOSS_WEIGHT = 1.0
 PIXEL_UNROLL_STEPS = 4
 PIXEL_FEEDBACK_MODE = "soft"
 PIXEL_REFINE_BLOCKS = 0
 SPATIAL_LATENT_CHANNELS = 32
 SPATIAL_REFINE_BLOCKS = 4
+RARE_ACTION_SAMPLING_POWER = 0.5
+MAX_SEQUENCE_SAMPLE_WEIGHT = 8.0
+ROLL_OUT_SAMPLES_PER_EPOCH = 1024
 
 GAME_CONFIG = BREAKOUT_CONFIG
 N_ACTIONS = GAME_CONFIG.n_actions
@@ -152,6 +158,42 @@ def action_fraction_metrics(prefix, histogram):
         denominator = total if total > 0 else 1
         metrics[f"{prefix}/action_{action_id}"] = count / denominator
     return metrics
+
+
+def compute_sequence_sample_weights(
+    sequences,
+    n_actions,
+    rarity_power=RARE_ACTION_SAMPLING_POWER,
+    max_weight=MAX_SEQUENCE_SAMPLE_WEIGHT,
+):
+    if not sequences:
+        return None, None
+
+    action_hist = np.zeros(n_actions, dtype=np.float64)
+    for _, action_seq, _ in sequences:
+        action_ids = action_seq.argmax(axis=1)
+        np.add.at(action_hist, action_ids, 1)
+
+    total = action_hist.sum()
+    if total <= 0:
+        return None, None
+
+    action_freq = action_hist / total
+    base_freq = action_freq[action_freq > 0].max()
+    action_weights = np.ones(n_actions, dtype=np.float64)
+    nonzero_mask = action_freq > 0
+    action_weights[nonzero_mask] = np.clip(
+        (base_freq / action_freq[nonzero_mask]) ** rarity_power,
+        1.0,
+        max_weight,
+    )
+
+    sequence_weights = []
+    for _, action_seq, _ in sequences:
+        action_ids = action_seq.argmax(axis=1)
+        sequence_weights.append(float(action_weights[action_ids].max()))
+
+    return torch.as_tensor(sequence_weights, dtype=torch.double), action_weights
 
 
 def sequence_action_fraction_metrics(train_sequences, val_sequences):
@@ -1045,17 +1087,39 @@ def pixel_dynamics_components(logits, target, current_frame):
     weights = 1.0 + (foreground_weight - 1.0) * target + PIXEL_CHANGE_LOSS_WEIGHT * change_mask
     probs = torch.sigmoid(logits)
     binary = (probs >= 0.5).float()
+    predicted_change = (probs - current_frame).abs().clamp(1e-4, 1.0 - 1e-4)
+    change_weights = 1.0 + PIXEL_CHANGE_MAP_LOSS_WEIGHT * change_mask
+    change_bce = F.binary_cross_entropy(
+        predicted_change,
+        change_mask,
+        weight=change_weights,
+    )
+    change_intersection = (predicted_change * change_mask).sum(dim=(1, 2, 3))
+    change_union = predicted_change.sum(dim=(1, 2, 3)) + change_mask.sum(dim=(1, 2, 3))
+    change_dice = ((2.0 * change_intersection + 1e-6) / (change_union + 1e-6)).mean()
     intersection = (binary * target).sum(dim=(1, 2, 3))
     union = binary.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
     dice = ((2.0 * intersection + 1e-6) / (union + 1e-6)).mean()
     foreground_pred_ratio = probs.mean()
     foreground_target_ratio = target.mean()
+    loss_bce = F.binary_cross_entropy_with_logits(logits, target, weight=weights)
+    loss_total = (
+        loss_bce
+        + PIXEL_CHANGE_BCE_LOSS_WEIGHT * change_bce
+        + PIXEL_CHANGE_DICE_LOSS_WEIGHT * (1.0 - change_dice)
+    )
     return {
-        "loss_total": F.binary_cross_entropy_with_logits(logits, target, weight=weights),
+        "loss_total": loss_total,
+        "loss_frame_bce": loss_bce,
+        "loss_change_bce": change_bce,
+        "loss_change_dice": 1.0 - change_dice,
         "foreground_weight_mean": foreground_weight.mean(),
         "change_weight_mean": change_mask.mean(),
+        "change_target_ratio": change_mask.mean(),
+        "change_pred_ratio": predicted_change.mean(),
         "weight_mean": weights.mean(),
         "dice": dice,
+        "change_dice": change_dice,
         "foreground_pred_ratio": foreground_pred_ratio,
         "foreground_target_ratio": foreground_target_ratio,
         "foreground_ratio_error": mean_absolute_ratio(
@@ -1465,15 +1529,37 @@ def train_frame_rollout_phase(
     feedback_mode,
     tracker_prefix,
     artifact_suffix,
+    rollout_samples_per_epoch,
     tracker=None,
 ):
     train_dataset = PixelRolloutDataset(train_sequences)
     val_dataset = PixelRolloutDataset(val_sequences)
+    train_sampler = None
+    train_sequence_weights, action_sample_weights = compute_sequence_sample_weights(
+        train_sequences,
+        N_ACTIONS,
+    )
+    if train_sequence_weights is not None:
+        samples_per_epoch = len(train_sequence_weights)
+        if rollout_samples_per_epoch > 0:
+            samples_per_epoch = min(samples_per_epoch, rollout_samples_per_epoch)
+        train_sampler = WeightedRandomSampler(
+            weights=train_sequence_weights,
+            num_samples=samples_per_epoch,
+            replacement=True,
+        )
+        action_weight_summary = ", ".join(
+            f"a{action_id}={action_sample_weights[action_id]:.2f}"
+            for action_id in range(len(action_sample_weights))
+        )
+        print(f"Sequence sampling weights: {action_weight_summary}")
+        print(f"Rollout samples per epoch: {train_sampler.num_samples}")
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=TRAIN_BATCH_SIZE,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         **dataloader_kwargs(device),
     )
     val_loader = DataLoader(
@@ -1572,6 +1658,10 @@ def train_frame_rollout_phase(
                             "train/loss_last_over_first": batch_metrics["loss_last_over_first"],
                             "train/dice_step_1": batch_metrics["dice_step_1"],
                             "train/dice_step_last": batch_metrics["dice_step_last"],
+                            "train/change_dice": batch_metrics["change_dice"],
+                            "train/loss_frame_bce": batch_metrics["loss_frame_bce"],
+                            "train/loss_change_bce": batch_metrics["loss_change_bce"],
+                            "train/loss_change_dice": batch_metrics["loss_change_dice"],
                             "train/foreground_ratio_error": batch_metrics[
                                 "foreground_ratio_error"
                             ],
@@ -1579,6 +1669,8 @@ def train_frame_rollout_phase(
                                 "foreground_weight_mean"
                             ],
                             "train/change_weight_mean": batch_metrics["change_weight_mean"],
+                            "train/change_target_ratio": batch_metrics["change_target_ratio"],
+                            "train/change_pred_ratio": batch_metrics["change_pred_ratio"],
                             "train/weight_mean": batch_metrics["weight_mean"],
                             "train/grad_norm": grad_norm,
                             "train/lr": optimizer.param_groups[0]["lr"],
@@ -1806,6 +1898,7 @@ def train_pixel_dynamics_phase(
         pixel_feedback_mode,
         tracker_prefix="pixel_dynamics",
         artifact_suffix="pixel-dynamics",
+        rollout_samples_per_epoch=ROLL_OUT_SAMPLES_PER_EPOCH,
         tracker=tracker,
     )
     print(f"\nPhase 1 complete. Best model saved to: {result['best_model_path']}")
@@ -1843,14 +1936,20 @@ def train_spatial_dynamics_phase(
         device,
     )
     if spatial_dynamics_path:
-        load_result = model.load_state_dict(
+        load_result = load_spatial_model_state_dict(
+            model,
             torch.load(spatial_dynamics_path, map_location=device, weights_only=True),
-            strict=spatial_refine_blocks == SPATIAL_REFINE_BLOCKS,
         )
         print(f"Loaded spatial dynamics model from: {spatial_dynamics_path}")
-        if spatial_refine_blocks != SPATIAL_REFINE_BLOCKS:
-            print(f"Missing keys after partial load: {len(load_result.missing_keys)}")
-            print(f"Unexpected keys after partial load: {len(load_result.unexpected_keys)}")
+        for note in load_result["notes"]:
+            print(f"  -> {note}")
+        if load_result["missing_keys"]:
+            print(f"Missing keys after partial load: {len(load_result['missing_keys'])}")
+        if load_result["unexpected_keys"]:
+            print(
+                "Unexpected keys after partial load: "
+                f"{len(load_result['unexpected_keys'])}"
+            )
 
     result = train_frame_rollout_phase(
         model,
@@ -1864,6 +1963,7 @@ def train_spatial_dynamics_phase(
         pixel_feedback_mode,
         tracker_prefix="spatial_dynamics",
         artifact_suffix="spatial-dynamics",
+        rollout_samples_per_epoch=ROLL_OUT_SAMPLES_PER_EPOCH,
         tracker=tracker,
     )
     print(f"\nPhase 1 complete. Best model saved to: {result['best_model_path']}")
@@ -1881,6 +1981,7 @@ def main():
     global GAME_CONFIG, MODEL_LATENT_DIM, IMAGE_HEIGHT, IMAGE_WIDTH, TRAIN_BATCH_SIZE
     global TRAIN_N_EPOCHS, N_ACTIONS, ENCODE_BATCH_SIZE, HISTORY_LENGTH
     global EARLY_STOPPING_PATIENCE, EARLY_STOPPING_MIN_DELTA, TRAIN_LEARNING_RATE
+    global ROLL_OUT_SAMPLES_PER_EPOCH
 
     parser = argparse.ArgumentParser(description="Train neural emulator models")
     parser.add_argument(
@@ -1971,6 +2072,12 @@ def main():
         help="Keep every Nth training sequence after preprocessing to reduce redundancy",
     )
     parser.add_argument(
+        "--rollout-samples-per-epoch",
+        type=int,
+        default=ROLL_OUT_SAMPLES_PER_EPOCH,
+        help="Number of weighted rollout windows to sample per training epoch for pixel/spatial modes",
+    )
+    parser.add_argument(
         "--pixel-unroll-steps",
         type=int,
         default=PIXEL_UNROLL_STEPS,
@@ -2054,6 +2161,7 @@ def main():
     TRAIN_N_EPOCHS = args.epochs
     EARLY_STOPPING_PATIENCE = args.early_stopping_patience
     EARLY_STOPPING_MIN_DELTA = args.early_stopping_min_delta
+    ROLL_OUT_SAMPLES_PER_EPOCH = args.rollout_samples_per_epoch
 
     # Sanitize dataset name for filename
     dataset_name = args.dataset.replace("/", "__")
@@ -2079,6 +2187,7 @@ def main():
     print(f"Learning rate: {TRAIN_LEARNING_RATE}")
     print(f"Encode batch size: {ENCODE_BATCH_SIZE}")
     print(f"Sequence stride: {args.sequence_stride}")
+    print(f"Rollout samples per epoch: {ROLL_OUT_SAMPLES_PER_EPOCH}")
     print(f"Pixel unroll steps: {args.pixel_unroll_steps}")
     print(f"Pixel feedback mode: {args.pixel_feedback_mode}")
     print(f"Pixel refine blocks: {args.pixel_refine_blocks}")
