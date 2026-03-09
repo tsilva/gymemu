@@ -286,13 +286,18 @@ def advance_breakout_ball_state(
     right_wall: int = 75,
     top_wall: int = 0,
     bottom_wall: int = 95,
+    brick_top: int = 19,
+    brick_bottom: int = 36,
 ):
     paddle = detect_paddle_span(frame)
     if ball_state is None:
-        return init_breakout_ball_state(
+        return (
+            init_breakout_ball_state(
+                frame,
+                launch_vx=launch_vx,
+                launch_vy=launch_vy,
+            ),
             frame,
-            launch_vx=launch_vx,
-            launch_vy=launch_vy,
         )
 
     if ball_state.attached:
@@ -300,10 +305,32 @@ def advance_breakout_ball_state(
             ball_state.x = round(paddle["center"])
             ball_state.y = min(y for y, _, _ in paddle["rows"]) - 1
         if action_id != launch_action_id:
-            return ball_state
+            return ball_state, frame
         ball_state.attached = False
         ball_state.vx = launch_vx
         ball_state.vy = launch_vy
+
+    def has_brick_pixel(x: int, y: int):
+        if not (left_wall < x < right_wall):
+            return False
+        if y < brick_top or y > brick_bottom:
+            return False
+        for dy in (0, 1):
+            yy = y + dy
+            if brick_top <= yy <= brick_bottom and frame[yy, x] > 0.5:
+                return True
+        return False
+
+    def clear_brick_patch(x: int, y: int):
+        if y < brick_top or y > brick_bottom:
+            return frame
+        out = frame.clone()
+        x0 = max(left_wall + 1, x - 3)
+        x1 = min(right_wall - 1, x + 3)
+        y0 = max(brick_top, y - 1)
+        y1 = min(brick_bottom, y + 1)
+        out[y0 : y1 + 1, x0 : x1 + 1] = 0.0
+        return out
 
     next_x = ball_state.x + ball_state.vx
     next_y = ball_state.y + ball_state.vy
@@ -318,6 +345,21 @@ def advance_breakout_ball_state(
     if next_y < top_wall:
         next_y = top_wall
         ball_state.vy = abs(ball_state.vy)
+
+    hit_xy = has_brick_pixel(next_x, next_y)
+    if hit_xy:
+        hit_x = has_brick_pixel(next_x, ball_state.y)
+        hit_y = has_brick_pixel(ball_state.x, next_y)
+        frame = clear_brick_patch(next_x, next_y)
+        if hit_x and not hit_y:
+            ball_state.vx = -ball_state.vx
+        elif hit_y and not hit_x:
+            ball_state.vy = -ball_state.vy
+        else:
+            ball_state.vx = -ball_state.vx
+            ball_state.vy = -ball_state.vy
+        next_x = ball_state.x + ball_state.vx
+        next_y = ball_state.y + ball_state.vy
 
     if paddle is not None and ball_state.vy > 0:
         paddle_top = min(y for y, _, _ in paddle["rows"])
@@ -337,12 +379,12 @@ def advance_breakout_ball_state(
             ball_state.y = min(y for y, _, _ in paddle["rows"]) - 1
             ball_state.vx = launch_vx
             ball_state.vy = launch_vy
-            return ball_state
-        return None
+            return ball_state, frame
+        return None, frame
 
     ball_state.x = next_x
     ball_state.y = next_y
-    return ball_state
+    return ball_state, frame
 
 
 def overlay_breakout_ball(frame: torch.Tensor, ball_state: BreakoutBallState | None):
@@ -367,6 +409,90 @@ def erase_breakout_ball(frame: torch.Tensor, ball_state: BreakoutBallState | Non
         if 0 <= y < out.size(0) and 0 <= ball_state.x < out.size(1):
             out[y, ball_state.x] = 0.0
     return out
+
+
+def shift_paddle_frame(
+    frame: torch.Tensor,
+    action_id: int,
+    shift_pixels: int = 2,
+    paddle_top: int = 83,
+    paddle_bottom: int = 88,
+    playfield_left: int = 4,
+    playfield_right: int = 75,
+    min_width: int = 4,
+    max_width: int = 14,
+):
+    if action_id == 2:
+        delta = shift_pixels
+    elif action_id == 3:
+        delta = -shift_pixels
+    else:
+        return frame
+
+    out = frame.clone()
+    paddle = detect_paddle_span(
+        out,
+        paddle_top=paddle_top,
+        paddle_bottom=paddle_bottom,
+        playfield_left=playfield_left,
+        playfield_right=playfield_right,
+        min_width=min_width,
+        max_width=max_width,
+    )
+    if paddle is None:
+        return frame
+
+    width = paddle["end"] - paddle["start"] + 1
+    new_start = min(max(paddle["start"] + delta, playfield_left), playfield_right - width + 1)
+    new_end = new_start + width - 1
+
+    for y, start, end in paddle["rows"]:
+        out[y, start : end + 1] = 0
+        out[y, new_start : new_end + 1] = 1
+
+    return out
+
+
+def step_breakout_scene(
+    frame: torch.Tensor,
+    action_id: int,
+    ball_state: BreakoutBallState | None,
+    shift_pixels: int = 2,
+    launch_action_id: int = 1,
+    left_wall: int = 4,
+    right_wall: int = 75,
+    top_wall: int = 0,
+    bottom_wall: int = 95,
+    brick_top: int = 19,
+    brick_bottom: int = 36,
+):
+    scene = erase_breakout_ball(frame, ball_state)
+    scene = clear_ball_like_components(
+        scene,
+        playfield_left=left_wall,
+        playfield_right=right_wall,
+    )
+    scene = shift_paddle_frame(
+        scene,
+        action_id,
+        shift_pixels=shift_pixels,
+        playfield_left=left_wall,
+        playfield_right=right_wall,
+    )
+    ball_state, scene = advance_breakout_ball_state(
+        ball_state,
+        action_id,
+        scene,
+        launch_action_id=launch_action_id,
+        left_wall=left_wall,
+        right_wall=right_wall,
+        top_wall=top_wall,
+        bottom_wall=bottom_wall,
+        brick_top=brick_top,
+        brick_bottom=brick_bottom,
+    )
+    next_frame = overlay_breakout_ball(scene, ball_state)
+    return next_frame, ball_state, scene
 
 
 def shift_paddle_frames(
