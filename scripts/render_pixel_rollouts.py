@@ -8,15 +8,14 @@ from PIL import Image, ImageDraw
 
 from game_config import BREAKOUT_CONFIG, infer_game_config
 from pixel_feedback import (
-    advance_breakout_ball_state,
     clear_ball_like_components,
-    erase_breakout_ball,
     feedback_from_logits,
     init_breakout_ball_state,
     overlay_breakout_ball,
     paddle_motion_mask,
     shift_paddle_frames,
     static_noop_mask,
+    step_breakout_scene,
 )
 from pixel_model import FrameDynamicsModel
 from preprocessing import has_valid_black_background, preprocess_frame
@@ -83,6 +82,10 @@ def build_policies(game_config, n_actions):
     labels_to_ids = {binding.label: binding.action_id for binding in game_config.key_bindings}
     if "FIRE" in labels_to_ids:
         policies.append(("FIRE", [labels_to_ids["FIRE"]] + [0]))
+    if "FIRE" in labels_to_ids and "RIGHT" in labels_to_ids:
+        policies.append(("FIRE+RIGHT", [labels_to_ids["FIRE"]] + [labels_to_ids["RIGHT"]]))
+    if "FIRE" in labels_to_ids and "LEFT" in labels_to_ids:
+        policies.append(("FIRE+LEFT", [labels_to_ids["FIRE"]] + [labels_to_ids["LEFT"]]))
     if "RIGHT" in labels_to_ids:
         policies.append(("RIGHT", [labels_to_ids["RIGHT"]]))
     if "LEFT" in labels_to_ids:
@@ -178,81 +181,48 @@ def rollout_policy(
         action_index = min(step, len(policy_actions) - 1)
         action = torch.from_numpy(policy_actions[action_index]).unsqueeze(0).float()
         with torch.inference_mode():
-            current_frame = history[:, -1:, :, :]
-            current_binary = (current_frame >= 0.5).float()
-            deterministic_binary_frame = current_binary[0, 0]
-            deterministic_input_frame = current_frame[0, 0]
-            logits = model(history, action)
-            _, binary, next_input = feedback_from_logits(logits, feedback)
-            if static_noop_hold:
-                hold_mask = static_noop_mask(history, action, static_history_threshold)
-                if bool(hold_mask.any()):
-                    predicted_diff = (binary - current_binary).abs().sum(dim=(1, 2, 3))
-                    hold_mask = hold_mask & (
-                        predicted_diff <= static_predicted_diff_threshold
-                    )
-                    if bool(hold_mask.any()):
-                        hold_mask = hold_mask[:, None, None, None]
-                        binary = torch.where(hold_mask, current_binary, binary)
-                        next_input = torch.where(hold_mask, current_frame, next_input)
-            if paddle_motion_hold:
-                paddle_mask = paddle_motion_mask(history, action, paddle_motion_threshold)
-                if bool(paddle_mask.any()):
-                    shifted_binary, applied_mask = shift_paddle_frames(
-                        current_binary,
-                        action,
-                        shift_pixels=paddle_shift,
-                    )
-                    paddle_mask = paddle_mask & applied_mask
-                    if bool(paddle_mask.any()):
-                        paddle_mask = paddle_mask[:, None, None, None]
-                        deterministic_binary_frame = shifted_binary[0, 0]
-                        deterministic_input_frame = shifted_binary[0, 0]
-                        binary = torch.where(paddle_mask, shifted_binary, binary)
-                        next_input = torch.where(paddle_mask, shifted_binary, next_input)
             if breakout_ball_enabled:
                 action_id = int(action.argmax(dim=1).item())
-                attached_ball = ball_state is not None and ball_state.attached
-                deterministic_binary_frame = erase_breakout_ball(
-                    deterministic_binary_frame,
-                    ball_state,
-                )
-                deterministic_input_frame = erase_breakout_ball(
-                    deterministic_input_frame,
-                    ball_state,
-                )
-                deterministic_binary_frame = clear_ball_like_components(
-                    deterministic_binary_frame
-                )
-                deterministic_input_frame = clear_ball_like_components(
-                    deterministic_input_frame
-                )
-                next_binary_frame = clear_ball_like_components(binary[0, 0])
-                next_input_frame = clear_ball_like_components(next_input[0, 0])
-                next_binary_frame = erase_breakout_ball(next_binary_frame, ball_state)
-                next_input_frame = erase_breakout_ball(next_input_frame, ball_state)
-                if attached_ball:
-                    next_binary_frame = deterministic_binary_frame
-                    next_input_frame = deterministic_input_frame
-                else:
-                    predicted_scene_diff = (
-                        next_binary_frame - deterministic_binary_frame
-                    ).abs().sum()
-                    if predicted_scene_diff > static_predicted_diff_threshold:
-                        next_binary_frame = deterministic_binary_frame
-                        next_input_frame = deterministic_input_frame
-                ball_state = advance_breakout_ball_state(
-                    ball_state,
+                next_binary_frame, ball_state, _ = step_breakout_scene(
+                    history[0, -1],
                     action_id,
-                    next_binary_frame,
+                    ball_state,
+                    shift_pixels=paddle_shift,
                     launch_action_id=launch_action_id,
                     right_wall=history.size(-1) - 5,
                     bottom_wall=history.size(-2) - 1,
                 )
-                next_binary_frame = overlay_breakout_ball(next_binary_frame, ball_state)
-                next_input_frame = overlay_breakout_ball(next_input_frame, ball_state)
                 binary = next_binary_frame.unsqueeze(0).unsqueeze(0)
-                next_input = next_input_frame.unsqueeze(0).unsqueeze(0)
+                next_input = binary
+            else:
+                current_frame = history[:, -1:, :, :]
+                current_binary = (current_frame >= 0.5).float()
+                logits = model(history, action)
+                _, binary, next_input = feedback_from_logits(logits, feedback)
+                if static_noop_hold:
+                    hold_mask = static_noop_mask(history, action, static_history_threshold)
+                    if bool(hold_mask.any()):
+                        predicted_diff = (binary - current_binary).abs().sum(dim=(1, 2, 3))
+                        hold_mask = hold_mask & (
+                            predicted_diff <= static_predicted_diff_threshold
+                        )
+                        if bool(hold_mask.any()):
+                            hold_mask = hold_mask[:, None, None, None]
+                            binary = torch.where(hold_mask, current_binary, binary)
+                            next_input = torch.where(hold_mask, current_frame, next_input)
+                if paddle_motion_hold:
+                    paddle_mask = paddle_motion_mask(history, action, paddle_motion_threshold)
+                    if bool(paddle_mask.any()):
+                        shifted_binary, applied_mask = shift_paddle_frames(
+                            current_binary,
+                            action,
+                            shift_pixels=paddle_shift,
+                        )
+                        paddle_mask = paddle_mask & applied_mask
+                        if bool(paddle_mask.any()):
+                            paddle_mask = paddle_mask[:, None, None, None]
+                            binary = torch.where(paddle_mask, shifted_binary, binary)
+                            next_input = torch.where(paddle_mask, shifted_binary, next_input)
         history = torch.cat([history[:, 1:, :, :], next_input], dim=1)
         frames.append(binary[0, 0].cpu().numpy())
 

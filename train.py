@@ -6,6 +6,7 @@ Trains ConvAutoencoder and DynamicsModel on Hugging Face datasets.
 import argparse
 import os
 import sys
+import time
 from collections import deque
 
 import numpy as np
@@ -13,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_dataset
+from dotenv import load_dotenv
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -22,6 +24,7 @@ from game_config import BREAKOUT_CONFIG, infer_game_config
 from pixel_feedback import feedback_from_logits
 from pixel_model import FrameDynamicsModel
 from preprocessing import encode_action, has_valid_black_background, preprocess_frame
+from wandb_utils import TrainingTracker, make_image_grid
 
 # =============================================================================
 # Configuration (must match main.py for model compatibility)
@@ -103,7 +106,69 @@ def use_single_episode_val_slot(sequence_index, val_split):
     return int((sequence_index + 1) * val_split) > int(sequence_index * val_split)
 
 
-def reconstruction_loss(recon, target):
+def metric_value(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().item()
+    return float(value)
+
+
+def mean_absolute_ratio(prediction, target):
+    return (prediction - target).abs().mean()
+
+
+def cosine_similarity_mean(prediction, target):
+    return F.cosine_similarity(prediction, target, dim=1).mean()
+
+
+def compute_grad_norm(parameters):
+    grad_norm_sq = 0.0
+    has_grad = False
+    for parameter in parameters:
+        if parameter.grad is None:
+            continue
+        has_grad = True
+        grad_norm_sq += float(parameter.grad.detach().pow(2).sum().cpu().item())
+    if not has_grad:
+        return 0.0
+    return grad_norm_sq ** 0.5
+
+
+def action_histogram_dict(n_actions):
+    return {action_id: 0 for action_id in range(n_actions)}
+
+
+def log_action_histogram(target_hist, action_array):
+    action_id = int(np.argmax(action_array))
+    target_hist[action_id] += 1
+
+
+def action_fraction_metrics(prefix, histogram):
+    total = sum(histogram.values())
+    metrics = {}
+    for action_id, count in histogram.items():
+        denominator = total if total > 0 else 1
+        metrics[f"{prefix}/action_{action_id}"] = count / denominator
+    return metrics
+
+
+def fixed_sample_indices(n_items, n_samples):
+    if n_items <= 0:
+        return np.array([], dtype=np.int64)
+    count = min(n_items, n_samples)
+    rng = np.random.default_rng(SEED)
+    return np.sort(rng.choice(n_items, size=count, replace=False))
+
+
+def numpy_frame_batch_to_tensor(frames):
+    return torch.stack([torch.from_numpy(frame).unsqueeze(0).float() for frame in frames])
+
+
+def sequence_frame_to_rgb(frame):
+    frame_array = np.asarray(frame, dtype=np.float32)
+    return np.clip(frame_array, 0.0, 1.0)
+
+
+def reconstruction_components(recon, target):
     positive_ratio = target.mean(dim=(1, 2, 3), keepdim=True)
     foreground_weight = ((1.0 - positive_ratio) / positive_ratio.clamp_min(1e-6)).clamp(
         1.0,
@@ -114,7 +179,23 @@ def reconstruction_loss(recon, target):
     intersection = (recon * target).sum(dim=(1, 2, 3))
     union = recon.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
     dice = 1.0 - ((2.0 * intersection + 1e-6) / (union + 1e-6))
-    return bce + DICE_LOSS_WEIGHT * dice.mean()
+    loss_dice = dice.mean()
+    foreground_pred_ratio = recon.mean()
+    foreground_target_ratio = target.mean()
+    return {
+        "loss_total": bce + DICE_LOSS_WEIGHT * loss_dice,
+        "loss_bce": bce,
+        "loss_dice": loss_dice,
+        "foreground_pred_ratio": foreground_pred_ratio,
+        "foreground_target_ratio": foreground_target_ratio,
+        "foreground_ratio_error": mean_absolute_ratio(
+            foreground_pred_ratio, foreground_target_ratio
+        ),
+    }
+
+
+def reconstruction_loss(recon, target):
+    return reconstruction_components(recon, target)["loss_total"]
 
 
 # =============================================================================
@@ -289,6 +370,8 @@ def load_and_preprocess_dataset(dataset_id, val_split=VAL_SPLIT_RATIO):
     val_sequences = []
     skipped_invalid_frames = 0
     skipped_terminal_pairs = 0
+    train_action_hist = action_histogram_dict(N_ACTIONS)
+    val_action_hist = action_histogram_dict(N_ACTIONS)
 
     for episode_id, samples in episodes.items():
         sequence_index = 0
@@ -332,6 +415,10 @@ def load_and_preprocess_dataset(dataset_id, val_split=VAL_SPLIT_RATIO):
                     )
 
                 target_list.append((history_frames, action_array, next_frame))
+                target_hist = (
+                    val_action_hist if target_list is val_sequences else train_action_hist
+                )
+                log_action_histogram(target_hist, action_array)
                 sequence_index += 1
             continue
 
@@ -381,6 +468,10 @@ def load_and_preprocess_dataset(dataset_id, val_split=VAL_SPLIT_RATIO):
                 target_list.append(
                     (np.stack(frame_history, axis=0), prev_action_array, current_processed)
                 )
+                target_hist = (
+                    val_action_hist if target_list is val_sequences else train_action_hist
+                )
+                log_action_histogram(target_hist, prev_action_array)
                 sequence_index += 1
 
             if sample.get("terminations") or sample.get("truncations"):
@@ -402,7 +493,20 @@ def load_and_preprocess_dataset(dataset_id, val_split=VAL_SPLIT_RATIO):
     print(f"Skipped invalid-background pairs: {skipped_invalid_frames}")
     print(f"Skipped terminated/truncated pairs: {skipped_terminal_pairs}")
 
-    return train_sequences, val_sequences
+    dataset_stats = {
+        "data/raw_samples": len(dataset),
+        "data/episode_count": len(episode_ids),
+        "data/train_episodes": len(train_episode_ids),
+        "data/val_episodes": len(val_episode_ids),
+        "data/train_sequences": len(train_sequences),
+        "data/val_sequences": len(val_sequences),
+        "data/skipped_invalid_background": skipped_invalid_frames,
+        "data/skipped_terminal_pairs": skipped_terminal_pairs,
+    }
+    dataset_stats.update(action_fraction_metrics("data/train_action_fraction", train_action_hist))
+    dataset_stats.update(action_fraction_metrics("data/val_action_fraction", val_action_hist))
+
+    return train_sequences, val_sequences, dataset_stats
 
 
 def load_pixel_rollout_dataset(
@@ -455,6 +559,8 @@ def load_pixel_rollout_dataset(
     val_rollouts = []
     skipped_invalid_frames = 0
     skipped_terminal_pairs = 0
+    train_action_hist = action_histogram_dict(N_ACTIONS)
+    val_action_hist = action_histogram_dict(N_ACTIONS)
 
     for episode_id, samples in episodes.items():
         samples.sort(key=lambda item: item[0])
@@ -509,6 +615,9 @@ def load_pixel_rollout_dataset(
                     kept_window_index += 1
 
                 target_list.append((history_frames, action_seq, target_frames))
+                target_hist = val_action_hist if target_list is val_rollouts else train_action_hist
+                for action_array in action_seq:
+                    log_action_histogram(target_hist, action_array)
 
             segment_frames.clear()
             segment_actions.clear()
@@ -547,7 +656,20 @@ def load_pixel_rollout_dataset(
     print(f"Skipped invalid-background pairs: {skipped_invalid_frames}")
     print(f"Skipped terminated/truncated pairs: {skipped_terminal_pairs}")
 
-    return train_rollouts, val_rollouts
+    dataset_stats = {
+        "data/raw_samples": len(dataset),
+        "data/episode_count": len(episode_ids),
+        "data/train_episodes": len(episode_ids) - len(val_episode_ids),
+        "data/val_episodes": len(val_episode_ids),
+        "data/train_sequences": len(train_rollouts),
+        "data/val_sequences": len(val_rollouts),
+        "data/skipped_invalid_background": skipped_invalid_frames,
+        "data/skipped_terminal_pairs": skipped_terminal_pairs,
+    }
+    dataset_stats.update(action_fraction_metrics("data/train_action_fraction", train_action_hist))
+    dataset_stats.update(action_fraction_metrics("data/val_action_fraction", val_action_hist))
+
+    return train_rollouts, val_rollouts, dataset_stats
 
 
 def extract_unique_frames(sequences):
@@ -598,6 +720,7 @@ def train_autoencoder_phase(
     dataset_name,
     early_stopping_patience,
     early_stopping_min_delta,
+    tracker=None,
 ):
     """Phase 1: Train the ConvAutoencoder on frame reconstruction."""
 
@@ -613,43 +736,92 @@ def train_autoencoder_phase(
 
     best_val_loss = float("inf")
     best_model_path = None
+    best_epoch = None
     epochs_without_improvement = 0
+    optimizer_step = 0
+    eval_frames = build_autoencoder_eval_examples(getattr(val_loader.dataset, "frames", []))
 
     for epoch in range(n_epochs):
         # Training
         model.train()
-        train_loss = torch.zeros((), device=device)
+        train_metric_sums = {}
         n_batches = 0
+        train_sample_count = 0
+        train_epoch_start = time.perf_counter()
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{n_epochs} [Train]")
-        for frames in pbar:
+        for batch_idx, frames in enumerate(pbar, start=1):
             frames = move_batch_tensor(
                 frames, device, non_blocking=device.type == "cuda"
             )
+            batch_size = frames.size(0)
 
             optimizer.zero_grad(set_to_none=True)
 
             recon, z = model(frames)
-            loss = reconstruction_loss(recon, frames)
+            batch_metrics = reconstruction_components(recon, frames)
+            batch_metrics["latent_std"] = z.std(unbiased=False)
+            batch_metrics["latent_sat_frac"] = (z.abs() > 0.95).float().mean()
+            loss = batch_metrics["loss_total"]
 
             loss.backward()
+
+            grad_norm = compute_grad_norm(model.parameters())
 
             if TRAIN_MAX_GRAD_NORM > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), TRAIN_MAX_GRAD_NORM)
 
             optimizer.step()
 
-            train_loss += loss.detach()
+            optimizer_step += 1
             n_batches += 1
-            if n_batches == 1 or n_batches % 20 == 0:
-                pbar.set_postfix({"loss": f"{loss.detach().cpu().item():.6f}"})
+            train_sample_count += batch_size
+            add_weighted_metric_sums(train_metric_sums, batch_metrics, batch_size)
+            if batch_idx == 1 or batch_idx % 20 == 0:
+                pbar.set_postfix({"loss": f"{metric_value(loss):.6f}"})
+                if tracker is not None:
+                    tracker.log_batch(
+                        "autoencoder",
+                        {
+                            "train/loss_total": metric_value(batch_metrics["loss_total"]),
+                            "train/loss_bce": metric_value(batch_metrics["loss_bce"]),
+                            "train/loss_dice": metric_value(batch_metrics["loss_dice"]),
+                            "train/foreground_pred_ratio": metric_value(
+                                batch_metrics["foreground_pred_ratio"]
+                            ),
+                            "train/foreground_target_ratio": metric_value(
+                                batch_metrics["foreground_target_ratio"]
+                            ),
+                            "train/foreground_ratio_error": metric_value(
+                                batch_metrics["foreground_ratio_error"]
+                            ),
+                            "train/latent_std": metric_value(batch_metrics["latent_std"]),
+                            "train/latent_sat_frac": metric_value(
+                                batch_metrics["latent_sat_frac"]
+                            ),
+                            "train/grad_norm": grad_norm,
+                            "train/lr": optimizer.param_groups[0]["lr"],
+                        },
+                        optimizer_step,
+                    )
 
-        avg_train_loss = (train_loss / n_batches).detach().cpu().item()
+        train_metrics = {
+            f"train/{key}": value
+            for key, value in normalize_metric_sums(train_metric_sums, train_sample_count).items()
+        }
+        train_epoch_time = time.perf_counter() - train_epoch_start
+        train_metrics["train/epoch_time_s"] = train_epoch_time
+        train_metrics["train/samples_per_s"] = (
+            train_sample_count / train_epoch_time if train_epoch_time > 0 else 0.0
+        )
+        avg_train_loss = train_metrics["train/loss_total"]
 
         # Validation
         model.eval()
-        val_loss = torch.zeros((), device=device)
+        val_metric_sums = {}
         n_val_batches = 0
+        val_sample_count = 0
+        val_epoch_start = time.perf_counter()
 
         with torch.inference_mode():
             for frames in tqdm(
@@ -658,14 +830,26 @@ def train_autoencoder_phase(
                 frames = move_batch_tensor(
                     frames, device, non_blocking=device.type == "cuda"
                 )
+                batch_size = frames.size(0)
 
                 recon, z = model(frames)
-                loss = reconstruction_loss(recon, frames)
-
-                val_loss += loss
+                batch_metrics = reconstruction_components(recon, frames)
+                batch_metrics["latent_std"] = z.std(unbiased=False)
+                batch_metrics["latent_sat_frac"] = (z.abs() > 0.95).float().mean()
+                add_weighted_metric_sums(val_metric_sums, batch_metrics, batch_size)
+                val_sample_count += batch_size
                 n_val_batches += 1
 
-        avg_val_loss = (val_loss / n_val_batches).detach().cpu().item()
+        val_metrics = {
+            f"val/{key}": value
+            for key, value in normalize_metric_sums(val_metric_sums, val_sample_count).items()
+        }
+        val_epoch_time = time.perf_counter() - val_epoch_start
+        val_metrics["val/epoch_time_s"] = val_epoch_time
+        val_metrics["val/samples_per_s"] = (
+            val_sample_count / val_epoch_time if val_epoch_time > 0 else 0.0
+        )
+        avg_val_loss = val_metrics["val/loss_total"]
 
         print(
             "Epoch "
@@ -674,14 +858,17 @@ def train_autoencoder_phase(
         )
 
         # Save best model
+        best_val_improved = False
         if is_val_improved(avg_val_loss, best_val_loss, early_stopping_min_delta):
             best_val_loss = avg_val_loss
+            best_epoch = epoch + 1
             epochs_without_improvement = 0
             best_model_path = os.path.join(
                 output_dir, f"{dataset_name}-representation.pt"
             )
             torch.save(model.state_dict(), best_model_path)
             print(f"  -> Saved best model (val_loss: {best_val_loss:.6f})")
+            best_val_improved = True
         elif early_stopping_patience > 0:
             epochs_without_improvement += 1
             print(
@@ -696,12 +883,47 @@ def train_autoencoder_phase(
                 empty_device_cache()
                 break
 
+        epoch_metrics = {}
+        epoch_metrics.update(train_metrics)
+        epoch_metrics.update(val_metrics)
+        epoch_metrics["health/generalization_gap_ratio"] = (
+            avg_val_loss / avg_train_loss if avg_train_loss > 0 else 0.0
+        )
+        epoch_metrics["health/best_val_improved"] = float(best_val_improved)
+        epoch_metrics["health/epochs_without_improvement"] = epochs_without_improvement
+        if tracker is not None:
+            tracker.log_epoch("autoencoder", epoch_metrics, epoch)
+
+        if tracker is not None and eval_frames and (best_val_improved or (epoch + 1) % 5 == 0):
+            with torch.inference_mode():
+                eval_tensor = numpy_frame_batch_to_tensor(eval_frames)
+                eval_tensor = move_batch_tensor(
+                    eval_tensor, device, non_blocking=device.type == "cuda"
+                )
+                recon_eval, _ = model(eval_tensor)
+            originals = [frame for frame in eval_frames]
+            reconstructions = [frame[0] for frame in recon_eval.detach().cpu().numpy()]
+            grid = make_autoencoder_media_grid(originals, reconstructions)
+            tracker.log_media(
+                "autoencoder",
+                {
+                    "media/recon_grid": tracker.image(
+                        grid, caption=f"Epoch {epoch + 1} autoencoder reconstructions"
+                    )
+                },
+                epoch,
+            )
+
         empty_device_cache()
 
     print(f"\nPhase 1 complete. Best model saved to: {best_model_path}")
     print(f"Best validation loss: {best_val_loss:.6f}")
 
-    return best_model_path
+    return {
+        "best_model_path": best_model_path,
+        "best_val_loss": best_val_loss,
+        "best_epoch": best_epoch,
+    }
 
 
 def encode_frames(model, sequences, batch_size=ENCODE_BATCH_SIZE):
@@ -796,7 +1018,7 @@ class PixelRolloutDataset(Dataset):
         return history_tensor, action_tensor, target_tensor
 
 
-def pixel_dynamics_loss(logits, target, current_frame):
+def pixel_dynamics_components(logits, target, current_frame):
     current_frame = current_frame.detach()
     positive_ratio = target.mean(dim=(1, 2, 3), keepdim=True)
     foreground_weight = ((1.0 - positive_ratio) / positive_ratio.clamp_min(1e-6)).clamp(
@@ -805,7 +1027,90 @@ def pixel_dynamics_loss(logits, target, current_frame):
     )
     change_mask = (target - current_frame).abs()
     weights = 1.0 + (foreground_weight - 1.0) * target + PIXEL_CHANGE_LOSS_WEIGHT * change_mask
-    return F.binary_cross_entropy_with_logits(logits, target, weight=weights)
+    probs = torch.sigmoid(logits)
+    binary = (probs >= 0.5).float()
+    intersection = (binary * target).sum(dim=(1, 2, 3))
+    union = binary.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
+    dice = ((2.0 * intersection + 1e-6) / (union + 1e-6)).mean()
+    foreground_pred_ratio = probs.mean()
+    foreground_target_ratio = target.mean()
+    return {
+        "loss_total": F.binary_cross_entropy_with_logits(logits, target, weight=weights),
+        "foreground_weight_mean": foreground_weight.mean(),
+        "change_weight_mean": change_mask.mean(),
+        "weight_mean": weights.mean(),
+        "dice": dice,
+        "foreground_pred_ratio": foreground_pred_ratio,
+        "foreground_target_ratio": foreground_target_ratio,
+        "foreground_ratio_error": mean_absolute_ratio(
+            foreground_pred_ratio, foreground_target_ratio
+        ),
+    }
+
+
+def pixel_dynamics_loss(logits, target, current_frame):
+    return pixel_dynamics_components(logits, target, current_frame)["loss_total"]
+
+
+def add_weighted_metric_sums(metric_sums, metrics, weight):
+    for key, value in metrics.items():
+        metric_sums[key] = metric_sums.get(key, 0.0) + metric_value(value) * weight
+
+
+def normalize_metric_sums(metric_sums, total_weight):
+    if total_weight <= 0:
+        return {key: 0.0 for key in metric_sums}
+    return {key: value / total_weight for key, value in metric_sums.items()}
+
+
+def build_autoencoder_eval_examples(frames, n_samples=8):
+    indices = fixed_sample_indices(len(frames), n_samples)
+    return [frames[index] for index in indices]
+
+
+def build_latent_dynamics_eval_examples(val_sequences, val_latent_sequences, n_samples=6):
+    indices = fixed_sample_indices(len(val_sequences), n_samples)
+    return [
+        {
+            "history_frames": val_sequences[index][0],
+            "action": val_sequences[index][1],
+            "target_frame": val_sequences[index][2],
+            "latent_history": val_latent_sequences[index][0],
+            "latent_next": val_latent_sequences[index][2],
+        }
+        for index in indices
+    ]
+
+
+def build_pixel_rollout_eval_examples(val_sequences, n_samples=4):
+    indices = fixed_sample_indices(len(val_sequences), n_samples)
+    return [val_sequences[index] for index in indices]
+
+
+def make_autoencoder_media_grid(originals, reconstructions):
+    rows = []
+    for original, reconstruction in zip(originals, reconstructions):
+        diff = np.abs(reconstruction - original)
+        rows.append([original, reconstruction, diff])
+    return make_image_grid(rows)
+
+
+def make_latent_dynamics_media_grid(history_frames, predictions, targets):
+    rows = []
+    for history_frame, prediction, target in zip(history_frames, predictions, targets):
+        diff = np.abs(prediction - target)
+        rows.append([history_frame, prediction, target, diff])
+    return make_image_grid(rows)
+
+
+def make_pixel_rollout_media_grid(history_frames, predicted_rollouts, target_rollouts):
+    rows = []
+    for history_frame, predicted_frames, target_frames in zip(
+        history_frames, predicted_rollouts, target_rollouts
+    ):
+        rows.append([history_frame, *predicted_frames])
+        rows.append([history_frame, *target_frames])
+    return make_image_grid(rows)
 
 
 def train_dynamics_phase(
@@ -817,6 +1122,7 @@ def train_dynamics_phase(
     dataset_name,
     early_stopping_patience,
     early_stopping_min_delta,
+    tracker=None,
 ):
     """Phase 2: Train the DynamicsModel on latent delta prediction."""
 
@@ -872,7 +1178,6 @@ def train_dynamics_phase(
         device,
     )
 
-    criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(
         dynamics_model.parameters(),
         lr=TRAIN_LEARNING_RATE,
@@ -881,28 +1186,38 @@ def train_dynamics_phase(
 
     best_val_loss = float("inf")
     best_model_path = None
+    best_epoch = None
     epochs_without_improvement = 0
+    optimizer_step = 0
+    eval_examples = build_latent_dynamics_eval_examples(
+        val_sequences, val_latent_sequences, n_samples=6
+    )
 
     for epoch in range(n_epochs):
         # Training
         dynamics_model.train()
-        train_loss = torch.zeros((), device=device)
+        train_metric_sums = {}
         n_batches = 0
+        train_sample_count = 0
+        train_epoch_start = time.perf_counter()
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{n_epochs} [Train]")
-        for latent_history, action_t, latent_next in pbar:
+        for batch_idx, (latent_history, action_t, latent_next) in enumerate(pbar, start=1):
             latent_history = latent_history.to(device, non_blocking=device.type == "cuda")
             action_t = action_t.to(device, non_blocking=device.type == "cuda")
             latent_next = latent_next.to(device, non_blocking=device.type == "cuda")
+            batch_size = latent_history.size(0)
 
             optimizer.zero_grad(set_to_none=True)
 
             history_flat = latent_history.reshape(latent_history.size(0), -1)
             delta_pred = dynamics_model(history_flat, action_t)
             delta_target = latent_next - latent_history[:, -1, :]
-            loss = criterion(delta_pred, delta_target)
+            loss = F.mse_loss(delta_pred, delta_target)
 
             loss.backward()
+
+            grad_norm = compute_grad_norm(dynamics_model.parameters())
 
             if TRAIN_MAX_GRAD_NORM > 0:
                 torch.nn.utils.clip_grad_norm_(
@@ -911,17 +1226,60 @@ def train_dynamics_phase(
 
             optimizer.step()
 
-            train_loss += loss.detach()
+            optimizer_step += 1
             n_batches += 1
-            if n_batches == 1 or n_batches % 20 == 0:
-                pbar.set_postfix({"loss": f"{loss.detach().cpu().item():.6f}"})
+            train_sample_count += batch_size
+            target_norm = delta_target.norm(dim=1)
+            pred_norm = delta_pred.norm(dim=1)
+            delta_norm_ratio = pred_norm.mean() / target_norm.mean().clamp_min(1e-8)
+            batch_metrics = {
+                "loss_total": loss,
+                "loss_delta_mse": loss,
+                "delta_cosine": cosine_similarity_mean(delta_pred, delta_target),
+                "pred_delta_l2": pred_norm.mean(),
+                "target_delta_l2": target_norm.mean(),
+                "delta_norm_ratio": delta_norm_ratio,
+            }
+            add_weighted_metric_sums(train_metric_sums, batch_metrics, batch_size)
+            if batch_idx == 1 or batch_idx % 20 == 0:
+                pbar.set_postfix({"loss": f"{metric_value(loss):.6f}"})
+                if tracker is not None:
+                    tracker.log_batch(
+                        "latent_dynamics",
+                        {
+                            "train/loss_total": metric_value(loss),
+                            "train/loss_delta_mse": metric_value(loss),
+                            "train/delta_cosine": metric_value(batch_metrics["delta_cosine"]),
+                            "train/pred_delta_l2": metric_value(batch_metrics["pred_delta_l2"]),
+                            "train/target_delta_l2": metric_value(
+                                batch_metrics["target_delta_l2"]
+                            ),
+                            "train/delta_norm_ratio": metric_value(
+                                batch_metrics["delta_norm_ratio"]
+                            ),
+                            "train/grad_norm": grad_norm,
+                            "train/lr": optimizer.param_groups[0]["lr"],
+                        },
+                        optimizer_step,
+                    )
 
-        avg_train_loss = (train_loss / n_batches).detach().cpu().item()
+        train_metrics = {
+            f"train/{key}": value
+            for key, value in normalize_metric_sums(train_metric_sums, train_sample_count).items()
+        }
+        train_epoch_time = time.perf_counter() - train_epoch_start
+        train_metrics["train/epoch_time_s"] = train_epoch_time
+        train_metrics["train/samples_per_s"] = (
+            train_sample_count / train_epoch_time if train_epoch_time > 0 else 0.0
+        )
+        avg_train_loss = train_metrics["train/loss_total"]
 
         # Validation uses the ground-truth history window for each batch.
         dynamics_model.eval()
-        val_loss = torch.zeros((), device=device)
+        val_metric_sums = {}
         n_val_batches = 0
+        val_sample_count = 0
+        val_epoch_start = time.perf_counter()
 
         with torch.inference_mode():
             for latent_history, action_t, latent_next in tqdm(
@@ -932,17 +1290,70 @@ def train_dynamics_phase(
                 )
                 action_t = action_t.to(device, non_blocking=device.type == "cuda")
                 latent_next = latent_next.to(device, non_blocking=device.type == "cuda")
+                batch_size = latent_history.size(0)
 
                 history_flat = latent_history.reshape(latent_history.size(0), -1)
                 delta_pred = dynamics_model(history_flat, action_t)
 
                 delta_target = latent_next - latent_history[:, -1, :]
-                loss = criterion(delta_pred, delta_target)
+                loss = F.mse_loss(delta_pred, delta_target)
 
-                val_loss += loss
+                target_norm = delta_target.norm(dim=1)
+                pred_norm = delta_pred.norm(dim=1)
+                delta_norm_ratio = pred_norm.mean() / target_norm.mean().clamp_min(1e-8)
+                batch_metrics = {
+                    "loss_total": loss,
+                    "loss_delta_mse": loss,
+                    "delta_cosine": cosine_similarity_mean(delta_pred, delta_target),
+                    "pred_delta_l2": pred_norm.mean(),
+                    "target_delta_l2": target_norm.mean(),
+                    "delta_norm_ratio": delta_norm_ratio,
+                }
+                add_weighted_metric_sums(val_metric_sums, batch_metrics, batch_size)
+                val_sample_count += batch_size
                 n_val_batches += 1
 
-        avg_val_loss = (val_loss / n_val_batches).detach().cpu().item()
+        val_metrics = {
+            f"val/{key}": value
+            for key, value in normalize_metric_sums(val_metric_sums, val_sample_count).items()
+        }
+        val_epoch_time = time.perf_counter() - val_epoch_start
+        val_metrics["val/epoch_time_s"] = val_epoch_time
+        val_metrics["val/samples_per_s"] = (
+            val_sample_count / val_epoch_time if val_epoch_time > 0 else 0.0
+        )
+
+        if eval_examples:
+            history_frames = np.stack(
+                [example["history_frames"] for example in eval_examples], axis=0
+            )
+            action_frames = np.stack([example["action"] for example in eval_examples], axis=0)
+            target_frames = np.stack([example["target_frame"] for example in eval_examples], axis=0)
+            latent_history = np.stack(
+                [example["latent_history"] for example in eval_examples], axis=0
+            )
+            with torch.inference_mode():
+                latent_history_tensor = torch.from_numpy(latent_history).float().to(device)
+                action_tensor = torch.from_numpy(action_frames).float().to(device)
+                target_tensor = torch.from_numpy(target_frames).unsqueeze(1).float().to(device)
+                predicted_delta = dynamics_model(
+                    latent_history_tensor.reshape(latent_history_tensor.size(0), -1),
+                    action_tensor,
+                )
+                predicted_next = latent_history_tensor[:, -1, :] + predicted_delta
+                decoded_next = autoencoder.decode(predicted_next)
+                decoded_metrics = reconstruction_components(decoded_next, target_tensor)
+            val_metrics["val/decoded_next_loss_bce"] = metric_value(
+                decoded_metrics["loss_bce"]
+            )
+            val_metrics["val/decoded_next_loss_dice"] = metric_value(
+                decoded_metrics["loss_dice"]
+            )
+            val_metrics["val/decoded_foreground_ratio_error"] = metric_value(
+                decoded_metrics["foreground_ratio_error"]
+            )
+
+        avg_val_loss = val_metrics["val/loss_total"]
 
         print(
             "Epoch "
@@ -951,12 +1362,15 @@ def train_dynamics_phase(
         )
 
         # Save best model
+        best_val_improved = False
         if is_val_improved(avg_val_loss, best_val_loss, early_stopping_min_delta):
             best_val_loss = avg_val_loss
+            best_epoch = epoch + 1
             epochs_without_improvement = 0
             best_model_path = os.path.join(output_dir, f"{dataset_name}-dynamics.pt")
             torch.save(dynamics_model.state_dict(), best_model_path)
             print(f"  -> Saved best model (val_loss: {best_val_loss:.6f})")
+            best_val_improved = True
         elif early_stopping_patience > 0:
             epochs_without_improvement += 1
             print(
@@ -971,12 +1385,59 @@ def train_dynamics_phase(
                 empty_device_cache()
                 break
 
+        epoch_metrics = {}
+        epoch_metrics.update(train_metrics)
+        epoch_metrics.update(val_metrics)
+        epoch_metrics["health/generalization_gap_ratio"] = (
+            avg_val_loss / avg_train_loss if avg_train_loss > 0 else 0.0
+        )
+        epoch_metrics["health/best_val_improved"] = float(best_val_improved)
+        epoch_metrics["health/epochs_without_improvement"] = epochs_without_improvement
+        if tracker is not None:
+            tracker.log_epoch("latent_dynamics", epoch_metrics, epoch)
+
+        if tracker is not None and eval_examples and (best_val_improved or (epoch + 1) % 5 == 0):
+            with torch.inference_mode():
+                latent_history_tensor = torch.from_numpy(
+                    np.stack([example["latent_history"] for example in eval_examples], axis=0)
+                ).float().to(device)
+                action_tensor = torch.from_numpy(
+                    np.stack([example["action"] for example in eval_examples], axis=0)
+                ).float().to(device)
+                predicted_delta = dynamics_model(
+                    latent_history_tensor.reshape(latent_history_tensor.size(0), -1),
+                    action_tensor,
+                )
+                predicted_next = latent_history_tensor[:, -1, :] + predicted_delta
+                decoded_next = autoencoder.decode(predicted_next).detach().cpu().numpy()
+            history_last_frames = [example["history_frames"][-1] for example in eval_examples]
+            prediction_frames = [frame[0] for frame in decoded_next]
+            target_frames = [example["target_frame"] for example in eval_examples]
+            grid = make_latent_dynamics_media_grid(
+                history_last_frames,
+                prediction_frames,
+                target_frames,
+            )
+            tracker.log_media(
+                "latent_dynamics",
+                {
+                    "media/next_frame_grid": tracker.image(
+                        grid, caption=f"Epoch {epoch + 1} latent dynamics predictions"
+                    )
+                },
+                epoch,
+            )
+
         empty_device_cache()
 
     print(f"\nPhase 2 complete. Best model saved to: {best_model_path}")
     print(f"Best validation loss: {best_val_loss:.6f}")
 
-    return best_model_path
+    return {
+        "best_model_path": best_model_path,
+        "best_val_loss": best_val_loss,
+        "best_epoch": best_epoch,
+    }
 
 
 def train_pixel_dynamics_phase(

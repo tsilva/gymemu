@@ -215,6 +215,14 @@ scene changes that do not match the current stable playfield, runtime keeps the 
 background and advances just the ball. This preserves the current `NOOP` and paddle
 stability fixes while making the ball visible during serve and launch states.
 
+The Breakout pixel runtime now also treats paddle motion and brick hits explicitly:
+
+- `LEFT` and `RIGHT` always shift the paddle deterministically, even while the ball is in
+  flight.
+- ball movement bounces off the first brick pixel it hits in the brick band and clears a
+  small local patch, so the ball no longer phases through the wall of bricks while the
+  rest of the stable-scene logic stays intact.
+
 Controls:
 
 - `Space`: `FIRE`
