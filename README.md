@@ -181,6 +181,35 @@ python train.py \
   --pixel-dynamics-path .cache/pixel_h4_unroll4_stride8/tsilva__gymrec__BreakoutNoFrameskip_dash_v4-pixel-dynamics.pt
 ```
 
+### Spatial Latent World Model
+
+For a generic learned path with no game-specific runtime logic, train with
+`--dynamics-mode spatial`. This model still consumes `history + action`, but it first
+encodes the history into a small spatial latent map, predicts the next latent map, and
+decodes that to next-frame logits.
+
+Useful knobs:
+
+- `--spatial-latent-channels`: channel count of the latent map
+- `--spatial-refine-blocks`: number of action-conditioned residual blocks in latent space
+- `--spatial-dynamics-path`: optional checkpoint to resume from
+- `--pixel-feedback-mode`: how predicted frames are fed back during rollout training
+
+Example generic training run:
+
+```bash
+python train.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --game breakout \
+  --dynamics-mode spatial \
+  --history-length 4 \
+  --pixel-unroll-steps 8 \
+  --sequence-stride 16 \
+  --spatial-latent-channels 32 \
+  --spatial-refine-blocks 4 \
+  --output-dir .cache/spatial_h4_u8
+```
+
 ## Run The Emulator
 
 If you omit `--start-image`, the runtime fetches the first valid Breakout frame from the dataset and uses that as the initial latent state. You can still pass a local raw `210x160` Breakout frame if you want a specific start point.
@@ -226,6 +255,25 @@ python main.py \
   --image-height 96
 ```
 
+For the generic spatial-latent model, use `--dynamics-mode spatial`. This path does not
+apply the Breakout-specific paddle/ball/brick runtime priors used by the current
+experimental `pixel` mode:
+
+```bash
+python main.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --game breakout \
+  --dynamics-mode spatial \
+  --history-length 4 \
+  --spatial-latent-channels 32 \
+  --spatial-refine-blocks 4 \
+  --pixel-feedback soft \
+  --use-local-models \
+  --models-dir ./.cache/spatial_h4_u8 \
+  --image-width 80 \
+  --image-height 96
+```
+
 Runtime now also defaults to a conservative `NOOP` stability hold for near-static
 histories. That guard only applies when the action is `NOOP` and the predicted change is
 tiny, which keeps idle states from drifting frame by frame.
@@ -240,7 +288,7 @@ scene changes that do not match the current stable playfield, runtime keeps the 
 background and advances just the ball. This preserves the current `NOOP` and paddle
 stability fixes while making the ball visible during serve and launch states.
 
-The Breakout pixel runtime now also treats paddle motion and brick hits explicitly:
+The Breakout `pixel` runtime now also treats paddle motion and brick hits explicitly:
 
 - `LEFT` and `RIGHT` always shift the paddle deterministically, even while the ball is in
   flight.
