@@ -159,6 +159,48 @@ class BreakoutBallState:
     attached: bool
 
 
+@dataclass
+class BreakoutPaddleState:
+    start: int
+    width: int
+    top: int
+    bottom: int
+
+    @property
+    def end(self):
+        return self.start + self.width - 1
+
+    @property
+    def center(self):
+        return self.start + (self.width - 1) / 2.0
+
+
+def init_breakout_paddle_state(
+    frame: torch.Tensor,
+    paddle_top: int = 83,
+    paddle_bottom: int = 88,
+    playfield_left: int = 4,
+    playfield_right: int = 75,
+):
+    paddle = detect_paddle_span(
+        frame,
+        paddle_top=paddle_top,
+        paddle_bottom=paddle_bottom,
+        playfield_left=playfield_left,
+        playfield_right=playfield_right,
+    )
+    if paddle is None:
+        return None
+
+    rows = [y for y, _, _ in paddle["rows"]]
+    return BreakoutPaddleState(
+        start=paddle["start"],
+        width=paddle["end"] - paddle["start"] + 1,
+        top=min(rows),
+        bottom=max(rows),
+    )
+
+
 def detect_ball_position(
     frame: torch.Tensor,
     playfield_left: int = 4,
@@ -279,6 +321,7 @@ def advance_breakout_ball_state(
     ball_state: BreakoutBallState | None,
     action_id: int,
     frame: torch.Tensor,
+    paddle_state: BreakoutPaddleState | None = None,
     launch_action_id: int = 1,
     launch_vx: int = 1,
     launch_vy: int = -1,
@@ -289,7 +332,19 @@ def advance_breakout_ball_state(
     brick_top: int = 19,
     brick_bottom: int = 36,
 ):
-    paddle = detect_paddle_span(frame)
+    paddle = None
+    if paddle_state is not None:
+        paddle = {
+            "start": paddle_state.start,
+            "end": paddle_state.end,
+            "center": paddle_state.center,
+            "rows": [
+                (y, paddle_state.start, paddle_state.end)
+                for y in range(paddle_state.top, paddle_state.bottom + 1)
+            ],
+        }
+    else:
+        paddle = detect_paddle_span(frame)
     if ball_state is None:
         return (
             init_breakout_ball_state(
@@ -411,6 +466,52 @@ def erase_breakout_ball(frame: torch.Tensor, ball_state: BreakoutBallState | Non
     return out
 
 
+def overlay_breakout_paddle(frame: torch.Tensor, paddle_state: BreakoutPaddleState | None):
+    if paddle_state is None:
+        return frame
+
+    out = frame.clone()
+    out[paddle_state.top : paddle_state.bottom + 1, paddle_state.start : paddle_state.end + 1] = 1.0
+    return out
+
+
+def erase_breakout_paddle(frame: torch.Tensor, paddle_state: BreakoutPaddleState | None):
+    if paddle_state is None:
+        return frame
+
+    out = frame.clone()
+    out[paddle_state.top : paddle_state.bottom + 1, paddle_state.start : paddle_state.end + 1] = 0.0
+    return out
+
+
+def move_breakout_paddle_state(
+    paddle_state: BreakoutPaddleState | None,
+    action_id: int,
+    shift_pixels: int = 2,
+    playfield_left: int = 4,
+    playfield_right: int = 75,
+):
+    if paddle_state is None:
+        return None
+    if action_id == 2:
+        delta = shift_pixels
+    elif action_id == 3:
+        delta = -shift_pixels
+    else:
+        return paddle_state
+
+    new_start = min(
+        max(paddle_state.start + delta, playfield_left),
+        playfield_right - paddle_state.width + 1,
+    )
+    return BreakoutPaddleState(
+        start=new_start,
+        width=paddle_state.width,
+        top=paddle_state.top,
+        bottom=paddle_state.bottom,
+    )
+
+
 def shift_paddle_frame(
     frame: torch.Tensor,
     action_id: int,
@@ -457,6 +558,7 @@ def step_breakout_scene(
     frame: torch.Tensor,
     action_id: int,
     ball_state: BreakoutBallState | None,
+    paddle_state: BreakoutPaddleState | None = None,
     shift_pixels: int = 2,
     launch_action_id: int = 1,
     left_wall: int = 4,
@@ -472,17 +574,26 @@ def step_breakout_scene(
         playfield_left=left_wall,
         playfield_right=right_wall,
     )
-    scene = shift_paddle_frame(
-        scene,
+    if paddle_state is None:
+        paddle_state = init_breakout_paddle_state(
+            scene,
+            playfield_left=left_wall,
+            playfield_right=right_wall,
+        )
+    scene = erase_breakout_paddle(scene, paddle_state)
+    paddle_state = move_breakout_paddle_state(
+        paddle_state,
         action_id,
         shift_pixels=shift_pixels,
         playfield_left=left_wall,
         playfield_right=right_wall,
     )
+    scene = overlay_breakout_paddle(scene, paddle_state)
     ball_state, scene = advance_breakout_ball_state(
         ball_state,
         action_id,
         scene,
+        paddle_state=paddle_state,
         launch_action_id=launch_action_id,
         left_wall=left_wall,
         right_wall=right_wall,
@@ -492,7 +603,7 @@ def step_breakout_scene(
         brick_bottom=brick_bottom,
     )
     next_frame = overlay_breakout_ball(scene, ball_state)
-    return next_frame, ball_state, scene
+    return next_frame, ball_state, paddle_state, scene
 
 
 def shift_paddle_frames(

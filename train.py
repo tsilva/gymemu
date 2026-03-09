@@ -151,6 +151,19 @@ def action_fraction_metrics(prefix, histogram):
     return metrics
 
 
+def sequence_action_fraction_metrics(train_sequences, val_sequences):
+    train_hist = action_histogram_dict(N_ACTIONS)
+    val_hist = action_histogram_dict(N_ACTIONS)
+    for _, action_array, _ in train_sequences:
+        log_action_histogram(train_hist, action_array)
+    for _, action_array, _ in val_sequences:
+        log_action_histogram(val_hist, action_array)
+    metrics = {}
+    metrics.update(action_fraction_metrics("data/train_action_fraction", train_hist))
+    metrics.update(action_fraction_metrics("data/val_action_fraction", val_hist))
+    return metrics
+
+
 def fixed_sample_indices(n_items, n_samples):
     if n_items <= 0:
         return np.array([], dtype=np.int64)
@@ -1451,6 +1464,7 @@ def train_pixel_dynamics_phase(
     pixel_dynamics_path=None,
     pixel_feedback_mode=PIXEL_FEEDBACK_MODE,
     pixel_refine_blocks=PIXEL_REFINE_BLOCKS,
+    tracker=None,
 ):
     """Train a direct frame predictor on history windows and actions."""
 
@@ -1500,15 +1514,20 @@ def train_pixel_dynamics_phase(
 
     best_val_loss = float("inf")
     best_model_path = None
+    best_epoch = None
     epochs_without_improvement = 0
+    optimizer_step = 0
+    eval_examples = build_pixel_rollout_eval_examples(val_sequences, n_samples=4)
 
     for epoch in range(n_epochs):
         model.train()
-        train_loss = torch.zeros((), device=device)
+        train_metric_sums = {}
         n_batches = 0
+        train_sample_count = 0
+        train_epoch_start = time.perf_counter()
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{n_epochs} [Train]")
-        for history_frames, action_seq, target_frames in pbar:
+        for batch_idx, (history_frames, action_seq, target_frames) in enumerate(pbar, start=1):
             history_frames = move_batch_tensor(
                 history_frames, device, non_blocking=device.type == "cuda"
             )
@@ -1516,20 +1535,30 @@ def train_pixel_dynamics_phase(
             target_frames = move_batch_tensor(
                 target_frames, device, non_blocking=device.type == "cuda"
             )
+            batch_size = history_frames.size(0)
 
             optimizer.zero_grad(set_to_none=True)
 
             rollout_history = history_frames
             loss = torch.zeros((), device=device)
             n_steps = action_seq.size(1)
+            batch_metric_sums = {}
+            first_step_metrics = None
+            last_step_metrics = None
             for step_idx in range(n_steps):
                 logits = model(rollout_history, action_seq[:, step_idx, :])
                 target_frame = target_frames[:, step_idx, :, :, :]
-                loss = loss + pixel_dynamics_loss(
+                step_metrics = pixel_dynamics_components(
                     logits,
                     target_frame,
                     rollout_history[:, -1:, :, :],
                 )
+                loss = loss + step_metrics["loss_total"]
+                add_weighted_metric_sums(batch_metric_sums, step_metrics, 1.0)
+                if step_idx == 0:
+                    first_step_metrics = step_metrics
+                if step_idx == n_steps - 1:
+                    last_step_metrics = step_metrics
                 _, _, next_input = feedback_from_logits(logits, pixel_feedback_mode)
                 rollout_history = torch.cat(
                     [rollout_history[:, 1:, :, :], next_input],
@@ -1539,21 +1568,69 @@ def train_pixel_dynamics_phase(
 
             loss.backward()
 
+            grad_norm = compute_grad_norm(model.parameters())
+
             if TRAIN_MAX_GRAD_NORM > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), TRAIN_MAX_GRAD_NORM)
 
             optimizer.step()
 
-            train_loss += loss.detach()
+            optimizer_step += 1
             n_batches += 1
-            if n_batches == 1 or n_batches % 20 == 0:
-                pbar.set_postfix({"loss": f"{loss.detach().cpu().item():.6f}"})
+            train_sample_count += batch_size
+            batch_metrics = normalize_metric_sums(batch_metric_sums, n_steps)
+            batch_metrics["loss_total"] = metric_value(loss)
+            batch_metrics["loss_step_1"] = metric_value(first_step_metrics["loss_total"])
+            batch_metrics["loss_step_last"] = metric_value(last_step_metrics["loss_total"])
+            batch_metrics["loss_last_over_first"] = batch_metrics["loss_step_last"] / max(
+                batch_metrics["loss_step_1"], 1e-8
+            )
+            batch_metrics["dice_step_1"] = metric_value(first_step_metrics["dice"])
+            batch_metrics["dice_step_last"] = metric_value(last_step_metrics["dice"])
+            batch_metrics["foreground_ratio_error"] = batch_metrics["foreground_ratio_error"]
+            add_weighted_metric_sums(train_metric_sums, batch_metrics, batch_size)
+            if batch_idx == 1 or batch_idx % 20 == 0:
+                pbar.set_postfix({"loss": f"{metric_value(loss):.6f}"})
+                if tracker is not None:
+                    tracker.log_batch(
+                        "pixel_dynamics",
+                        {
+                            "train/loss_total": batch_metrics["loss_total"],
+                            "train/loss_step_1": batch_metrics["loss_step_1"],
+                            "train/loss_step_last": batch_metrics["loss_step_last"],
+                            "train/loss_last_over_first": batch_metrics["loss_last_over_first"],
+                            "train/dice_step_1": batch_metrics["dice_step_1"],
+                            "train/dice_step_last": batch_metrics["dice_step_last"],
+                            "train/foreground_ratio_error": batch_metrics[
+                                "foreground_ratio_error"
+                            ],
+                            "train/foreground_weight_mean": batch_metrics[
+                                "foreground_weight_mean"
+                            ],
+                            "train/change_weight_mean": batch_metrics["change_weight_mean"],
+                            "train/weight_mean": batch_metrics["weight_mean"],
+                            "train/grad_norm": grad_norm,
+                            "train/lr": optimizer.param_groups[0]["lr"],
+                        },
+                        optimizer_step,
+                    )
 
-        avg_train_loss = (train_loss / n_batches).detach().cpu().item()
+        train_metrics = {
+            f"train/{key}": value
+            for key, value in normalize_metric_sums(train_metric_sums, train_sample_count).items()
+        }
+        train_epoch_time = time.perf_counter() - train_epoch_start
+        train_metrics["train/epoch_time_s"] = train_epoch_time
+        train_metrics["train/samples_per_s"] = (
+            train_sample_count / train_epoch_time if train_epoch_time > 0 else 0.0
+        )
+        avg_train_loss = train_metrics["train/loss_total"]
 
         model.eval()
-        val_loss = torch.zeros((), device=device)
+        val_metric_sums = {}
         n_val_batches = 0
+        val_sample_count = 0
+        val_epoch_start = time.perf_counter()
 
         with torch.inference_mode():
             for history_frames, action_seq, target_frames in tqdm(
@@ -1566,18 +1643,28 @@ def train_pixel_dynamics_phase(
                 target_frames = move_batch_tensor(
                     target_frames, device, non_blocking=device.type == "cuda"
                 )
+                batch_size = history_frames.size(0)
 
                 rollout_history = history_frames
                 loss = torch.zeros((), device=device)
                 n_steps = action_seq.size(1)
+                batch_metric_sums = {}
+                first_step_metrics = None
+                last_step_metrics = None
                 for step_idx in range(n_steps):
                     logits = model(rollout_history, action_seq[:, step_idx, :])
                     target_frame = target_frames[:, step_idx, :, :, :]
-                    loss = loss + pixel_dynamics_loss(
+                    step_metrics = pixel_dynamics_components(
                         logits,
                         target_frame,
                         rollout_history[:, -1:, :, :],
                     )
+                    loss = loss + step_metrics["loss_total"]
+                    add_weighted_metric_sums(batch_metric_sums, step_metrics, 1.0)
+                    if step_idx == 0:
+                        first_step_metrics = step_metrics
+                    if step_idx == n_steps - 1:
+                        last_step_metrics = step_metrics
                     _, _, next_input = feedback_from_logits(logits, pixel_feedback_mode)
                     rollout_history = torch.cat(
                         [rollout_history[:, 1:, :, :], next_input],
@@ -1585,10 +1672,29 @@ def train_pixel_dynamics_phase(
                     )
                 loss = loss / n_steps
 
-                val_loss += loss
+                batch_metrics = normalize_metric_sums(batch_metric_sums, n_steps)
+                batch_metrics["loss_total"] = metric_value(loss)
+                batch_metrics["loss_step_1"] = metric_value(first_step_metrics["loss_total"])
+                batch_metrics["loss_step_last"] = metric_value(last_step_metrics["loss_total"])
+                batch_metrics["loss_last_over_first"] = batch_metrics["loss_step_last"] / max(
+                    batch_metrics["loss_step_1"], 1e-8
+                )
+                batch_metrics["dice_step_1"] = metric_value(first_step_metrics["dice"])
+                batch_metrics["dice_step_last"] = metric_value(last_step_metrics["dice"])
+                add_weighted_metric_sums(val_metric_sums, batch_metrics, batch_size)
+                val_sample_count += batch_size
                 n_val_batches += 1
 
-        avg_val_loss = (val_loss / n_val_batches).detach().cpu().item()
+        val_metrics = {
+            f"val/{key}": value
+            for key, value in normalize_metric_sums(val_metric_sums, val_sample_count).items()
+        }
+        val_epoch_time = time.perf_counter() - val_epoch_start
+        val_metrics["val/epoch_time_s"] = val_epoch_time
+        val_metrics["val/samples_per_s"] = (
+            val_sample_count / val_epoch_time if val_epoch_time > 0 else 0.0
+        )
+        avg_val_loss = val_metrics["val/loss_total"]
 
         print(
             "Epoch "
@@ -1596,12 +1702,15 @@ def train_pixel_dynamics_phase(
             f"Val Loss: {avg_val_loss:.6f}"
         )
 
+        best_val_improved = False
         if is_val_improved(avg_val_loss, best_val_loss, early_stopping_min_delta):
             best_val_loss = avg_val_loss
+            best_epoch = epoch + 1
             epochs_without_improvement = 0
             best_model_path = os.path.join(output_dir, f"{dataset_name}-pixel-dynamics.pt")
             torch.save(model.state_dict(), best_model_path)
             print(f"  -> Saved best model (val_loss: {best_val_loss:.6f})")
+            best_val_improved = True
         elif early_stopping_patience > 0:
             epochs_without_improvement += 1
             print(
@@ -1616,12 +1725,64 @@ def train_pixel_dynamics_phase(
                 empty_device_cache()
                 break
 
+        epoch_metrics = {}
+        epoch_metrics.update(train_metrics)
+        epoch_metrics.update(val_metrics)
+        epoch_metrics["health/generalization_gap_ratio"] = (
+            avg_val_loss / avg_train_loss if avg_train_loss > 0 else 0.0
+        )
+        epoch_metrics["health/best_val_improved"] = float(best_val_improved)
+        epoch_metrics["health/epochs_without_improvement"] = epochs_without_improvement
+        if tracker is not None:
+            tracker.log_epoch("pixel_dynamics", epoch_metrics, epoch)
+
+        if tracker is not None and eval_examples and (best_val_improved or (epoch + 1) % 5 == 0):
+            predicted_rollouts = []
+            target_rollouts = []
+            history_last_frames = []
+            with torch.inference_mode():
+                for history_frames, action_seq, target_frames in eval_examples:
+                    history_tensor = torch.from_numpy(history_frames).float().unsqueeze(0).to(device)
+                    action_tensor = torch.from_numpy(action_seq).float().unsqueeze(0).to(device)
+                    rollout_history = history_tensor
+                    rollout_predictions = []
+                    for step_idx in range(action_tensor.size(1)):
+                        logits = model(rollout_history, action_tensor[:, step_idx, :])
+                        probs, _, next_input = feedback_from_logits(logits, pixel_feedback_mode)
+                        rollout_predictions.append(probs[0, 0].detach().cpu().numpy())
+                        rollout_history = torch.cat(
+                            [rollout_history[:, 1:, :, :], next_input],
+                            dim=1,
+                        )
+                    predicted_rollouts.append(rollout_predictions)
+                    target_rollouts.append([frame for frame in target_frames])
+                    history_last_frames.append(history_frames[-1])
+
+            grid = make_pixel_rollout_media_grid(
+                history_last_frames,
+                predicted_rollouts,
+                target_rollouts,
+            )
+            tracker.log_media(
+                "pixel_dynamics",
+                {
+                    "media/rollout_strip": tracker.image(
+                        grid, caption=f"Epoch {epoch + 1} pixel rollouts"
+                    )
+                },
+                epoch,
+            )
+
         empty_device_cache()
 
     print(f"\nPhase 1 complete. Best model saved to: {best_model_path}")
     print(f"Best validation loss: {best_val_loss:.6f}")
 
-    return best_model_path
+    return {
+        "best_model_path": best_model_path,
+        "best_val_loss": best_val_loss,
+        "best_epoch": best_epoch,
+    }
 
 
 # =============================================================================
@@ -1768,6 +1929,7 @@ def main():
         help="Optional path to a pre-trained pixel dynamics checkpoint to resume from",
     )
 
+    load_dotenv()
     args = parser.parse_args()
 
     GAME_CONFIG = infer_game_config(dataset_id=args.dataset, game=args.game)
@@ -1820,19 +1982,24 @@ def main():
     print(f"Output directory: {args.output_dir}")
     print("=" * 60)
 
+    tracker = TrainingTracker()
+
     # Load and preprocess data
     if args.dynamics_mode == "pixel":
-        train_sequences, val_sequences = load_pixel_rollout_dataset(
+        train_sequences, val_sequences, dataset_stats = load_pixel_rollout_dataset(
             args.dataset,
             unroll_steps=args.pixel_unroll_steps,
             sequence_stride=args.sequence_stride,
         )
     else:
-        train_sequences, val_sequences = load_and_preprocess_dataset(args.dataset)
+        train_sequences, val_sequences, dataset_stats = load_and_preprocess_dataset(args.dataset)
 
         if args.sequence_stride > 1:
             train_sequences = train_sequences[:: args.sequence_stride]
             val_sequences = val_sequences[:: args.sequence_stride]
+            dataset_stats["data/train_sequences"] = len(train_sequences)
+            dataset_stats["data/val_sequences"] = len(val_sequences)
+            dataset_stats.update(sequence_action_fraction_metrics(train_sequences, val_sequences))
             print(
                 "After sequence stride "
                 f"{args.sequence_stride}: train={len(train_sequences)}, val={len(val_sequences)}"
@@ -1843,10 +2010,23 @@ def main():
         sys.exit(1)
 
     if args.dynamics_mode == "pixel":
+        tracker.init_run(
+            args,
+            {
+                **dataset_stats,
+                "run/device_type": device.type,
+                "run/image_width": IMAGE_WIDTH,
+                "run/image_height": IMAGE_HEIGHT,
+                "run/history_length": HISTORY_LENGTH,
+            },
+        )
+        tracker.log_run_metrics(dataset_stats)
+
         if args.skip_dynamics:
             print("\nSkipping pixel dynamics model training")
+            pixel_result = None
         else:
-            train_pixel_dynamics_phase(
+            pixel_result = train_pixel_dynamics_phase(
                 train_sequences,
                 val_sequences,
                 TRAIN_N_EPOCHS,
@@ -1857,6 +2037,7 @@ def main():
                 pixel_dynamics_path=args.pixel_dynamics_path,
                 pixel_feedback_mode=args.pixel_feedback_mode,
                 pixel_refine_blocks=args.pixel_refine_blocks,
+                tracker=tracker,
             )
     else:
         train_frames = extract_unique_frames(train_sequences)
@@ -1864,6 +2045,24 @@ def main():
 
         print(f"Unique autoencoder train frames: {len(train_frames)}")
         print(f"Unique autoencoder val frames: {len(val_frames)}")
+
+        run_stats = {
+            **dataset_stats,
+            "run/device_type": device.type,
+            "run/image_width": IMAGE_WIDTH,
+            "run/image_height": IMAGE_HEIGHT,
+            "run/history_length": HISTORY_LENGTH,
+            "run/unique_autoencoder_train_frames": len(train_frames),
+            "run/unique_autoencoder_val_frames": len(val_frames),
+        }
+        tracker.init_run(args, run_stats)
+        tracker.log_run_metrics(
+            {
+                **dataset_stats,
+                "run/unique_autoencoder_train_frames": len(train_frames),
+                "run/unique_autoencoder_val_frames": len(val_frames),
+            }
+        )
 
         train_dataset = FrameDataset(train_frames)
         val_dataset = FrameDataset(val_frames)
@@ -1876,8 +2075,10 @@ def main():
         )
 
         autoencoder_path = None
+        autoencoder_result = None
+        dynamics_result = None
         if not args.skip_autoencoder:
-            autoencoder_path = train_autoencoder_phase(
+            autoencoder_result = train_autoencoder_phase(
                 train_loader,
                 val_loader,
                 TRAIN_N_EPOCHS,
@@ -1885,7 +2086,9 @@ def main():
                 dataset_name,
                 EARLY_STOPPING_PATIENCE,
                 EARLY_STOPPING_MIN_DELTA,
+                tracker=tracker,
             )
+            autoencoder_path = autoencoder_result["best_model_path"]
         else:
             if args.autoencoder_path:
                 autoencoder_path = args.autoencoder_path
@@ -1900,7 +2103,7 @@ def main():
             print(f"\nSkipping autoencoder training. Using: {autoencoder_path}")
 
         if not args.skip_dynamics:
-            train_dynamics_phase(
+            dynamics_result = train_dynamics_phase(
                 autoencoder_path,
                 train_sequences,
                 val_sequences,
@@ -1909,6 +2112,7 @@ def main():
                 dataset_name,
                 EARLY_STOPPING_PATIENCE,
                 EARLY_STOPPING_MIN_DELTA,
+                tracker=tracker,
             )
         else:
             print("\nSkipping dynamics model training")
@@ -1927,6 +2131,27 @@ def main():
         f"--image-width {IMAGE_WIDTH} --image-height {IMAGE_HEIGHT}"
     )
     print("=" * 60)
+
+    summary = {
+        "run/dataset": args.dataset,
+        "run/dynamics_mode": args.dynamics_mode,
+        "run/output_dir": args.output_dir,
+    }
+    if args.dynamics_mode == "pixel":
+        if not args.skip_dynamics and pixel_result is not None:
+            summary["pixel_dynamics/best_val_loss"] = pixel_result["best_val_loss"]
+            summary["pixel_dynamics/best_epoch"] = pixel_result["best_epoch"]
+            summary["pixel_dynamics/best_model_path"] = pixel_result["best_model_path"]
+    else:
+        if autoencoder_result is not None:
+            summary["autoencoder/best_val_loss"] = autoencoder_result["best_val_loss"]
+            summary["autoencoder/best_epoch"] = autoencoder_result["best_epoch"]
+            summary["autoencoder/best_model_path"] = autoencoder_result["best_model_path"]
+        if dynamics_result is not None:
+            summary["latent_dynamics/best_val_loss"] = dynamics_result["best_val_loss"]
+            summary["latent_dynamics/best_epoch"] = dynamics_result["best_epoch"]
+            summary["latent_dynamics/best_model_path"] = dynamics_result["best_model_path"]
+    tracker.finish(summary)
 
 
 if __name__ == "__main__":

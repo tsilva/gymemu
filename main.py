@@ -16,6 +16,7 @@ from pixel_feedback import (
     clear_ball_like_components,
     feedback_from_logits,
     init_breakout_ball_state,
+    init_breakout_paddle_state,
     overlay_breakout_ball,
     paddle_motion_mask,
     shift_paddle_frames,
@@ -275,15 +276,30 @@ def render_frame(screen, frame_uint8):
     pygame.display.flip()
 
 
-def build_action_vector(keys, game_config):
+def build_action_vector(keys, game_config, allow_fire=True):
     action = np.zeros(game_config.n_actions, dtype=np.float32)
     action[0] = 1.0
 
+    fire_action_id = None
+    horizontal_action_id = None
     for binding in game_config.key_bindings:
-        if keys[getattr(pygame, binding.pygame_key)]:
-            action[:] = 0.0
-            action[binding.action_id] = 1.0
-            break
+        if not keys[getattr(pygame, binding.pygame_key)]:
+            continue
+        if binding.label == "FIRE":
+            fire_action_id = binding.action_id
+            continue
+        if binding.label in {"RIGHT", "LEFT"} and horizontal_action_id is None:
+            horizontal_action_id = binding.action_id
+
+    chosen_action_id = None
+    if allow_fire and fire_action_id is not None:
+        chosen_action_id = fire_action_id
+    elif horizontal_action_id is not None:
+        chosen_action_id = horizontal_action_id
+
+    if chosen_action_id is not None:
+        action[:] = 0.0
+        action[chosen_action_id] = 1.0
 
     return action
 
@@ -482,8 +498,10 @@ def main():
                 1,
             )
             ball_state = None
+            paddle_state = None
             if breakout_ball_enabled:
                 initial_binary = (frame_history[0, -1] >= 0.5).float().detach().cpu()
+                paddle_state = init_breakout_paddle_state(initial_binary)
                 ball_state = init_breakout_ball_state(initial_binary)
                 if ball_state is not None and ball_state.attached:
                     for history_index in range(frame_history.size(1)):
@@ -508,6 +526,7 @@ def main():
             breakout_ball_enabled = False
             launch_action_id = 1
             ball_state = None
+            paddle_state = None
 
     pygame.init()
     window_size = (IMAGE_WIDTH * display_scale, IMAGE_HEIGHT * display_scale)
@@ -525,17 +544,21 @@ def main():
                 running = False
 
         keys = pygame.key.get_pressed()
-        action = build_action_vector(keys, game_config)
+        allow_fire = True
+        if breakout_ball_enabled and ball_state is not None and not ball_state.attached:
+            allow_fire = False
+        action = build_action_vector(keys, game_config, allow_fire=allow_fire)
         action_tensor = torch.from_numpy(action).unsqueeze(0).to(device)
 
         with torch.inference_mode():
             if args.dynamics_mode == "pixel":
                 if breakout_ball_enabled:
                     action_id = int(action_tensor.argmax(dim=1).item())
-                    next_binary_frame, ball_state, _ = step_breakout_scene(
+                    next_binary_frame, ball_state, paddle_state, _ = step_breakout_scene(
                         frame_history[0, -1].detach().cpu(),
                         action_id,
                         ball_state,
+                        paddle_state,
                         shift_pixels=args.pixel_paddle_shift,
                         launch_action_id=launch_action_id,
                         right_wall=IMAGE_WIDTH - 5,
