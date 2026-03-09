@@ -3,10 +3,70 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _normalized_flow_grid(flow_pixels: torch.Tensor) -> torch.Tensor:
+    batch_size, _, height, width = flow_pixels.shape
+    device = flow_pixels.device
+    dtype = flow_pixels.dtype
+
+    y_coords = ((torch.arange(height, device=device, dtype=dtype) + 0.5) * 2.0 / height) - 1.0
+    x_coords = ((torch.arange(width, device=device, dtype=dtype) + 0.5) * 2.0 / width) - 1.0
+    base_y, base_x = torch.meshgrid(y_coords, x_coords, indexing="ij")
+    base_grid = torch.stack((base_x, base_y), dim=-1).unsqueeze(0).expand(batch_size, -1, -1, -1)
+
+    scale_x = 2.0 / max(width, 1)
+    scale_y = 2.0 / max(height, 1)
+    flow_x = flow_pixels[:, 0, :, :] * scale_x
+    flow_y = flow_pixels[:, 1, :, :] * scale_y
+    flow_grid = torch.stack((flow_x, flow_y), dim=-1)
+    return base_grid + flow_grid
+
+
+def load_spatial_model_state_dict(
+    model: nn.Module,
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, list[str]]:
+    model_state = model.state_dict()
+    remapped_state = dict(state_dict)
+    notes = []
+
+    legacy_decoder_keys = [
+        "decoder.0.weight",
+        "decoder.0.bias",
+        "decoder.2.weight",
+        "decoder.2.bias",
+    ]
+    if any(key in remapped_state for key in legacy_decoder_keys):
+        legacy_to_current = {
+            "decoder.0.weight": "residual_head.0.weight",
+            "decoder.0.bias": "residual_head.0.bias",
+            "decoder.2.weight": "residual_head.2.weight",
+            "decoder.2.bias": "residual_head.2.bias",
+        }
+        for old_key, new_key in legacy_to_current.items():
+            if old_key in remapped_state:
+                remapped_state[new_key] = remapped_state.pop(old_key)
+        notes.append("remapped legacy decoder weights into residual_head")
+
+    for key, value in model_state.items():
+        remapped_state.setdefault(key, value)
+
+    incompatible = model.load_state_dict(remapped_state, strict=False)
+    unexpected_keys = list(incompatible.unexpected_keys)
+    missing_keys = list(incompatible.missing_keys)
+    if not missing_keys:
+        notes.append("filled missing parameters from current model init")
+
+    return {
+        "missing_keys": missing_keys,
+        "unexpected_keys": unexpected_keys,
+        "notes": notes,
+    }
+
+
 class SpatialActionConditionedResidualBlock(nn.Module):
     def __init__(self, channels: int, n_actions: int, dilation: int):
         super().__init__()
-        self.action_bias = nn.Linear(n_actions, channels)
+        self.action_affine = nn.Linear(n_actions, channels * 2)
         self.conv1 = nn.Conv2d(
             channels,
             channels,
@@ -16,14 +76,15 @@ class SpatialActionConditionedResidualBlock(nn.Module):
         )
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
 
-        nn.init.zeros_(self.action_bias.weight)
-        nn.init.zeros_(self.action_bias.bias)
         nn.init.zeros_(self.conv2.weight)
         nn.init.zeros_(self.conv2.bias)
 
     def forward(self, x: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        action_bias = self.action_bias(action).unsqueeze(-1).unsqueeze(-1)
-        hidden = F.gelu(self.conv1(x + action_bias))
+        scale, bias = self.action_affine(action).chunk(2, dim=1)
+        scale = scale.unsqueeze(-1).unsqueeze(-1)
+        bias = bias.unsqueeze(-1).unsqueeze(-1)
+        hidden = x * (1.0 + 0.1 * torch.tanh(scale)) + 0.1 * torch.tanh(bias)
+        hidden = F.gelu(self.conv1(hidden))
         hidden = self.conv2(hidden)
         return x + hidden
 
@@ -40,62 +101,131 @@ class SpatialLatentWorldModel(nn.Module):
         self.history_length = history_length
         self.n_actions = n_actions
         self.latent_channels = latent_channels
+        self.history_input_channels = history_length + max(0, history_length - 1)
+        self.max_flow_pixels = 3.0
+
+        stem_channels = max(16, latent_channels // 2)
+        context_blocks = max(1, refine_blocks // 2)
 
         self.encoder = nn.Sequential(
-            nn.Conv2d(history_length, 32, kernel_size=5, stride=2, padding=2),
+            nn.Conv2d(self.history_input_channels, stem_channels, kernel_size=5, padding=2),
             nn.GELU(),
-            nn.Conv2d(32, latent_channels, kernel_size=5, stride=2, padding=2),
+            nn.Conv2d(stem_channels, latent_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+        )
+
+        self.local_dynamics = nn.Sequential(
+            nn.Conv2d(latent_channels + n_actions, latent_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+        )
+        self.local_blocks = nn.ModuleList(
+            [
+                SpatialActionConditionedResidualBlock(
+                    channels=latent_channels,
+                    n_actions=n_actions,
+                    dilation=2 ** (block_idx % 4),
+                )
+                for block_idx in range(refine_blocks)
+            ]
+        )
+
+        self.context_down = nn.Sequential(
+            nn.Conv2d(latent_channels, latent_channels, kernel_size=3, stride=2, padding=1),
             nn.GELU(),
             nn.Conv2d(latent_channels, latent_channels, kernel_size=3, padding=1),
             nn.GELU(),
         )
-
-        self.dynamics_in = nn.Sequential(
-            nn.Conv2d(latent_channels + n_actions, latent_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-        )
-        self.refine_blocks = nn.ModuleList(
+        self.context_blocks = nn.ModuleList(
             [
                 SpatialActionConditionedResidualBlock(
                     channels=latent_channels,
                     n_actions=n_actions,
                     dilation=2 ** (block_idx % 3),
                 )
-                for block_idx in range(refine_blocks)
+                for block_idx in range(context_blocks)
+            ]
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv2d(latent_channels * 2, latent_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+        )
+        self.output_blocks = nn.ModuleList(
+            [
+                SpatialActionConditionedResidualBlock(
+                    channels=latent_channels,
+                    n_actions=n_actions,
+                    dilation=2 ** (block_idx % 3),
+                )
+                for block_idx in range(context_blocks)
             ]
         )
         self.latent_delta = nn.Conv2d(latent_channels, latent_channels, kernel_size=3, padding=1)
         nn.init.zeros_(self.latent_delta.weight)
         nn.init.zeros_(self.latent_delta.bias)
 
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(latent_channels, 32, kernel_size=4, stride=2, padding=1),
+        self.residual_head = nn.Sequential(
+            nn.Conv2d(latent_channels, stem_channels, kernel_size=3, padding=1),
             nn.GELU(),
-            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(16, 1, kernel_size=3, padding=1),
+            nn.Conv2d(stem_channels, 1, kernel_size=3, padding=1),
         )
+        self.flow_head = nn.Sequential(
+            nn.Conv2d(latent_channels, stem_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(stem_channels, 2, kernel_size=3, padding=1),
+        )
+        nn.init.zeros_(self.flow_head[-1].weight)
+        nn.init.zeros_(self.flow_head[-1].bias)
 
     def encode_history(self, history_frames: torch.Tensor) -> torch.Tensor:
-        return self.encoder(history_frames)
+        if history_frames.size(1) >= 2:
+            history_deltas = history_frames[:, 1:, :, :] - history_frames[:, :-1, :, :]
+            history_input = torch.cat([history_frames, history_deltas], dim=1)
+        else:
+            history_input = history_frames
+        return self.encoder(history_input)
 
     def predict_next_latent(
         self, latent_history: torch.Tensor, action: torch.Tensor
     ) -> torch.Tensor:
         height, width = latent_history.shape[-2:]
         action_planes = action[:, :, None, None].expand(-1, -1, height, width)
-        hidden = self.dynamics_in(torch.cat([latent_history, action_planes], dim=1))
-        for block in self.refine_blocks:
+        hidden = self.local_dynamics(torch.cat([latent_history, action_planes], dim=1))
+        for block in self.local_blocks:
             hidden = block(hidden, action)
+
+        context = self.context_down(hidden)
+        for block in self.context_blocks:
+            context = block(context, action)
+        context = F.interpolate(
+            context,
+            size=(height, width),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        hidden = self.fuse(torch.cat([hidden, context], dim=1))
+        for block in self.output_blocks:
+            hidden = block(hidden, action)
+
         delta = self.latent_delta(hidden)
         return latent_history + delta
 
     def decode_latent(self, latent_state: torch.Tensor) -> torch.Tensor:
-        return self.decoder(latent_state)
+        return self.residual_head(latent_state)
 
     def forward(self, history_frames: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         latent_history = self.encode_history(history_frames)
         next_latent = self.predict_next_latent(latent_history, action)
         residual_logits = self.decode_latent(next_latent)
-        baseline = history_frames[:, -1:, :, :].clamp(1e-4, 1.0 - 1e-4)
+        flow_pixels = torch.tanh(self.flow_head(next_latent)) * self.max_flow_pixels
+        flow_grid = _normalized_flow_grid(flow_pixels)
+        last_frame = history_frames[:, -1:, :, :]
+        warped = F.grid_sample(
+            last_frame,
+            flow_grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=False,
+        )
+        baseline = warped.clamp(1e-4, 1.0 - 1e-4)
         return torch.logit(baseline) + residual_logits

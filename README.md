@@ -185,8 +185,9 @@ python train.py \
 
 For a generic learned path with no game-specific runtime logic, train with
 `--dynamics-mode spatial`. This model still consumes `history + action`, but it first
-encodes the history into a small spatial latent map, predicts the next latent map, and
-decodes that to next-frame logits.
+encodes the history into a spatial latent map, augments that with temporal-difference
+channels, predicts the next latent map, and decodes it as a warped copy of the last
+frame plus residual logits.
 
 Useful knobs:
 
@@ -194,6 +195,7 @@ Useful knobs:
 - `--spatial-refine-blocks`: number of action-conditioned residual blocks in latent space
 - `--spatial-dynamics-path`: optional checkpoint to resume from
 - `--pixel-feedback-mode`: how predicted frames are fed back during rollout training
+- `--rollout-samples-per-epoch`: cap the weighted rollout samples per training epoch
 
 Example generic training run:
 
@@ -239,7 +241,7 @@ python main.py \
 ```
 
 For direct pixel models, also pass the pixel dynamics mode. Use `--pixel-feedback soft`
-for the current best checkpoints in this repo:
+for checkpoints trained in direct frame space:
 
 ```bash
 python main.py \
@@ -255,9 +257,7 @@ python main.py \
   --image-height 96
 ```
 
-For the generic spatial-latent model, use `--dynamics-mode spatial`. This path does not
-apply the Breakout-specific paddle/ball/brick runtime priors used by the current
-experimental `pixel` mode:
+For the generic spatial-latent model, use `--dynamics-mode spatial`:
 
 ```bash
 python main.py \
@@ -274,27 +274,10 @@ python main.py \
   --image-height 96
 ```
 
-Runtime now also defaults to a conservative `NOOP` stability hold for near-static
-histories. That guard only applies when the action is `NOOP` and the predicted change is
-tiny, which keeps idle states from drifting frame by frame.
-
-For near-static `LEFT`/`RIGHT` states, runtime also applies a deterministic paddle shift in
-the bottom playfield band instead of trusting the learned model. That keeps simple paddle
-motion stable without changing the idle `NOOP` baseline.
-
-For Breakout pixel playback, runtime now also tracks a small explicit ball state. When the
-seed frame does not show a ball, it attaches one above the paddle; when the model predicts
-scene changes that do not match the current stable playfield, runtime keeps the stable
-background and advances just the ball. This preserves the current `NOOP` and paddle
-stability fixes while making the ball visible during serve and launch states.
-
-The Breakout `pixel` runtime now also treats paddle motion and brick hits explicitly:
-
-- `LEFT` and `RIGHT` always shift the paddle deterministically, even while the ball is in
-  flight.
-- ball movement bounces off the first brick pixel it hits in the brick band and clears a
-  small local patch, so the ball no longer phases through the wall of bricks while the
-  rest of the stable-scene logic stays intact.
+Both `pixel` and `spatial` runtime modes are now pure learned rollouts. At playback time
+the emulator just feeds `history + action` into the selected model and rolls forward from
+its predicted next frame. There are no Breakout-specific paddle, ball, brick, or
+stationary-state overrides in the runtime path.
 
 Controls:
 
