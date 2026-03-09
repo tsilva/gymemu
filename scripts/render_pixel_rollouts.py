@@ -8,7 +8,12 @@ from PIL import Image, ImageDraw
 
 from game_config import BREAKOUT_CONFIG, infer_game_config
 from pixel_feedback import (
+    advance_breakout_ball_state,
+    clear_ball_like_components,
+    erase_breakout_ball,
     feedback_from_logits,
+    init_breakout_ball_state,
+    overlay_breakout_ball,
     paddle_motion_mask,
     shift_paddle_frames,
     static_noop_mask,
@@ -134,6 +139,7 @@ def fetch_seed_history(args, game_config):
 
 def rollout_policy(
     model,
+    game_config,
     seed_history,
     policy_actions,
     steps,
@@ -146,7 +152,27 @@ def rollout_policy(
     paddle_shift,
 ):
     history = torch.from_numpy(seed_history).unsqueeze(0).float()
-    frames = [seed_history[-1]]
+    breakout_ball_enabled = game_config.name == BREAKOUT_CONFIG.name
+    launch_action_id = next(
+        (
+            binding.action_id
+            for binding in game_config.key_bindings
+            if binding.label == "FIRE"
+        ),
+        1,
+    )
+    ball_state = None
+    if breakout_ball_enabled:
+        initial_binary = (history[0, -1] >= 0.5).float()
+        ball_state = init_breakout_ball_state(initial_binary)
+        if ball_state is not None and ball_state.attached:
+            for history_index in range(history.size(1)):
+                cleaned_frame = clear_ball_like_components(history[0, history_index])
+                history[0, history_index] = overlay_breakout_ball(
+                    cleaned_frame,
+                    ball_state,
+                )
+    frames = [history[0, -1].cpu().numpy()]
 
     for step in range(steps):
         action_index = min(step, len(policy_actions) - 1)
@@ -154,6 +180,8 @@ def rollout_policy(
         with torch.inference_mode():
             current_frame = history[:, -1:, :, :]
             current_binary = (current_frame >= 0.5).float()
+            deterministic_binary_frame = current_binary[0, 0]
+            deterministic_input_frame = current_frame[0, 0]
             logits = model(history, action)
             _, binary, next_input = feedback_from_logits(logits, feedback)
             if static_noop_hold:
@@ -178,8 +206,53 @@ def rollout_policy(
                     paddle_mask = paddle_mask & applied_mask
                     if bool(paddle_mask.any()):
                         paddle_mask = paddle_mask[:, None, None, None]
+                        deterministic_binary_frame = shifted_binary[0, 0]
+                        deterministic_input_frame = shifted_binary[0, 0]
                         binary = torch.where(paddle_mask, shifted_binary, binary)
                         next_input = torch.where(paddle_mask, shifted_binary, next_input)
+            if breakout_ball_enabled:
+                action_id = int(action.argmax(dim=1).item())
+                attached_ball = ball_state is not None and ball_state.attached
+                deterministic_binary_frame = erase_breakout_ball(
+                    deterministic_binary_frame,
+                    ball_state,
+                )
+                deterministic_input_frame = erase_breakout_ball(
+                    deterministic_input_frame,
+                    ball_state,
+                )
+                deterministic_binary_frame = clear_ball_like_components(
+                    deterministic_binary_frame
+                )
+                deterministic_input_frame = clear_ball_like_components(
+                    deterministic_input_frame
+                )
+                next_binary_frame = clear_ball_like_components(binary[0, 0])
+                next_input_frame = clear_ball_like_components(next_input[0, 0])
+                next_binary_frame = erase_breakout_ball(next_binary_frame, ball_state)
+                next_input_frame = erase_breakout_ball(next_input_frame, ball_state)
+                if attached_ball:
+                    next_binary_frame = deterministic_binary_frame
+                    next_input_frame = deterministic_input_frame
+                else:
+                    predicted_scene_diff = (
+                        next_binary_frame - deterministic_binary_frame
+                    ).abs().sum()
+                    if predicted_scene_diff > static_predicted_diff_threshold:
+                        next_binary_frame = deterministic_binary_frame
+                        next_input_frame = deterministic_input_frame
+                ball_state = advance_breakout_ball_state(
+                    ball_state,
+                    action_id,
+                    next_binary_frame,
+                    launch_action_id=launch_action_id,
+                    right_wall=history.size(-1) - 5,
+                    bottom_wall=history.size(-2) - 1,
+                )
+                next_binary_frame = overlay_breakout_ball(next_binary_frame, ball_state)
+                next_input_frame = overlay_breakout_ball(next_input_frame, ball_state)
+                binary = next_binary_frame.unsqueeze(0).unsqueeze(0)
+                next_input = next_input_frame.unsqueeze(0).unsqueeze(0)
         history = torch.cat([history[:, 1:, :, :], next_input], dim=1)
         frames.append(binary[0, 0].cpu().numpy())
 
@@ -242,6 +315,7 @@ def main():
     rollouts = {
         label: rollout_policy(
             model,
+            game_config,
             seed_history,
             actions,
             args.steps,

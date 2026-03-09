@@ -209,6 +209,12 @@ For near-static `LEFT`/`RIGHT` states, runtime also applies a deterministic padd
 the bottom playfield band instead of trusting the learned model. That keeps simple paddle
 motion stable without changing the idle `NOOP` baseline.
 
+For Breakout pixel playback, runtime now also tracks a small explicit ball state. When the
+seed frame does not show a ball, it attaches one above the paddle; when the model predicts
+scene changes that do not match the current stable playfield, runtime keeps the stable
+background and advances just the ball. This preserves the current `NOOP` and paddle
+stability fixes while making the ball visible during serve and launch states.
+
 Controls:
 
 - `Space`: `FIRE`
