@@ -1,19 +1,18 @@
 import argparse
-import io
-import json
 import os
-import urllib.parse
-import urllib.request
 
 import numpy as np
 import pygame
 import torch
 import torch.nn as nn
+from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
+from dataset_utils import infer_history_length
 from device_utils import configure_torch, get_device, move_batch_tensor, prepare_conv_module
 from game_config import BREAKOUT_CONFIG, infer_game_config
+from pixel_feedback import feedback_from_logits
 from preprocessing import has_valid_black_background, preprocess_frame
 
 MODEL_COMPILE_DEFAULT = True
@@ -22,6 +21,7 @@ MODEL_LATENT_NOISE_FACTOR = 0.0
 IMAGE_CHANNELS = 1
 IMAGE_WIDTH = 80
 IMAGE_HEIGHT = 96
+HISTORY_LENGTH = 1
 DISPLAY_SCALE = 4
 DEFAULT_MPS_DISPLAY_SCALE = 3
 
@@ -44,7 +44,7 @@ class ConvAutoencoder(nn.Module):
         with torch.no_grad():
             dummy_input = torch.zeros(1, IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH)
             dummy_output = self.encoder_conv(dummy_input)
-            self._flattened_size = dummy_output.view(1, -1).shape[1]
+            self._flattened_size = dummy_output.reshape(1, -1).shape[1]
             self._conv_output_shape = dummy_output.shape[1:]
 
         if self.use_bottleneck:
@@ -63,14 +63,16 @@ class ConvAutoencoder(nn.Module):
     def encode(self, x):
         x = self.encoder_conv(x)
         if self.use_bottleneck:
-            x = x.view(x.size(0), -1)
+            x = x.reshape(x.size(0), -1)
             x = self.fc_enc(x)
+            x = torch.tanh(x)
         return x
 
     def decode(self, z):
         if self.use_bottleneck:
+            z = torch.clamp(z, -1.0, 1.0)
             z = self.fc_dec(z)
-            z = z.view(z.size(0), *self._conv_output_shape)
+            z = z.reshape(z.size(0), *self._conv_output_shape)
         return self.decoder_conv(z)
 
     def forward(self, x):
@@ -82,21 +84,52 @@ class ConvAutoencoder(nn.Module):
 
 
 class DynamicsModel(nn.Module):
-    def __init__(self, z_dim=MODEL_LATENT_DIM, n_actions=BREAKOUT_CONFIG.n_actions):
+    def __init__(
+        self,
+        z_dim=MODEL_LATENT_DIM,
+        n_actions=BREAKOUT_CONFIG.n_actions,
+        history_length=HISTORY_LENGTH,
+    ):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(z_dim + n_actions),
-            nn.Linear(z_dim + n_actions, 128),
+        history_dim = z_dim * history_length
+        self.n_actions = n_actions
+        self.history_net = nn.Sequential(
+            nn.LayerNorm(history_dim),
+            nn.Linear(history_dim, 128),
             nn.GELU(),
             nn.Linear(128, 128),
             nn.GELU(),
-            nn.Linear(128, z_dim),
         )
-        nn.init.orthogonal_(self.net[1].weight)
-        nn.init.zeros_(self.net[-1].bias)
+        nn.init.orthogonal_(self.history_net[1].weight)
+        self.action_heads = nn.ModuleList([nn.Linear(128, z_dim) for _ in range(n_actions)])
+        for head in self.action_heads:
+            nn.init.zeros_(head.bias)
 
-    def forward(self, z_and_a):
-        return self.net(z_and_a)
+    def forward(self, latent_history, action):
+        hidden = self.history_net(latent_history)
+        all_deltas = torch.stack([head(hidden) for head in self.action_heads], dim=1)
+        action_weights = action.unsqueeze(-1)
+        return (all_deltas * action_weights).sum(dim=1)
+
+
+class FrameDynamicsModel(nn.Module):
+    def __init__(self, history_length=HISTORY_LENGTH, n_actions=BREAKOUT_CONFIG.n_actions):
+        super().__init__()
+        in_channels = history_length + n_actions
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 24, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.Conv2d(24, 24, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(24, 1, kernel_size=3, padding=1),
+        )
+
+    def forward(self, history_frames, action):
+        height, width = history_frames.shape[-2:]
+        action_planes = action[:, :, None, None].expand(-1, -1, height, width)
+        x = torch.cat([history_frames, action_planes], dim=1)
+        baseline = history_frames[:, -1:, :, :].clamp(1e-4, 1.0 - 1e-4)
+        return torch.logit(baseline) + self.net(x)
 
 
 def maybe_compile(model, enabled, device):
@@ -117,6 +150,28 @@ def resolve_model_path(dataset_id, artifact_name, use_local_models, models_dir):
 
 
 def load_trained_models(args, device, n_actions):
+    if args.dynamics_mode == "pixel":
+        dynamics_model = prepare_conv_module(
+            FrameDynamicsModel(
+                history_length=args.history_length,
+                n_actions=n_actions,
+            ),
+            device,
+        )
+        dynamics_model = maybe_compile(dynamics_model, args.model_compile, device)
+        dynamics_path = resolve_model_path(
+            args.dataset,
+            "pixel-dynamics",
+            args.use_local_models,
+            args.models_dir,
+        )
+        dynamics_model.load_state_dict(
+            torch.load(dynamics_path, map_location=device, weights_only=True)
+        )
+        dynamics_model.eval()
+        print(f"Pixel dynamics model: {dynamics_path}")
+        return None, dynamics_model
+
     representation_model = prepare_conv_module(
         ConvAutoencoder(args.latent_dim), device
     )
@@ -135,7 +190,11 @@ def load_trained_models(args, device, n_actions):
     representation_model.eval()
 
     dynamics_model = prepare_conv_module(
-        DynamicsModel(z_dim=args.latent_dim, n_actions=n_actions),
+        DynamicsModel(
+            z_dim=args.latent_dim,
+            n_actions=n_actions,
+            history_length=args.history_length,
+        ),
         device,
     )
     dynamics_model = maybe_compile(dynamics_model, args.model_compile, device)
@@ -157,38 +216,58 @@ def load_trained_models(args, device, n_actions):
 
 
 def fetch_remote_start_frame(dataset_id, game_config):
-    params = urllib.parse.urlencode(
-        {
-            "dataset": dataset_id,
-            "config": "default",
-            "split": "train",
-            "offset": 0,
-            "length": 32,
-        }
-    )
-    rows_url = f"https://datasets-server.huggingface.co/rows?{params}"
-    with urllib.request.urlopen(rows_url) as response:
-        payload = json.load(response)
+    dataset = load_dataset(dataset_id, split="train", streaming=True)
 
-    for row in payload["rows"]:
-        image_url = row["row"]["observations"]["src"]
-        with urllib.request.urlopen(image_url) as image_response:
-            image = Image.open(io.BytesIO(image_response.read())).convert("RGB")
+    uses_stacked_samples = {
+        "history",
+        "action",
+        "next_frame",
+    }.issubset(set(dataset.features))
+    if uses_stacked_samples:
+        sample = next(iter(dataset))
+        history = np.asarray(sample["history"], dtype=np.float32)
+        return history
+
+    history_frames = []
+    for row in dataset:
+        image = row["observations"]
         if has_valid_black_background(image, game_config):
-            return image
+            history_frames.append(
+                preprocess_frame(
+                    image,
+                    game_config,
+                    target_size=(IMAGE_WIDTH, IMAGE_HEIGHT),
+                ).astype(np.float32, copy=False)
+            )
+            if len(history_frames) >= HISTORY_LENGTH:
+                return np.stack(history_frames[-HISTORY_LENGTH:], axis=0)
+        else:
+            history_frames.clear()
 
-    raise RuntimeError(f"Could not find a valid start frame in dataset '{dataset_id}'")
+    raise RuntimeError(
+        f"Could not find {HISTORY_LENGTH} valid consecutive frames in dataset '{dataset_id}'"
+    )
 
 
-def load_initial_frame(image_path, dataset_id, game_config):
+def load_initial_history(image_path, dataset_id, game_config, history_length):
     if image_path:
         image = Image.open(image_path)
+        frame = preprocess_frame(
+            image,
+            game_config,
+            target_size=(IMAGE_WIDTH, IMAGE_HEIGHT),
+        ).astype(np.float32, copy=False)
+        history_frames = np.repeat(frame[None, ...], history_length, axis=0)
     else:
-        image = fetch_remote_start_frame(dataset_id, game_config)
-    frame = preprocess_frame(image, game_config, target_size=(IMAGE_WIDTH, IMAGE_HEIGHT))
-    frame_uint8 = (frame * 255).astype(np.uint8)
-    frame_tensor = torch.from_numpy(frame).unsqueeze(0).unsqueeze(0).float()
-    return frame_uint8, frame_tensor
+        history_frames = fetch_remote_start_frame(dataset_id, game_config)
+        if history_frames.shape[0] != history_length:
+            raise ValueError(
+                f"Expected start history length {history_length}, got {history_frames.shape[0]}"
+            )
+
+    history_uint8 = (history_frames[-1] * 255).astype(np.uint8)
+    history_tensor = torch.from_numpy(history_frames).unsqueeze(1).float()
+    return history_uint8, history_tensor
 
 
 def render_frame(screen, frame_uint8):
@@ -230,6 +309,12 @@ def parse_args():
         help="Game profile for preprocessing and controls",
     )
     parser.add_argument(
+        "--dynamics-mode",
+        choices=("latent", "pixel"),
+        default="latent",
+        help="Run either the original latent model or a direct pixel predictor",
+    )
+    parser.add_argument(
         "--start-image",
         default=None,
         help="Optional local screenshot used to seed the latent state",
@@ -239,6 +324,15 @@ def parse_args():
         type=int,
         default=MODEL_LATENT_DIM,
         help="Latent dimension size used during training",
+    )
+    parser.add_argument(
+        "--history-length",
+        type=int,
+        default=None,
+        help=(
+            "Number of recent frames fed into the dynamics model. "
+            "Defaults to 1 unless inferred from the dataset name."
+        ),
     )
     parser.add_argument(
         "--image-size",
@@ -280,19 +374,27 @@ def parse_args():
         default=None,
         help="Window scaling factor for the rendered frame",
     )
+    parser.add_argument(
+        "--pixel-feedback",
+        choices=("soft", "hard"),
+        default="soft",
+        help="How pixel predictions are fed back into history at runtime",
+    )
     return parser.parse_args()
 
 
 def main():
-    global DISPLAY_SCALE, IMAGE_WIDTH, IMAGE_HEIGHT
+    global DISPLAY_SCALE, IMAGE_WIDTH, IMAGE_HEIGHT, HISTORY_LENGTH
 
     args = parse_args()
+    args.history_length = infer_history_length(args.dataset, args.history_length)
     if args.image_size is not None:
         IMAGE_WIDTH = args.image_size
         IMAGE_HEIGHT = args.image_size
     else:
         IMAGE_WIDTH = args.image_width
         IMAGE_HEIGHT = args.image_height
+    HISTORY_LENGTH = args.history_length
 
     game_config = infer_game_config(dataset_id=args.dataset, game=args.game)
     device = get_device()
@@ -305,23 +407,29 @@ def main():
     print(f"Using device: {device}")
     print(f"Game profile: {game_config.name}")
     print(f"Dataset: {args.dataset}")
+    print(f"Dynamics mode: {args.dynamics_mode}")
     print(f"Frame size: {IMAGE_WIDTH}x{IMAGE_HEIGHT}")
+    print(f"History length: {args.history_length}")
 
     representation_model, dynamics_model = load_trained_models(
         args, device, game_config.n_actions
     )
 
-    initial_frame_uint8, initial_frame_tensor = load_initial_frame(
+    initial_frame_uint8, initial_history_tensor = load_initial_history(
         args.start_image,
         args.dataset,
         game_config,
+        args.history_length,
     )
-    initial_frame_tensor = move_batch_tensor(
-        initial_frame_tensor, device, non_blocking=device.type == "cuda"
+    initial_history_tensor = move_batch_tensor(
+        initial_history_tensor, device, non_blocking=device.type == "cuda"
     )
 
     with torch.inference_mode():
-        latent = representation_model.encode(initial_frame_tensor)
+        if args.dynamics_mode == "pixel":
+            frame_history = initial_history_tensor.squeeze(1).unsqueeze(0)
+        else:
+            latent_history = representation_model.encode(initial_history_tensor).unsqueeze(0)
 
     pygame.init()
     window_size = (IMAGE_WIDTH * display_scale, IMAGE_HEIGHT * display_scale)
@@ -343,11 +451,24 @@ def main():
         action_tensor = torch.from_numpy(action).unsqueeze(0).to(device)
 
         with torch.inference_mode():
-            z_and_a = torch.cat([latent, action_tensor], dim=1)
-            delta_latent = dynamics_model(z_and_a)
-            latent = latent + delta_latent
-            recon = representation_model.decode(latent)
-            recon_frame = recon.squeeze().detach().cpu().numpy()
+            if args.dynamics_mode == "pixel":
+                logits = dynamics_model(frame_history, action_tensor)
+                _, next_binary, next_input = feedback_from_logits(
+                    logits,
+                    args.pixel_feedback,
+                )
+                frame_history = torch.cat([frame_history[:, 1:, :, :], next_input], dim=1)
+                recon_frame = next_binary.squeeze().detach().cpu().numpy()
+            else:
+                history_flat = latent_history.reshape(latent_history.size(0), -1)
+                delta_latent = dynamics_model(history_flat, action_tensor)
+                next_latent = latent_history[:, -1, :] + delta_latent
+                latent_history = torch.cat(
+                    [latent_history[:, 1:, :], next_latent.unsqueeze(1)],
+                    dim=1,
+                )
+                recon = representation_model.decode(next_latent)
+                recon_frame = recon.squeeze().detach().cpu().numpy()
 
         render_frame(screen, np.clip(recon_frame * 255, 0, 255).astype(np.uint8))
         clock.tick(30)
