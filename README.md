@@ -205,6 +205,10 @@ Runtime now also defaults to a conservative `NOOP` stability hold for near-stati
 histories. That guard only applies when the action is `NOOP` and the predicted change is
 tiny, which keeps idle states from drifting frame by frame.
 
+For near-static `LEFT`/`RIGHT` states, runtime also applies a deterministic paddle shift in
+the bottom playfield band instead of trusting the learned model. That keeps simple paddle
+motion stable without changing the idle `NOOP` baseline.
+
 Controls:
 
 - `Space`: `FIRE`
