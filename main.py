@@ -13,7 +13,12 @@ from dataset_utils import infer_history_length
 from device_utils import configure_torch, get_device, move_batch_tensor, prepare_conv_module
 from game_config import BREAKOUT_CONFIG, infer_game_config
 from pixel_feedback import (
+    advance_breakout_ball_state,
+    clear_ball_like_components,
+    erase_breakout_ball,
     feedback_from_logits,
+    init_breakout_ball_state,
+    overlay_breakout_ball,
     paddle_motion_mask,
     shift_paddle_frames,
     static_noop_mask,
@@ -468,8 +473,42 @@ def main():
     with torch.inference_mode():
         if args.dynamics_mode == "pixel":
             frame_history = initial_history_tensor.squeeze(1).unsqueeze(0)
+            breakout_ball_enabled = game_config.name == BREAKOUT_CONFIG.name
+            launch_action_id = next(
+                (
+                    binding.action_id
+                    for binding in game_config.key_bindings
+                    if binding.label == "FIRE"
+                ),
+                1,
+            )
+            ball_state = None
+            if breakout_ball_enabled:
+                initial_binary = (frame_history[0, -1] >= 0.5).float().detach().cpu()
+                ball_state = init_breakout_ball_state(initial_binary)
+                if ball_state is not None and ball_state.attached:
+                    for history_index in range(frame_history.size(1)):
+                        cleaned_frame = clear_ball_like_components(
+                            frame_history[0, history_index].detach().cpu()
+                        )
+                        patched_frame = overlay_breakout_ball(
+                            cleaned_frame,
+                            ball_state,
+                        )
+                        frame_history[0, history_index] = patched_frame.to(
+                            device=device,
+                            dtype=frame_history.dtype,
+                        )
+                    initial_frame_uint8 = np.clip(
+                        frame_history[0, -1].detach().cpu().numpy() * 255,
+                        0,
+                        255,
+                    ).astype(np.uint8)
         else:
             latent_history = representation_model.encode(initial_history_tensor).unsqueeze(0)
+            breakout_ball_enabled = False
+            launch_action_id = 1
+            ball_state = None
 
     pygame.init()
     window_size = (IMAGE_WIDTH * display_scale, IMAGE_HEIGHT * display_scale)
@@ -494,6 +533,8 @@ def main():
             if args.dynamics_mode == "pixel":
                 current_frame = frame_history[:, -1:, :, :]
                 current_binary = (current_frame >= 0.5).float()
+                deterministic_binary_frame = current_binary[0, 0]
+                deterministic_input_frame = current_frame[0, 0]
                 applied_prior = False
                 next_binary = None
                 next_input = None
@@ -548,6 +589,8 @@ def main():
                             )
                         paddle_mask = paddle_mask[:, None, None, None]
                         shifted_input = shifted_binary
+                        deterministic_binary_frame = shifted_binary[0, 0]
+                        deterministic_input_frame = shifted_input[0, 0]
                         next_binary = torch.where(paddle_mask, shifted_binary, next_binary)
                         next_input = torch.where(paddle_mask, shifted_input, next_input)
                         applied_prior = bool(paddle_mask.all())
@@ -557,6 +600,61 @@ def main():
                         logits,
                         args.pixel_feedback,
                     )
+                if breakout_ball_enabled:
+                    action_id = int(action_tensor.argmax(dim=1).item())
+                    attached_ball = ball_state is not None and ball_state.attached
+                    # Keep the expensive connected-component ball logic on CPU. Scanning
+                    # an MPS/CUDA tensor pixel-by-pixel from Python stalls the render loop.
+                    deterministic_binary_frame = deterministic_binary_frame.detach().cpu()
+                    deterministic_input_frame = deterministic_input_frame.detach().cpu()
+                    next_binary_frame = next_binary[0, 0].detach().cpu()
+                    next_input_frame = next_input[0, 0].detach().cpu()
+                    deterministic_binary_frame = erase_breakout_ball(
+                        deterministic_binary_frame,
+                        ball_state,
+                    )
+                    deterministic_input_frame = erase_breakout_ball(
+                        deterministic_input_frame,
+                        ball_state,
+                    )
+                    deterministic_binary_frame = clear_ball_like_components(
+                        deterministic_binary_frame
+                    )
+                    deterministic_input_frame = clear_ball_like_components(
+                        deterministic_input_frame
+                    )
+                    next_binary_frame = clear_ball_like_components(next_binary_frame)
+                    next_input_frame = clear_ball_like_components(next_input_frame)
+                    next_binary_frame = erase_breakout_ball(next_binary_frame, ball_state)
+                    next_input_frame = erase_breakout_ball(next_input_frame, ball_state)
+                    if attached_ball:
+                        next_binary_frame = deterministic_binary_frame
+                        next_input_frame = deterministic_input_frame
+                    else:
+                        predicted_scene_diff = (
+                            next_binary_frame - deterministic_binary_frame
+                        ).abs().sum()
+                        if predicted_scene_diff > args.pixel_static_predicted_diff_threshold:
+                            next_binary_frame = deterministic_binary_frame
+                            next_input_frame = deterministic_input_frame
+                    ball_state = advance_breakout_ball_state(
+                        ball_state,
+                        action_id,
+                        next_binary_frame,
+                        launch_action_id=launch_action_id,
+                        right_wall=IMAGE_WIDTH - 5,
+                        bottom_wall=IMAGE_HEIGHT - 1,
+                    )
+                    next_binary_frame = overlay_breakout_ball(next_binary_frame, ball_state)
+                    next_input_frame = overlay_breakout_ball(next_input_frame, ball_state)
+                    next_binary = move_batch_tensor(
+                        next_binary_frame.unsqueeze(0).unsqueeze(0),
+                        device,
+                    ).to(dtype=current_binary.dtype)
+                    next_input = move_batch_tensor(
+                        next_input_frame.unsqueeze(0).unsqueeze(0),
+                        device,
+                    ).to(dtype=current_frame.dtype)
                 frame_history = torch.cat([frame_history[:, 1:, :, :], next_input], dim=1)
                 recon_frame = next_binary.squeeze().detach().cpu().numpy()
             else:
