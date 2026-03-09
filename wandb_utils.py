@@ -39,8 +39,13 @@ class TrainingTracker:
         run_name = os.getenv("WANDB_RUN_NAME", "").strip()
         if not run_name:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            model_family = getattr(args, "model_family", None) or getattr(
+                args,
+                "dynamics_mode",
+                "run",
+            )
             run_name = _sanitize_run_name(
-                f"{args.dataset}-{args.dynamics_mode}-{timestamp}"
+                f"{args.dataset}-{model_family}-{timestamp}"
             )
         tags_env = os.getenv("WANDB_TAGS", "").strip()
         tags = [tag.strip() for tag in tags_env.split(",") if tag.strip()]

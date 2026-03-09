@@ -1,7 +1,7 @@
 [project]
 name = "gymemu"
 version = "0.1.0"
-description = "Play retro games through learned latent dynamics—no ROM required"
+description = "Play retro games through a learned spatial latent world model"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [

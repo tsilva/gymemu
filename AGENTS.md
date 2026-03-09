@@ -1,100 +1,87 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with this
+repository.
 
 ## Project Overview
 
-Gymnasium Emulator is a neural emulator that visualizes and interacts with latent dynamics of retro games using pre-trained deep learning models. It allows exploration of game state space through learned representations rather than traditional emulation.
+Gymnasium Emulator is now centered on a single architecture: a spatial latent world
+model for retro games recorded with Gymnasium/gymrec.
 
 The system uses:
-- **Autoencoder (ConvAutoencoder)**: Encodes game frames into a 32-dimensional latent space and decodes back to images
-- **Dynamics Model**: Predicts how the latent state changes given an action (9 discrete actions: A, B, SELECT, START, UP, DOWN, LEFT, RIGHT, B-alt)
-- **Pygame Interface**: Real-time visualization and keyboard control
 
-Models are downloaded from Hugging Face repositories at runtime.
+- **SpatialLatentWorldModel**: consumes a short history of preprocessed frames plus a
+  one-hot action, predicts the next frame as a warped copy of the last frame plus a
+  learned residual
+- **Shared preprocessing**: crop scoreboard, filter invalid backgrounds, resize, and
+  binarize frames identically in training and runtime
+- **Pygame interface**: real-time visualization and keyboard control
+
+Models can be loaded from local checkpoints or downloaded from Hugging Face at runtime.
 
 ## Environment Setup
 
-**Create venv and install dependencies:**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --extra-index-url https://download.pytorch.org/whl/cu118 -e .
 ```
 
-**Environment configuration:**
-- Python 3.11+
-- PyTorch with CUDA 11.8 support
-- Dependencies defined in `pyproject.toml`
+Optional Hugging Face setup:
 
-**Required setup:**
 ```bash
 cp .env.example .env
-# Edit .env and add your HF_TOKEN
+# add HF_TOKEN=...
 ```
 
-## Running the Emulator
+## Running The Emulator
 
 ```bash
-python main.py
+python main.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --game breakout \
+  --history-length 4
 ```
 
-**Controls:**
-- Z: A button
-- X: B button
-- Q: SELECT
-- R: START
-- Arrow keys: directional input
+Controls:
+
+- `Space`: `FIRE`
+- `Right Arrow`: `RIGHT`
+- `Left Arrow`: `LEFT`
+- `Escape`: quit
 
 ## Code Architecture
 
-### Model Architecture
+### SpatialLatentWorldModel
 
-**ConvAutoencoder** (main.py:29-82)
-- Encoder: 3-layer conv network (1→32→64→128 channels)
-- Bottleneck: Optional fully-connected layer to compress to latent_dim
-- Decoder: 3-layer transposed conv (128→64→32→1 channels)
-- Key methods: `encode()`, `decode()`, `forward()`
-- Training mode supports latent noise injection
+Defined in `spatial_model.py`.
 
-**DynamicsModel** (main.py:84-99)
-- Input: concatenated latent vector + one-hot action (z_dim + 9)
-- Architecture: LayerNorm → 128 → 128 → z_dim (GELU activations)
-- Output: **delta in latent space** (not next state directly)
-- Orthogonal weight initialization for stability
+- Encodes `history` and temporal differences into a spatial latent map
+- Applies action-conditioned residual blocks in local and downsampled context paths
+- Predicts the next latent state as a residual update
+- Decodes via a residual head plus a learned optical-flow-style warp of the last frame
 
-### Inference Loop
+### Runtime Loop
 
-The main loop (main.py:155-200) implements latent space stepping:
+`main.py`:
 
-1. Capture keyboard input → action vector (9-dim one-hot)
-2. Concatenate current latent with action
-3. Predict delta: `delta_latent = dynamics_model(z_and_a)`
-4. Update latent: `next_latent = latent + delta_latent` (residual connection)
-5. Decode to image: `recon = representation_model.decode(next_latent)`
-6. Display frame at 30 FPS
+1. builds the initial frame history from `--start-image` or the dataset
+2. maps keyboard input to a 4-class Breakout action
+3. runs the spatial model on `history + action`
+4. feeds the predicted frame back into history
+5. renders at 30 FPS
 
-**Critical implementation detail:** The dynamics model predicts the **change** in latent space, not the absolute next state. Always use `latent + delta_latent`.
+### Training
 
-### Model Configuration
+`train.py`:
 
-Hyperparameters are defined at the top of main.py (lines 8-21):
-- `model_latent_dim = 32`: Latent space dimensionality
-- `ds_id`: Hugging Face dataset/model identifier
-- `model_compile = True`: Uses torch.compile() for optimization
-- Image dimensions: 80×144 grayscale
-
-Models are automatically downloaded from:
-- `{ds_id}-representation`: Autoencoder
-- `{ds_id}-dynamics`: Dynamics predictor
-
-### Initial State
-
-The emulator loads `start.png` as the initial frame, encodes it to get the starting latent vector, then allows interactive stepping through latent space.
+- builds rollout windows directly from raw observation datasets
+- trains the spatial world model autoregressively across `--unroll-steps`
+- supports `soft`, `hard`, and `ste` rollout feedback
+- saves the best checkpoint using validation loss and early stopping
 
 ## Important Instructions
 
 - **README.md must be kept up to date** with any significant project changes
-- When modifying model architecture, ensure input/output dimensions remain compatible
-- GPU (CUDA) is required for inference
-- Model downloads require valid HF_TOKEN in .env
+- Preserve compatibility between `train.py`, `main.py`, and `spatial_model.py`
+- Prefer the spatial model path; latent/pixel legacy paths are intentionally removed

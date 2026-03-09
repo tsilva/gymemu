@@ -3,66 +3,23 @@
 
   # gymemu
 
-  Neural emulator training and playback for retro games recorded with Gymnasium/gymrec.
+  Spatial latent world-model training and playback for Gymnasium retro recordings.
 </div>
 
-## Breakout Status
+## Overview
 
-This repo is now wired for the public dataset
-`tsilva/gymrec__BreakoutNoFrameskip_dash_v4`.
+This repository now contains a single model family: the spatial latent world model in
+`spatial_model.py`.
 
-The current Breakout pipeline applies these simplifications before training:
+For Breakout, the pipeline:
 
-- Crop the scoreboard off the top of each frame.
-- Keep only transitions whose playfield background is still black.
-- Convert frames to monochrome with two values: black and white.
-- Treat actions as Atari discrete actions with 4 classes: `NOOP`, `FIRE`, `RIGHT`, `LEFT`.
+- crops off the scoreboard
+- filters for frames whose playfield background is still black
+- binarizes the playfield to black/white
+- uses 4 Atari actions: `NOOP`, `FIRE`, `RIGHT`, `LEFT`
 
-Those choices are implemented in shared preprocessing code so training and runtime use the same transform.
-
-## Dataset Notes
-
-The Hugging Face dataset currently contains:
-
-- 108,001 frames
-- 1 recorded episode
-- 210x160 image observations
-- `actions` stored as a one-element list containing the discrete action id
-
-Because it is a single-episode dataset, `train.py` now does a temporal train/validation split within that episode instead of assigning the whole episode to validation.
-
-## Build The Stacked Dataset
-
-To create a filtered training dataset with 4 preprocessed history frames per sample,
-run:
-
-```bash
-python scripts/build_stacked_dataset.py
-```
-
-The script:
-
-- loads `tsilva/gymrec__BreakoutNoFrameskip_dash_v4`
-- applies the same crop, black-background filter, and binarization used by runtime/training
-- builds samples of `history[4] + action -> next_frame`
-- removes exact duplicate `(history, action, next_frame)` tuples
-- uploads the result to
-  `tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_deduped`
-
-The current full build produced:
-
-- 108,001 source rows scanned
-- 64,305 valid rows after background filtering
-- 3,669 unique stacked transitions
-- 60,620 exact duplicate stacked transitions removed
-
-Generated samples have this schema:
-
-- `episode_id`: source episode identifier as a hex string
-- `source_index`: row index of the source action frame
-- `history`: `uint8[4, 96, 80]`
-- `action`: discrete Atari action id
-- `next_frame`: `uint8[96, 80]`
+Training and runtime share the same preprocessing so rollouts use the exact same frame
+format the model was trained on.
 
 ## Setup
 
@@ -72,166 +29,60 @@ source .venv/bin/activate
 pip install --extra-index-url https://download.pytorch.org/whl/cu118 -e .
 ```
 
-On Apple Silicon, the code now prefers PyTorch `mps` automatically and uses more conservative default training batches to fit a 16GB unified-memory machine better.
-
-If you plan to pull or publish model artifacts on Hugging Face:
+If you want to download or publish checkpoints on Hugging Face:
 
 ```bash
 cp .env.example .env
 # add HF_TOKEN=...
 ```
 
-`train.py` now also calls `load_dotenv()` on startup, so the same `.env` file can
-optionally enable Weights & Biases logging with:
+`train.py` also reads `.env` for optional Weights & Biases logging:
 
-- `WANDB_MODE=online`, `offline`, or `disabled` (default)
-- `WANDB_PROJECT=gymemu` by default
-- optional `WANDB_ENTITY`, `WANDB_API_KEY`, `WANDB_RUN_NAME`, `WANDB_TAGS`, and `WANDB_NOTES`
+- `WANDB_MODE=online`, `offline`, or `disabled`
+- `WANDB_PROJECT=gymemu`
+- optional `WANDB_ENTITY`, `WANDB_API_KEY`, `WANDB_RUN_NAME`, `WANDB_TAGS`, `WANDB_NOTES`
 
-W&B auto-enables when `WANDB_MODE` is `online` or `offline`, or when
-`WANDB_API_KEY` is present. Otherwise training stays local-only.
+## Train
 
-## Train Breakout Models
+`train.py` is spatial-only. It expects a raw observation dataset so it can build
+autoregressive rollout windows internally.
 
-The default training command is now Breakout-oriented:
+Example:
 
 ```bash
 python train.py \
   --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
-  --game breakout \
-  --epochs 50 \
-  --early-stopping-patience 5 \
-  --latent-dim 32 \
-  --image-width 80 \
-  --image-height 96
-```
-
-To train on the stacked, deduped dataset instead:
-
-```bash
-python train.py \
-  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_deduped \
   --game breakout \
   --history-length 4 \
-  --epochs 50 \
-  --early-stopping-patience 5 \
-  --latent-dim 32 \
-  --image-width 80 \
-  --image-height 96
-```
-
-`train.py` now monitors validation loss for both phases, saves the best checkpoint, and
-stops early after 5 non-improving epochs by default. Use
-`--early-stopping-patience 0` to disable this.
-
-When W&B is enabled, the trainer logs:
-
-- dataset health metrics under `data/*`
-- batch and epoch optimization metrics under `autoencoder/*`, `latent_dynamics/*`, or `pixel_dynamics/*`
-- fixed validation media panels so scalar changes can be compared against reconstructions and rollouts
-
-Offline example:
-
-```bash
-WANDB_MODE=offline WANDB_PROJECT=gymemu-dev python3 train.py \
-  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
-  --game breakout \
-  --epochs 1
-```
-
-For an M1 MacBook Pro with 16GB, the current defaults are tuned to be safer:
-
-- training batch size defaults to `64`
-- latent encoding batch size defaults to `64`
-- DataLoader workers stay at `0` to avoid macOS multiprocessing memory duplication
-- training and runtime both prefer `mps` over CPU when available
-
-Output files are saved in `./models/` as:
-
-- `tsilva__gymrec__BreakoutNoFrameskip_dash_v4-representation.pt`
-- `tsilva__gymrec__BreakoutNoFrameskip_dash_v4-dynamics.pt`
-
-### Pixel Dynamics Experiments
-
-For direct frame prediction, train with `--dynamics-mode pixel`. The most useful
-knobs during the Breakout experiments have been:
-
-- `--pixel-unroll-steps`: number of autoregressive steps trained per sequence
-- `--sequence-stride`: keep every `N`th rollout window to trade data for runtime
-- `--pixel-dynamics-path`: resume from an existing pixel checkpoint
-- `--learning-rate`: lower this when fine-tuning an existing pixel checkpoint
-- `--pixel-feedback-mode`: `soft` for the current stable path, `ste` for binarized
-  straight-through feedback experiments
-- `--pixel-refine-blocks`: extra action-conditioned residual blocks that scale pixel-model
-  capacity without changing the base checkpoint layout
-
-Example long-horizon pixel run:
-
-```bash
-python train.py \
-  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
-  --game breakout \
-  --dynamics-mode pixel \
-  --history-length 4 \
-  --pixel-unroll-steps 8 \
-  --pixel-refine-blocks 3 \
+  --unroll-steps 8 \
   --sequence-stride 16 \
-  --learning-rate 0.0003 \
-  --output-dir .cache/pixel_h4_unroll8_stride16 \
-  --pixel-dynamics-path .cache/pixel_h4_unroll4_stride8/tsilva__gymrec__BreakoutNoFrameskip_dash_v4-pixel-dynamics.pt
+  --epochs 50 \
+  --early-stopping-patience 5 \
+  --spatial-latent-channels 32 \
+  --spatial-refine-blocks 4 \
+  --image-width 80 \
+  --image-height 96
 ```
-
-### Spatial Latent World Model
-
-For a generic learned path with no game-specific runtime logic, train with
-`--dynamics-mode spatial`. This model still consumes `history + action`, but it first
-encodes the history into a spatial latent map, augments that with temporal-difference
-channels, predicts the next latent map, and decodes it as a warped copy of the last
-frame plus residual logits.
 
 Useful knobs:
 
-- `--spatial-latent-channels`: channel count of the latent map
-- `--spatial-refine-blocks`: number of action-conditioned residual blocks in latent space
-- `--spatial-dynamics-path`: optional checkpoint to resume from
-- `--pixel-feedback-mode`: how predicted frames are fed back during rollout training
-- `--rollout-samples-per-epoch`: cap the weighted rollout samples per training epoch
+- `--feedback-mode`: `soft`, `hard`, or `ste`
+- `--spatial-dynamics-path`: resume from an existing spatial checkpoint
+- `--rollout-samples-per-epoch`: cap weighted rollout sampling per epoch
+- `--model-compile`: enable or disable `torch.compile()` on CUDA
 
-Example generic training run:
+Checkpoints are saved as:
 
-```bash
-python train.py \
-  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
-  --game breakout \
-  --dynamics-mode spatial \
-  --history-length 4 \
-  --pixel-unroll-steps 8 \
-  --sequence-stride 16 \
-  --spatial-latent-channels 32 \
-  --spatial-refine-blocks 4 \
-  --output-dir .cache/spatial_h4_u8
-```
+- `./models/<dataset-name>-spatial-dynamics.pt`
 
-## Run The Emulator
+## Run
 
-If you omit `--start-image`, the runtime fetches the first valid Breakout frame from the dataset and uses that as the initial latent state. You can still pass a local raw `210x160` Breakout frame if you want a specific start point.
+`main.py` is spatial-only. If you omit `--start-image`, runtime pulls the first valid
+Breakout frame history from the dataset.
 
 ```bash
 python main.py \
   --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
-  --game breakout \
-  --use-local-models \
-  --models-dir ./models \
-  --image-width 80 \
-  --image-height 96
-```
-
-For models trained on the stacked, deduped dataset, pass the matching dataset id and
-history length:
-
-```bash
-python main.py \
-  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_deduped \
   --game breakout \
   --history-length 4 \
   --use-local-models \
@@ -240,44 +91,8 @@ python main.py \
   --image-height 96
 ```
 
-For direct pixel models, also pass the pixel dynamics mode. Use `--pixel-feedback soft`
-for checkpoints trained in direct frame space:
-
-```bash
-python main.py \
-  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
-  --game breakout \
-  --dynamics-mode pixel \
-  --history-length 4 \
-  --pixel-refine-blocks 3 \
-  --pixel-feedback soft \
-  --use-local-models \
-  --models-dir ./.cache/pixel_h4_unroll8_stride16_refine3 \
-  --image-width 80 \
-  --image-height 96
-```
-
-For the generic spatial-latent model, use `--dynamics-mode spatial`:
-
-```bash
-python main.py \
-  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
-  --game breakout \
-  --dynamics-mode spatial \
-  --history-length 4 \
-  --spatial-latent-channels 32 \
-  --spatial-refine-blocks 4 \
-  --pixel-feedback soft \
-  --use-local-models \
-  --models-dir ./.cache/spatial_h4_u8 \
-  --image-width 80 \
-  --image-height 96
-```
-
-Both `pixel` and `spatial` runtime modes are now pure learned rollouts. At playback time
-the emulator just feeds `history + action` into the selected model and rolls forward from
-its predicted next frame. There are no Breakout-specific paddle, ball, brick, or
-stationary-state overrides in the runtime path.
+You can also let runtime download the model from Hugging Face by omitting
+`--use-local-models`.
 
 Controls:
 
@@ -285,27 +100,22 @@ Controls:
 - `Right Arrow`: `RIGHT`
 - `Left Arrow`: `LEFT`
 - no key: `NOOP`
-
-If you omit `--use-local-models`, `main.py` downloads models from:
-
-- `tsilva/gymrec__BreakoutNoFrameskip_dash_v4-representation`
-- `tsilva/gymrec__BreakoutNoFrameskip_dash_v4-dynamics`
+- `Escape`: quit
 
 ## Files
 
-- `train.py`: trains the autoencoder and latent dynamics model
-- `main.py`: runs the neural emulator in Pygame
-- `scripts/render_pixel_rollouts.py`: renders scripted pixel-model rollouts for quick visual checks
-- `game_config.py`: per-game preprocessing/action metadata
+- `train.py`: trains the spatial latent world model
+- `main.py`: runs the spatial latent emulator in Pygame
+- `spatial_model.py`: model definition and checkpoint compatibility loader
 - `preprocessing.py`: shared crop, validation, binarization, and action encoding
-- `pixel_feedback.py`: shared helpers for soft, hard, and straight-through pixel feedback
+- `rollout_feedback.py`: feedback modes for autoregressive rollout
+- `game_config.py`: game-specific preprocessing and controls
 
 ## Notes
 
-- CUDA is still the intended fast path for training and playback.
-- Apple Silicon training/runtime use MPS automatically, with memory-oriented defaults for 16GB machines.
-- The runtime predicts latent deltas, then advances state with `latent = latent + delta`.
-- The corrupted magenta tail seen in the Breakout recording is filtered out during dataset ingestion.
+- CUDA is still the intended fast path, but Apple Silicon uses `mps` automatically.
+- Current defaults are tuned around Breakout and 16GB Apple Silicon machines.
+- Legacy latent-delta and direct pixel-model codepaths have been removed from this repo.
 
 ## License
 

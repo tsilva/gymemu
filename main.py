@@ -4,7 +4,6 @@ import os
 import numpy as np
 import pygame
 import torch
-import torch.nn as nn
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 from PIL import Image
@@ -12,109 +11,18 @@ from PIL import Image
 from dataset_utils import infer_history_length
 from device_utils import configure_torch, get_device, move_batch_tensor, prepare_conv_module
 from game_config import BREAKOUT_CONFIG, infer_game_config
-from pixel_feedback import feedback_from_logits
-from pixel_model import FrameDynamicsModel
 from preprocessing import has_valid_black_background, preprocess_frame
+from rollout_feedback import feedback_from_logits
 from spatial_model import SpatialLatentWorldModel, load_spatial_model_state_dict
 
 MODEL_COMPILE_DEFAULT = True
-MODEL_LATENT_DIM = 32
-MODEL_LATENT_NOISE_FACTOR = 0.0
-IMAGE_CHANNELS = 1
 IMAGE_WIDTH = 80
 IMAGE_HEIGHT = 96
 HISTORY_LENGTH = 1
 DISPLAY_SCALE = 4
 DEFAULT_MPS_DISPLAY_SCALE = 3
-PIXEL_REFINE_BLOCKS = 0
 SPATIAL_LATENT_CHANNELS = 32
 SPATIAL_REFINE_BLOCKS = 4
-
-
-class ConvAutoencoder(nn.Module):
-    def __init__(self, latent_dim=MODEL_LATENT_DIM):
-        super().__init__()
-        self.model_latent_noise_factor = MODEL_LATENT_NOISE_FACTOR
-        self.use_bottleneck = latent_dim > 0
-
-        self.encoder_conv = nn.Sequential(
-            nn.Conv2d(IMAGE_CHANNELS, 32, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-        )
-
-        with torch.no_grad():
-            dummy_input = torch.zeros(1, IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH)
-            dummy_output = self.encoder_conv(dummy_input)
-            self._flattened_size = dummy_output.reshape(1, -1).shape[1]
-            self._conv_output_shape = dummy_output.shape[1:]
-
-        if self.use_bottleneck:
-            self.fc_enc = nn.Linear(self._flattened_size, latent_dim)
-            self.fc_dec = nn.Linear(latent_dim, self._flattened_size)
-
-        self.decoder_conv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, IMAGE_CHANNELS, kernel_size=4, stride=2, padding=1),
-            nn.Sigmoid(),
-        )
-
-    def encode(self, x):
-        x = self.encoder_conv(x)
-        if self.use_bottleneck:
-            x = x.reshape(x.size(0), -1)
-            x = self.fc_enc(x)
-            x = torch.tanh(x)
-        return x
-
-    def decode(self, z):
-        if self.use_bottleneck:
-            z = torch.clamp(z, -1.0, 1.0)
-            z = self.fc_dec(z)
-            z = z.reshape(z.size(0), *self._conv_output_shape)
-        return self.decoder_conv(z)
-
-    def forward(self, x):
-        z = self.encode(x)
-        z_input = z
-        if self.training and self.model_latent_noise_factor > 0:
-            z_input = z_input + torch.randn_like(z_input) * self.model_latent_noise_factor
-        return self.decode(z_input), z
-
-
-class DynamicsModel(nn.Module):
-    def __init__(
-        self,
-        z_dim=MODEL_LATENT_DIM,
-        n_actions=BREAKOUT_CONFIG.n_actions,
-        history_length=HISTORY_LENGTH,
-    ):
-        super().__init__()
-        history_dim = z_dim * history_length
-        self.n_actions = n_actions
-        self.history_net = nn.Sequential(
-            nn.LayerNorm(history_dim),
-            nn.Linear(history_dim, 128),
-            nn.GELU(),
-            nn.Linear(128, 128),
-            nn.GELU(),
-        )
-        nn.init.orthogonal_(self.history_net[1].weight)
-        self.action_heads = nn.ModuleList([nn.Linear(128, z_dim) for _ in range(n_actions)])
-        for head in self.action_heads:
-            nn.init.zeros_(head.bias)
-
-    def forward(self, latent_history, action):
-        hidden = self.history_net(latent_history)
-        all_deltas = torch.stack([head(hidden) for head in self.action_heads], dim=1)
-        action_weights = action.unsqueeze(-1)
-        return (all_deltas * action_weights).sum(dim=1)
 
 
 def maybe_compile(model, enabled, device):
@@ -123,123 +31,54 @@ def maybe_compile(model, enabled, device):
     return model
 
 
-def resolve_model_path(dataset_id, artifact_name, use_local_models, models_dir):
+def resolve_model_path(dataset_id, use_local_models, models_dir):
     if use_local_models:
         dataset_name = dataset_id.replace("/", "__")
-        return os.path.join(models_dir, f"{dataset_name}-{artifact_name}.pt")
+        return os.path.join(models_dir, f"{dataset_name}-spatial-dynamics.pt")
 
     return hf_hub_download(
-        repo_id=f"{dataset_id}-{artifact_name}",
+        repo_id=f"{dataset_id}-spatial-dynamics",
         filename="model.pt",
     )
 
 
-def load_trained_models(args, device, n_actions):
-    if args.dynamics_mode == "pixel":
-        dynamics_model = prepare_conv_module(
-            FrameDynamicsModel(
-                history_length=args.history_length,
-                n_actions=n_actions,
-                refine_blocks=args.pixel_refine_blocks,
-            ),
-            device,
-        )
-        dynamics_model = maybe_compile(dynamics_model, args.model_compile, device)
-        dynamics_path = resolve_model_path(
-            args.dataset,
-            "pixel-dynamics",
-            args.use_local_models,
-            args.models_dir,
-        )
-        dynamics_model.load_state_dict(
-            torch.load(dynamics_path, map_location=device, weights_only=True)
-        )
-        dynamics_model.eval()
-        print(f"Pixel dynamics model: {dynamics_path}")
-        return None, dynamics_model
-
-    if args.dynamics_mode == "spatial":
-        dynamics_model = prepare_conv_module(
-            SpatialLatentWorldModel(
-                history_length=args.history_length,
-                n_actions=n_actions,
-                latent_channels=args.spatial_latent_channels,
-                refine_blocks=args.spatial_refine_blocks,
-            ),
-            device,
-        )
-        dynamics_model = maybe_compile(dynamics_model, args.model_compile, device)
-        dynamics_path = resolve_model_path(
-            args.dataset,
-            "spatial-dynamics",
-            args.use_local_models,
-            args.models_dir,
-        )
-        load_result = load_spatial_model_state_dict(
-            dynamics_model,
-            torch.load(dynamics_path, map_location=device, weights_only=True),
-        )
-        dynamics_model.eval()
-        print(f"Spatial dynamics model: {dynamics_path}")
-        for note in load_result["notes"]:
-            print(f"  -> {note}")
-        if load_result["missing_keys"]:
-            print(f"  -> Missing keys after load: {len(load_result['missing_keys'])}")
-        if load_result["unexpected_keys"]:
-            print(f"  -> Unexpected keys after load: {len(load_result['unexpected_keys'])}")
-        return None, dynamics_model
-
-    representation_model = prepare_conv_module(
-        ConvAutoencoder(args.latent_dim), device
-    )
-    representation_model = maybe_compile(
-        representation_model, args.model_compile, device
-    )
-    representation_path = resolve_model_path(
-        args.dataset,
-        "representation",
-        args.use_local_models,
-        args.models_dir,
-    )
-    representation_model.load_state_dict(
-        torch.load(representation_path, map_location=device, weights_only=True)
-    )
-    representation_model.eval()
-
-    dynamics_model = prepare_conv_module(
-        DynamicsModel(
-            z_dim=args.latent_dim,
-            n_actions=n_actions,
+def load_spatial_model(args, device, n_actions):
+    model = prepare_conv_module(
+        SpatialLatentWorldModel(
             history_length=args.history_length,
+            n_actions=n_actions,
+            latent_channels=args.spatial_latent_channels,
+            refine_blocks=args.spatial_refine_blocks,
         ),
         device,
     )
-    dynamics_model = maybe_compile(dynamics_model, args.model_compile, device)
-    dynamics_path = resolve_model_path(
-        args.dataset,
-        "dynamics",
-        args.use_local_models,
-        args.models_dir,
+    model = maybe_compile(model, args.model_compile, device)
+    model_path = resolve_model_path(args.dataset, args.use_local_models, args.models_dir)
+    load_result = load_spatial_model_state_dict(
+        model,
+        torch.load(model_path, map_location=device, weights_only=True),
     )
-    dynamics_model.load_state_dict(
-        torch.load(dynamics_path, map_location=device, weights_only=True)
-    )
-    dynamics_model.eval()
+    model.eval()
 
-    print(f"Representation model: {representation_path}")
-    print(f"Dynamics model: {dynamics_path}")
+    print(f"Spatial dynamics model: {model_path}")
+    for note in load_result["notes"]:
+        print(f"  -> {note}")
+    if load_result["missing_keys"]:
+        print(f"  -> Missing keys after load: {len(load_result['missing_keys'])}")
+    if load_result["unexpected_keys"]:
+        print(f"  -> Unexpected keys after load: {len(load_result['unexpected_keys'])}")
 
-    return representation_model, dynamics_model
+    return model
 
 
 def fetch_remote_start_frame(dataset_id, game_config):
     dataset = load_dataset(dataset_id, split="train", streaming=True)
-
     uses_stacked_samples = {
         "history",
         "action",
         "next_frame",
     }.issubset(set(dataset.features))
+
     if uses_stacked_samples:
         sample = next(iter(dataset))
         history = np.asarray(sample["history"], dtype=np.float32)
@@ -329,7 +168,7 @@ def build_action_vector(keys, game_config, allow_fire=True):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run the neural emulator")
+    parser = argparse.ArgumentParser(description="Run the spatial latent emulator")
     parser.add_argument(
         "--dataset",
         default=BREAKOUT_CONFIG.dataset_id,
@@ -341,28 +180,16 @@ def parse_args():
         help="Game profile for preprocessing and controls",
     )
     parser.add_argument(
-        "--dynamics-mode",
-        choices=("latent", "pixel", "spatial"),
-        default="latent",
-        help="Run a latent model, a direct pixel predictor, or a spatial-latent world model",
-    )
-    parser.add_argument(
         "--start-image",
         default=None,
-        help="Optional local screenshot used to seed the latent state",
-    )
-    parser.add_argument(
-        "--latent-dim",
-        type=int,
-        default=MODEL_LATENT_DIM,
-        help="Latent dimension size used during training",
+        help="Optional local screenshot used to seed the frame history",
     )
     parser.add_argument(
         "--history-length",
         type=int,
         default=None,
         help=(
-            "Number of recent frames fed into the dynamics model. "
+            "Number of recent frames fed into the spatial world model. "
             "Defaults to 1 unless inferred from the dataset name."
         ),
     )
@@ -392,7 +219,7 @@ def parse_args():
     parser.add_argument(
         "--models-dir",
         default="./models",
-        help="Directory containing locally trained models",
+        help="Directory containing locally trained spatial checkpoints",
     )
     parser.add_argument(
         "--model-compile",
@@ -407,16 +234,10 @@ def parse_args():
         help="Window scaling factor for the rendered frame",
     )
     parser.add_argument(
-        "--pixel-feedback",
+        "--feedback",
         choices=("soft", "hard"),
         default="soft",
-        help="How pixel predictions are fed back into history at runtime",
-    )
-    parser.add_argument(
-        "--pixel-refine-blocks",
-        type=int,
-        default=PIXEL_REFINE_BLOCKS,
-        help="Number of extra action-conditioned residual refinement blocks in the pixel model",
+        help="How model predictions are fed back into history at runtime",
     )
     parser.add_argument(
         "--spatial-latent-channels",
@@ -428,7 +249,7 @@ def parse_args():
         "--spatial-refine-blocks",
         type=int,
         default=SPATIAL_REFINE_BLOCKS,
-        help="Number of action-conditioned residual blocks in the spatial latent dynamics model",
+        help="Number of action-conditioned residual blocks in the spatial latent model",
     )
     return parser.parse_args()
 
@@ -457,16 +278,13 @@ def main():
     print(f"Using device: {device}")
     print(f"Game profile: {game_config.name}")
     print(f"Dataset: {args.dataset}")
-    print(f"Dynamics mode: {args.dynamics_mode}")
     print(f"Frame size: {IMAGE_WIDTH}x{IMAGE_HEIGHT}")
     print(f"History length: {args.history_length}")
-    print(f"Pixel refine blocks: {args.pixel_refine_blocks}")
+    print(f"Feedback mode: {args.feedback}")
     print(f"Spatial latent channels: {args.spatial_latent_channels}")
     print(f"Spatial refine blocks: {args.spatial_refine_blocks}")
 
-    representation_model, dynamics_model = load_trained_models(
-        args, device, game_config.n_actions
-    )
+    model = load_spatial_model(args, device, game_config.n_actions)
 
     initial_frame_uint8, initial_history_tensor = load_initial_history(
         args.start_image,
@@ -477,12 +295,7 @@ def main():
     initial_history_tensor = move_batch_tensor(
         initial_history_tensor, device, non_blocking=device.type == "cuda"
     )
-
-    with torch.inference_mode():
-        if args.dynamics_mode in {"pixel", "spatial"}:
-            frame_history = initial_history_tensor.squeeze(1).unsqueeze(0)
-        else:
-            latent_history = representation_model.encode(initial_history_tensor).unsqueeze(0)
+    frame_history = initial_history_tensor.squeeze(1).unsqueeze(0)
 
     pygame.init()
     window_size = (IMAGE_WIDTH * display_scale, IMAGE_HEIGHT * display_scale)
@@ -500,30 +313,20 @@ def main():
                 running = False
 
         keys = pygame.key.get_pressed()
+        if keys[pygame.K_ESCAPE]:
+            running = False
+            continue
+
         action = build_action_vector(keys, game_config)
         action_tensor = torch.from_numpy(action).unsqueeze(0).to(device)
 
         with torch.inference_mode():
-            if args.dynamics_mode in {"pixel", "spatial"}:
-                logits = dynamics_model(frame_history, action_tensor)
-                _, next_binary, next_input = feedback_from_logits(
-                    logits,
-                    args.pixel_feedback,
-                )
-                frame_history = torch.cat([frame_history[:, 1:, :, :], next_input], dim=1)
-                recon_frame = next_binary.squeeze().detach().cpu().numpy()
-            else:
-                history_flat = latent_history.reshape(latent_history.size(0), -1)
-                delta_latent = dynamics_model(history_flat, action_tensor)
-                next_latent = latent_history[:, -1, :] + delta_latent
-                latent_history = torch.cat(
-                    [latent_history[:, 1:, :], next_latent.unsqueeze(1)],
-                    dim=1,
-                )
-                recon = representation_model.decode(next_latent)
-                recon_frame = recon.squeeze().detach().cpu().numpy()
+            logits = model(frame_history, action_tensor)
+            _, next_binary, next_input = feedback_from_logits(logits, args.feedback)
+            frame_history = torch.cat([frame_history[:, 1:, :, :], next_input], dim=1)
+            next_frame = next_binary[0, 0].detach().cpu().numpy()
 
-        render_frame(screen, np.clip(recon_frame * 255, 0, 255).astype(np.uint8))
+        render_frame(screen, np.clip(next_frame * 255, 0, 255).astype(np.uint8))
         clock.tick(30)
 
     pygame.quit()
