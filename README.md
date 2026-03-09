@@ -137,6 +137,8 @@ knobs during the Breakout experiments have been:
 - `--learning-rate`: lower this when fine-tuning an existing pixel checkpoint
 - `--pixel-feedback-mode`: `soft` for the current stable path, `ste` for binarized
   straight-through feedback experiments
+- `--pixel-refine-blocks`: extra action-conditioned residual blocks that scale pixel-model
+  capacity without changing the base checkpoint layout
 
 Example long-horizon pixel run:
 
@@ -147,6 +149,7 @@ python train.py \
   --dynamics-mode pixel \
   --history-length 4 \
   --pixel-unroll-steps 8 \
+  --pixel-refine-blocks 3 \
   --sequence-stride 16 \
   --learning-rate 0.0003 \
   --output-dir .cache/pixel_h4_unroll8_stride16 \
@@ -190,12 +193,17 @@ python main.py \
   --game breakout \
   --dynamics-mode pixel \
   --history-length 4 \
+  --pixel-refine-blocks 3 \
   --pixel-feedback soft \
   --use-local-models \
-  --models-dir ./.cache/pixel_h4_unroll8_stride16_finetune \
+  --models-dir ./.cache/pixel_h4_unroll8_stride16_refine3 \
   --image-width 80 \
   --image-height 96
 ```
+
+Runtime now also defaults to a conservative `NOOP` stability hold for near-static
+histories. That guard only applies when the action is `NOOP` and the predicted change is
+tiny, which keeps idle states from drifting frame by frame.
 
 Controls:
 
