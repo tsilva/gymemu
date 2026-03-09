@@ -31,6 +31,39 @@ The Hugging Face dataset currently contains:
 
 Because it is a single-episode dataset, `train.py` now does a temporal train/validation split within that episode instead of assigning the whole episode to validation.
 
+## Build The Stacked Dataset
+
+To create a filtered training dataset with 4 preprocessed history frames per sample,
+run:
+
+```bash
+python scripts/build_stacked_dataset.py
+```
+
+The script:
+
+- loads `tsilva/gymrec__BreakoutNoFrameskip_dash_v4`
+- applies the same crop, black-background filter, and binarization used by runtime/training
+- builds samples of `history[4] + action -> next_frame`
+- removes exact duplicate `(history, action, next_frame)` tuples
+- uploads the result to
+  `tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_deduped`
+
+The current full build produced:
+
+- 108,001 source rows scanned
+- 64,305 valid rows after background filtering
+- 3,669 unique stacked transitions
+- 60,620 exact duplicate stacked transitions removed
+
+Generated samples have this schema:
+
+- `episode_id`: source episode identifier as a hex string
+- `source_index`: row index of the source action frame
+- `history`: `uint8[4, 96, 80]`
+- `action`: discrete Atari action id
+- `next_frame`: `uint8[96, 80]`
+
 ## Setup
 
 ```bash
@@ -57,10 +90,29 @@ python train.py \
   --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
   --game breakout \
   --epochs 50 \
+  --early-stopping-patience 5 \
   --latent-dim 32 \
   --image-width 80 \
   --image-height 96
 ```
+
+To train on the stacked, deduped dataset instead:
+
+```bash
+python train.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_deduped \
+  --game breakout \
+  --history-length 4 \
+  --epochs 50 \
+  --early-stopping-patience 5 \
+  --latent-dim 32 \
+  --image-width 80 \
+  --image-height 96
+```
+
+`train.py` now monitors validation loss for both phases, saves the best checkpoint, and
+stops early after 5 non-improving epochs by default. Use
+`--early-stopping-patience 0` to disable this.
 
 For an M1 MacBook Pro with 16GB, the current defaults are tuned to be safer:
 
@@ -74,6 +126,33 @@ Output files are saved in `./models/` as:
 - `tsilva__gymrec__BreakoutNoFrameskip_dash_v4-representation.pt`
 - `tsilva__gymrec__BreakoutNoFrameskip_dash_v4-dynamics.pt`
 
+### Pixel Dynamics Experiments
+
+For direct frame prediction, train with `--dynamics-mode pixel`. The most useful
+knobs during the Breakout experiments have been:
+
+- `--pixel-unroll-steps`: number of autoregressive steps trained per sequence
+- `--sequence-stride`: keep every `N`th rollout window to trade data for runtime
+- `--pixel-dynamics-path`: resume from an existing pixel checkpoint
+- `--learning-rate`: lower this when fine-tuning an existing pixel checkpoint
+- `--pixel-feedback-mode`: `soft` for the current stable path, `ste` for binarized
+  straight-through feedback experiments
+
+Example long-horizon pixel run:
+
+```bash
+python train.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --game breakout \
+  --dynamics-mode pixel \
+  --history-length 4 \
+  --pixel-unroll-steps 8 \
+  --sequence-stride 16 \
+  --learning-rate 0.0003 \
+  --output-dir .cache/pixel_h4_unroll8_stride16 \
+  --pixel-dynamics-path .cache/pixel_h4_unroll4_stride8/tsilva__gymrec__BreakoutNoFrameskip_dash_v4-pixel-dynamics.pt
+```
+
 ## Run The Emulator
 
 If you omit `--start-image`, the runtime fetches the first valid Breakout frame from the dataset and uses that as the initial latent state. You can still pass a local raw `210x160` Breakout frame if you want a specific start point.
@@ -84,6 +163,36 @@ python main.py \
   --game breakout \
   --use-local-models \
   --models-dir ./models \
+  --image-width 80 \
+  --image-height 96
+```
+
+For models trained on the stacked, deduped dataset, pass the matching dataset id and
+history length:
+
+```bash
+python main.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_deduped \
+  --game breakout \
+  --history-length 4 \
+  --use-local-models \
+  --models-dir ./models \
+  --image-width 80 \
+  --image-height 96
+```
+
+For direct pixel models, also pass the pixel dynamics mode. Use `--pixel-feedback soft`
+for the current best checkpoints in this repo:
+
+```bash
+python main.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --game breakout \
+  --dynamics-mode pixel \
+  --history-length 4 \
+  --pixel-feedback soft \
+  --use-local-models \
+  --models-dir ./.cache/pixel_h4_unroll8_stride16_finetune \
   --image-width 80 \
   --image-height 96
 ```
@@ -104,8 +213,10 @@ If you omit `--use-local-models`, `main.py` downloads models from:
 
 - `train.py`: trains the autoencoder and latent dynamics model
 - `main.py`: runs the neural emulator in Pygame
+- `scripts/render_pixel_rollouts.py`: renders scripted pixel-model rollouts for quick visual checks
 - `game_config.py`: per-game preprocessing/action metadata
 - `preprocessing.py`: shared crop, validation, binarization, and action encoding
+- `pixel_feedback.py`: shared helpers for soft, hard, and straight-through pixel feedback
 
 ## Notes
 
