@@ -12,7 +12,12 @@ from PIL import Image
 from dataset_utils import infer_history_length
 from device_utils import configure_torch, get_device, move_batch_tensor, prepare_conv_module
 from game_config import BREAKOUT_CONFIG, infer_game_config
-from pixel_feedback import feedback_from_logits, static_noop_mask
+from pixel_feedback import (
+    feedback_from_logits,
+    paddle_motion_mask,
+    shift_paddle_frames,
+    static_noop_mask,
+)
 from pixel_model import FrameDynamicsModel
 from preprocessing import has_valid_black_background, preprocess_frame
 
@@ -387,6 +392,24 @@ def parse_args():
         default=4.0,
         help="Maximum predicted changed-pixel count still treated as stationary during NOOP hold",
     )
+    parser.add_argument(
+        "--pixel-paddle-motion-hold",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use a deterministic paddle shift for near-static LEFT/RIGHT motion",
+    )
+    parser.add_argument(
+        "--pixel-paddle-motion-threshold",
+        type=float,
+        default=24.0,
+        help="Maximum non-paddle recent motion sum treated as paddle-only movement",
+    )
+    parser.add_argument(
+        "--pixel-paddle-shift",
+        type=int,
+        default=2,
+        help="Horizontal paddle shift in pixels per LEFT/RIGHT step when paddle hold is active",
+    )
     return parser.parse_args()
 
 
@@ -424,6 +447,9 @@ def main():
         "Pixel static predicted diff threshold: "
         f"{args.pixel_static_predicted_diff_threshold}"
     )
+    print(f"Pixel paddle motion hold: {args.pixel_paddle_motion_hold}")
+    print(f"Pixel paddle motion threshold: {args.pixel_paddle_motion_threshold}")
+    print(f"Pixel paddle shift: {args.pixel_paddle_shift}")
 
     representation_model, dynamics_model = load_trained_models(
         args, device, game_config.n_actions
@@ -467,11 +493,11 @@ def main():
         with torch.inference_mode():
             if args.dynamics_mode == "pixel":
                 current_frame = frame_history[:, -1:, :, :]
-                logits = dynamics_model(frame_history, action_tensor)
-                _, next_binary, next_input = feedback_from_logits(
-                    logits,
-                    args.pixel_feedback,
-                )
+                current_binary = (current_frame >= 0.5).float()
+                applied_prior = False
+                next_binary = None
+                next_input = None
+
                 if args.pixel_static_noop_hold:
                     hold_mask = static_noop_mask(
                         frame_history,
@@ -479,17 +505,58 @@ def main():
                         args.pixel_static_history_threshold,
                     )
                     if bool(hold_mask.any()):
-                        current_binary = (current_frame >= 0.5).float()
-                        predicted_diff = (next_binary - current_binary).abs().sum(
-                            dim=(1, 2, 3)
+                        logits = dynamics_model(frame_history, action_tensor)
+                        _, model_binary, model_input = feedback_from_logits(
+                            logits,
+                            args.pixel_feedback,
                         )
+                        predicted_diff = (model_binary - current_binary).abs().sum(dim=(1, 2, 3))
                         hold_mask = hold_mask & (
                             predicted_diff <= args.pixel_static_predicted_diff_threshold
                         )
-                        if bool(hold_mask.any()):
-                            hold_mask = hold_mask[:, None, None, None]
-                            next_binary = torch.where(hold_mask, current_binary, next_binary)
-                            next_input = torch.where(hold_mask, current_frame, next_input)
+                        if bool(hold_mask.all()):
+                            next_binary = current_binary
+                            next_input = current_frame
+                            applied_prior = True
+                        else:
+                            next_binary = model_binary
+                            next_input = model_input
+                            if bool(hold_mask.any()):
+                                hold_mask = hold_mask[:, None, None, None]
+                                next_binary = torch.where(hold_mask, current_binary, next_binary)
+                                next_input = torch.where(hold_mask, current_frame, next_input)
+                paddle_mask = None
+                if not applied_prior and args.pixel_paddle_motion_hold:
+                    paddle_mask = paddle_motion_mask(
+                        frame_history,
+                        action_tensor,
+                        args.pixel_paddle_motion_threshold,
+                    )
+                if paddle_mask is not None and bool(paddle_mask.any()):
+                    shifted_binary, applied_mask = shift_paddle_frames(
+                        current_binary,
+                        action_tensor,
+                        shift_pixels=args.pixel_paddle_shift,
+                    )
+                    paddle_mask = paddle_mask & applied_mask
+                    if bool(paddle_mask.any()):
+                        if next_binary is None or next_input is None:
+                            logits = dynamics_model(frame_history, action_tensor)
+                            _, next_binary, next_input = feedback_from_logits(
+                                logits,
+                                args.pixel_feedback,
+                            )
+                        paddle_mask = paddle_mask[:, None, None, None]
+                        shifted_input = shifted_binary
+                        next_binary = torch.where(paddle_mask, shifted_binary, next_binary)
+                        next_input = torch.where(paddle_mask, shifted_input, next_input)
+                        applied_prior = bool(paddle_mask.all())
+                if next_binary is None or next_input is None:
+                    logits = dynamics_model(frame_history, action_tensor)
+                    _, next_binary, next_input = feedback_from_logits(
+                        logits,
+                        args.pixel_feedback,
+                    )
                 frame_history = torch.cat([frame_history[:, 1:, :, :], next_input], dim=1)
                 recon_frame = next_binary.squeeze().detach().cpu().numpy()
             else:

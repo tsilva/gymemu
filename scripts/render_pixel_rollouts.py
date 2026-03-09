@@ -7,7 +7,12 @@ from datasets import load_dataset
 from PIL import Image, ImageDraw
 
 from game_config import BREAKOUT_CONFIG, infer_game_config
-from pixel_feedback import feedback_from_logits, static_noop_mask
+from pixel_feedback import (
+    feedback_from_logits,
+    paddle_motion_mask,
+    shift_paddle_frames,
+    static_noop_mask,
+)
 from pixel_model import FrameDynamicsModel
 from preprocessing import has_valid_black_background, preprocess_frame
 
@@ -30,7 +35,18 @@ def parse_args():
         default=True,
     )
     parser.add_argument("--pixel-static-history-threshold", type=float, default=40.0)
-    parser.add_argument("--pixel-static-predicted-diff-threshold", type=float, default=4.0)
+    parser.add_argument(
+        "--pixel-static-predicted-diff-threshold",
+        type=float,
+        default=4.0,
+    )
+    parser.add_argument(
+        "--pixel-paddle-motion-hold",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--pixel-paddle-motion-threshold", type=float, default=24.0)
+    parser.add_argument("--pixel-paddle-shift", type=int, default=2)
     parser.add_argument(
         "--feedback",
         choices=("soft", "hard"),
@@ -125,6 +141,9 @@ def rollout_policy(
     static_noop_hold,
     static_history_threshold,
     static_predicted_diff_threshold,
+    paddle_motion_hold,
+    paddle_motion_threshold,
+    paddle_shift,
 ):
     history = torch.from_numpy(seed_history).unsqueeze(0).float()
     frames = [seed_history[-1]]
@@ -134,12 +153,12 @@ def rollout_policy(
         action = torch.from_numpy(policy_actions[action_index]).unsqueeze(0).float()
         with torch.inference_mode():
             current_frame = history[:, -1:, :, :]
+            current_binary = (current_frame >= 0.5).float()
             logits = model(history, action)
             _, binary, next_input = feedback_from_logits(logits, feedback)
             if static_noop_hold:
                 hold_mask = static_noop_mask(history, action, static_history_threshold)
                 if bool(hold_mask.any()):
-                    current_binary = (current_frame >= 0.5).float()
                     predicted_diff = (binary - current_binary).abs().sum(dim=(1, 2, 3))
                     hold_mask = hold_mask & (
                         predicted_diff <= static_predicted_diff_threshold
@@ -148,6 +167,19 @@ def rollout_policy(
                         hold_mask = hold_mask[:, None, None, None]
                         binary = torch.where(hold_mask, current_binary, binary)
                         next_input = torch.where(hold_mask, current_frame, next_input)
+            if paddle_motion_hold:
+                paddle_mask = paddle_motion_mask(history, action, paddle_motion_threshold)
+                if bool(paddle_mask.any()):
+                    shifted_binary, applied_mask = shift_paddle_frames(
+                        current_binary,
+                        action,
+                        shift_pixels=paddle_shift,
+                    )
+                    paddle_mask = paddle_mask & applied_mask
+                    if bool(paddle_mask.any()):
+                        paddle_mask = paddle_mask[:, None, None, None]
+                        binary = torch.where(paddle_mask, shifted_binary, binary)
+                        next_input = torch.where(paddle_mask, shifted_binary, next_input)
         history = torch.cat([history[:, 1:, :, :], next_input], dim=1)
         frames.append(binary[0, 0].cpu().numpy())
 
@@ -217,6 +249,9 @@ def main():
             args.pixel_static_noop_hold,
             args.pixel_static_history_threshold,
             args.pixel_static_predicted_diff_threshold,
+            args.pixel_paddle_motion_hold,
+            args.pixel_paddle_motion_threshold,
+            args.pixel_paddle_shift,
         )
         for label, actions in policies.items()
     }
