@@ -25,6 +25,7 @@ from pixel_feedback import (
 )
 from pixel_model import FrameDynamicsModel
 from preprocessing import has_valid_black_background, preprocess_frame
+from spatial_model import SpatialLatentWorldModel
 
 MODEL_COMPILE_DEFAULT = True
 MODEL_LATENT_DIM = 32
@@ -36,6 +37,8 @@ HISTORY_LENGTH = 1
 DISPLAY_SCALE = 4
 DEFAULT_MPS_DISPLAY_SCALE = 3
 PIXEL_REFINE_BLOCKS = 0
+SPATIAL_LATENT_CHANNELS = 32
+SPATIAL_REFINE_BLOCKS = 4
 
 
 class ConvAutoencoder(nn.Module):
@@ -163,6 +166,30 @@ def load_trained_models(args, device, n_actions):
         )
         dynamics_model.eval()
         print(f"Pixel dynamics model: {dynamics_path}")
+        return None, dynamics_model
+
+    if args.dynamics_mode == "spatial":
+        dynamics_model = prepare_conv_module(
+            SpatialLatentWorldModel(
+                history_length=args.history_length,
+                n_actions=n_actions,
+                latent_channels=args.spatial_latent_channels,
+                refine_blocks=args.spatial_refine_blocks,
+            ),
+            device,
+        )
+        dynamics_model = maybe_compile(dynamics_model, args.model_compile, device)
+        dynamics_path = resolve_model_path(
+            args.dataset,
+            "spatial-dynamics",
+            args.use_local_models,
+            args.models_dir,
+        )
+        dynamics_model.load_state_dict(
+            torch.load(dynamics_path, map_location=device, weights_only=True)
+        )
+        dynamics_model.eval()
+        print(f"Spatial dynamics model: {dynamics_path}")
         return None, dynamics_model
 
     representation_model = prepare_conv_module(
@@ -318,9 +345,9 @@ def parse_args():
     )
     parser.add_argument(
         "--dynamics-mode",
-        choices=("latent", "pixel"),
+        choices=("latent", "pixel", "spatial"),
         default="latent",
-        help="Run either the original latent model or a direct pixel predictor",
+        help="Run a latent model, a direct pixel predictor, or a spatial-latent world model",
     )
     parser.add_argument(
         "--start-image",
@@ -395,6 +422,18 @@ def parse_args():
         help="Number of extra action-conditioned residual refinement blocks in the pixel model",
     )
     parser.add_argument(
+        "--spatial-latent-channels",
+        type=int,
+        default=SPATIAL_LATENT_CHANNELS,
+        help="Channel count of the spatial latent map used by the world model",
+    )
+    parser.add_argument(
+        "--spatial-refine-blocks",
+        type=int,
+        default=SPATIAL_REFINE_BLOCKS,
+        help="Number of action-conditioned residual blocks in the spatial latent dynamics model",
+    )
+    parser.add_argument(
         "--pixel-static-noop-hold",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -461,6 +500,8 @@ def main():
     print(f"Frame size: {IMAGE_WIDTH}x{IMAGE_HEIGHT}")
     print(f"History length: {args.history_length}")
     print(f"Pixel refine blocks: {args.pixel_refine_blocks}")
+    print(f"Spatial latent channels: {args.spatial_latent_channels}")
+    print(f"Spatial refine blocks: {args.spatial_refine_blocks}")
     print(f"Pixel static NOOP hold: {args.pixel_static_noop_hold}")
     print(f"Pixel static history threshold: {args.pixel_static_history_threshold}")
     print(
@@ -521,6 +562,12 @@ def main():
                         0,
                         255,
                     ).astype(np.uint8)
+        elif args.dynamics_mode == "spatial":
+            frame_history = initial_history_tensor.squeeze(1).unsqueeze(0)
+            breakout_ball_enabled = False
+            launch_action_id = 1
+            ball_state = None
+            paddle_state = None
         else:
             latent_history = representation_model.encode(initial_history_tensor).unsqueeze(0)
             breakout_ball_enabled = False
@@ -644,6 +691,14 @@ def main():
                         )
                     frame_history = torch.cat([frame_history[:, 1:, :, :], next_input], dim=1)
                     recon_frame = next_binary.squeeze().detach().cpu().numpy()
+            elif args.dynamics_mode == "spatial":
+                logits = dynamics_model(frame_history, action_tensor)
+                _, next_binary, next_input = feedback_from_logits(
+                    logits,
+                    args.pixel_feedback,
+                )
+                frame_history = torch.cat([frame_history[:, 1:, :, :], next_input], dim=1)
+                recon_frame = next_binary.squeeze().detach().cpu().numpy()
             else:
                 history_flat = latent_history.reshape(latent_history.size(0), -1)
                 delta_latent = dynamics_model(history_flat, action_tensor)

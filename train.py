@@ -24,6 +24,7 @@ from game_config import BREAKOUT_CONFIG, infer_game_config
 from pixel_feedback import feedback_from_logits
 from pixel_model import FrameDynamicsModel
 from preprocessing import encode_action, has_valid_black_background, preprocess_frame
+from spatial_model import SpatialLatentWorldModel
 from wandb_utils import TrainingTracker, make_image_grid
 
 # =============================================================================
@@ -55,6 +56,8 @@ PIXEL_CHANGE_LOSS_WEIGHT = 24.0
 PIXEL_UNROLL_STEPS = 4
 PIXEL_FEEDBACK_MODE = "soft"
 PIXEL_REFINE_BLOCKS = 0
+SPATIAL_LATENT_CHANNELS = 32
+SPATIAL_REFINE_BLOCKS = 4
 
 GAME_CONFIG = BREAKOUT_CONFIG
 N_ACTIONS = GAME_CONFIG.n_actions
@@ -1337,9 +1340,6 @@ def train_dynamics_phase(
         )
 
         if eval_examples:
-            history_frames = np.stack(
-                [example["history_frames"] for example in eval_examples], axis=0
-            )
             action_frames = np.stack([example["action"] for example in eval_examples], axis=0)
             target_frames = np.stack([example["target_frame"] for example in eval_examples], axis=0)
             latent_history = np.stack(
@@ -1453,7 +1453,8 @@ def train_dynamics_phase(
     }
 
 
-def train_pixel_dynamics_phase(
+def train_frame_rollout_phase(
+    model,
     train_sequences,
     val_sequences,
     n_epochs,
@@ -1461,17 +1462,11 @@ def train_pixel_dynamics_phase(
     dataset_name,
     early_stopping_patience,
     early_stopping_min_delta,
-    pixel_dynamics_path=None,
-    pixel_feedback_mode=PIXEL_FEEDBACK_MODE,
-    pixel_refine_blocks=PIXEL_REFINE_BLOCKS,
+    feedback_mode,
+    tracker_prefix,
+    artifact_suffix,
     tracker=None,
 ):
-    """Train a direct frame predictor on history windows and actions."""
-
-    print("\n" + "=" * 60)
-    print("PHASE 1: Training Pixel Dynamics Model")
-    print("=" * 60)
-
     train_dataset = PixelRolloutDataset(train_sequences)
     val_dataset = PixelRolloutDataset(val_sequences)
 
@@ -1487,24 +1482,6 @@ def train_pixel_dynamics_phase(
         shuffle=False,
         **dataloader_kwargs(device),
     )
-
-    model = prepare_conv_module(
-        FrameDynamicsModel(
-            history_length=HISTORY_LENGTH,
-            n_actions=N_ACTIONS,
-            refine_blocks=pixel_refine_blocks,
-        ),
-        device,
-    )
-    if pixel_dynamics_path:
-        load_result = model.load_state_dict(
-            torch.load(pixel_dynamics_path, map_location=device, weights_only=True),
-            strict=pixel_refine_blocks == 0,
-        )
-        print(f"Loaded pixel dynamics model from: {pixel_dynamics_path}")
-        if pixel_refine_blocks > 0:
-            print(f"Missing keys after partial load: {len(load_result.missing_keys)}")
-            print(f"Unexpected keys after partial load: {len(load_result.unexpected_keys)}")
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -1522,7 +1499,6 @@ def train_pixel_dynamics_phase(
     for epoch in range(n_epochs):
         model.train()
         train_metric_sums = {}
-        n_batches = 0
         train_sample_count = 0
         train_epoch_start = time.perf_counter()
 
@@ -1559,24 +1535,20 @@ def train_pixel_dynamics_phase(
                     first_step_metrics = step_metrics
                 if step_idx == n_steps - 1:
                     last_step_metrics = step_metrics
-                _, _, next_input = feedback_from_logits(logits, pixel_feedback_mode)
+                _, _, next_input = feedback_from_logits(logits, feedback_mode)
                 rollout_history = torch.cat(
                     [rollout_history[:, 1:, :, :], next_input],
                     dim=1,
                 )
             loss = loss / n_steps
-
             loss.backward()
 
             grad_norm = compute_grad_norm(model.parameters())
-
             if TRAIN_MAX_GRAD_NORM > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), TRAIN_MAX_GRAD_NORM)
-
             optimizer.step()
 
             optimizer_step += 1
-            n_batches += 1
             train_sample_count += batch_size
             batch_metrics = normalize_metric_sums(batch_metric_sums, n_steps)
             batch_metrics["loss_total"] = metric_value(loss)
@@ -1587,13 +1559,12 @@ def train_pixel_dynamics_phase(
             )
             batch_metrics["dice_step_1"] = metric_value(first_step_metrics["dice"])
             batch_metrics["dice_step_last"] = metric_value(last_step_metrics["dice"])
-            batch_metrics["foreground_ratio_error"] = batch_metrics["foreground_ratio_error"]
             add_weighted_metric_sums(train_metric_sums, batch_metrics, batch_size)
             if batch_idx == 1 or batch_idx % 20 == 0:
                 pbar.set_postfix({"loss": f"{metric_value(loss):.6f}"})
                 if tracker is not None:
                     tracker.log_batch(
-                        "pixel_dynamics",
+                        tracker_prefix,
                         {
                             "train/loss_total": batch_metrics["loss_total"],
                             "train/loss_step_1": batch_metrics["loss_step_1"],
@@ -1628,7 +1599,6 @@ def train_pixel_dynamics_phase(
 
         model.eval()
         val_metric_sums = {}
-        n_val_batches = 0
         val_sample_count = 0
         val_epoch_start = time.perf_counter()
 
@@ -1665,7 +1635,7 @@ def train_pixel_dynamics_phase(
                         first_step_metrics = step_metrics
                     if step_idx == n_steps - 1:
                         last_step_metrics = step_metrics
-                    _, _, next_input = feedback_from_logits(logits, pixel_feedback_mode)
+                    _, _, next_input = feedback_from_logits(logits, feedback_mode)
                     rollout_history = torch.cat(
                         [rollout_history[:, 1:, :, :], next_input],
                         dim=1,
@@ -1683,7 +1653,6 @@ def train_pixel_dynamics_phase(
                 batch_metrics["dice_step_last"] = metric_value(last_step_metrics["dice"])
                 add_weighted_metric_sums(val_metric_sums, batch_metrics, batch_size)
                 val_sample_count += batch_size
-                n_val_batches += 1
 
         val_metrics = {
             f"val/{key}": value
@@ -1707,7 +1676,7 @@ def train_pixel_dynamics_phase(
             best_val_loss = avg_val_loss
             best_epoch = epoch + 1
             epochs_without_improvement = 0
-            best_model_path = os.path.join(output_dir, f"{dataset_name}-pixel-dynamics.pt")
+            best_model_path = os.path.join(output_dir, f"{dataset_name}-{artifact_suffix}.pt")
             torch.save(model.state_dict(), best_model_path)
             print(f"  -> Saved best model (val_loss: {best_val_loss:.6f})")
             best_val_improved = True
@@ -1719,8 +1688,8 @@ def train_pixel_dynamics_phase(
             )
             if epochs_without_improvement >= early_stopping_patience:
                 print(
-                    "  -> Early stopping triggered for pixel dynamics model "
-                    f"after epoch {epoch + 1}"
+                    "  -> Early stopping triggered for "
+                    f"{tracker_prefix.replace('_', ' ')} after epoch {epoch + 1}"
                 )
                 empty_device_cache()
                 break
@@ -1734,7 +1703,7 @@ def train_pixel_dynamics_phase(
         epoch_metrics["health/best_val_improved"] = float(best_val_improved)
         epoch_metrics["health/epochs_without_improvement"] = epochs_without_improvement
         if tracker is not None:
-            tracker.log_epoch("pixel_dynamics", epoch_metrics, epoch)
+            tracker.log_epoch(tracker_prefix, epoch_metrics, epoch)
 
         if tracker is not None and eval_examples and (best_val_improved or (epoch + 1) % 5 == 0):
             predicted_rollouts = []
@@ -1742,13 +1711,15 @@ def train_pixel_dynamics_phase(
             history_last_frames = []
             with torch.inference_mode():
                 for history_frames, action_seq, target_frames in eval_examples:
-                    history_tensor = torch.from_numpy(history_frames).float().unsqueeze(0).to(device)
+                    history_tensor = (
+                        torch.from_numpy(history_frames).float().unsqueeze(0).to(device)
+                    )
                     action_tensor = torch.from_numpy(action_seq).float().unsqueeze(0).to(device)
                     rollout_history = history_tensor
                     rollout_predictions = []
                     for step_idx in range(action_tensor.size(1)):
                         logits = model(rollout_history, action_tensor[:, step_idx, :])
-                        probs, _, next_input = feedback_from_logits(logits, pixel_feedback_mode)
+                        probs, _, next_input = feedback_from_logits(logits, feedback_mode)
                         rollout_predictions.append(probs[0, 0].detach().cpu().numpy())
                         rollout_history = torch.cat(
                             [rollout_history[:, 1:, :, :], next_input],
@@ -1764,10 +1735,14 @@ def train_pixel_dynamics_phase(
                 target_rollouts,
             )
             tracker.log_media(
-                "pixel_dynamics",
+                tracker_prefix,
                 {
                     "media/rollout_strip": tracker.image(
-                        grid, caption=f"Epoch {epoch + 1} pixel rollouts"
+                        grid,
+                        caption=(
+                            f"Epoch {epoch + 1} "
+                            f"{tracker_prefix.replace('_', ' ')} rollouts"
+                        ),
                     )
                 },
                 epoch,
@@ -1775,14 +1750,125 @@ def train_pixel_dynamics_phase(
 
         empty_device_cache()
 
-    print(f"\nPhase 1 complete. Best model saved to: {best_model_path}")
-    print(f"Best validation loss: {best_val_loss:.6f}")
-
     return {
         "best_model_path": best_model_path,
         "best_val_loss": best_val_loss,
         "best_epoch": best_epoch,
     }
+
+
+def train_pixel_dynamics_phase(
+    train_sequences,
+    val_sequences,
+    n_epochs,
+    output_dir,
+    dataset_name,
+    early_stopping_patience,
+    early_stopping_min_delta,
+    pixel_dynamics_path=None,
+    pixel_feedback_mode=PIXEL_FEEDBACK_MODE,
+    pixel_refine_blocks=PIXEL_REFINE_BLOCKS,
+    tracker=None,
+):
+    """Train a direct frame predictor on history windows and actions."""
+
+    print("\n" + "=" * 60)
+    print("PHASE 1: Training Pixel Dynamics Model")
+    print("=" * 60)
+
+    model = prepare_conv_module(
+        FrameDynamicsModel(
+            history_length=HISTORY_LENGTH,
+            n_actions=N_ACTIONS,
+            refine_blocks=pixel_refine_blocks,
+        ),
+        device,
+    )
+    if pixel_dynamics_path:
+        load_result = model.load_state_dict(
+            torch.load(pixel_dynamics_path, map_location=device, weights_only=True),
+            strict=pixel_refine_blocks == 0,
+        )
+        print(f"Loaded pixel dynamics model from: {pixel_dynamics_path}")
+        if pixel_refine_blocks > 0:
+            print(f"Missing keys after partial load: {len(load_result.missing_keys)}")
+            print(f"Unexpected keys after partial load: {len(load_result.unexpected_keys)}")
+
+    result = train_frame_rollout_phase(
+        model,
+        train_sequences,
+        val_sequences,
+        n_epochs,
+        output_dir,
+        dataset_name,
+        early_stopping_patience,
+        early_stopping_min_delta,
+        pixel_feedback_mode,
+        tracker_prefix="pixel_dynamics",
+        artifact_suffix="pixel-dynamics",
+        tracker=tracker,
+    )
+    print(f"\nPhase 1 complete. Best model saved to: {result['best_model_path']}")
+    print(f"Best validation loss: {result['best_val_loss']:.6f}")
+    return result
+
+
+def train_spatial_dynamics_phase(
+    train_sequences,
+    val_sequences,
+    n_epochs,
+    output_dir,
+    dataset_name,
+    early_stopping_patience,
+    early_stopping_min_delta,
+    spatial_dynamics_path=None,
+    pixel_feedback_mode=PIXEL_FEEDBACK_MODE,
+    spatial_latent_channels=SPATIAL_LATENT_CHANNELS,
+    spatial_refine_blocks=SPATIAL_REFINE_BLOCKS,
+    tracker=None,
+):
+    """Train an end-to-end spatial-latent world model."""
+
+    print("\n" + "=" * 60)
+    print("PHASE 1: Training Spatial Latent Dynamics Model")
+    print("=" * 60)
+
+    model = prepare_conv_module(
+        SpatialLatentWorldModel(
+            history_length=HISTORY_LENGTH,
+            n_actions=N_ACTIONS,
+            latent_channels=spatial_latent_channels,
+            refine_blocks=spatial_refine_blocks,
+        ),
+        device,
+    )
+    if spatial_dynamics_path:
+        load_result = model.load_state_dict(
+            torch.load(spatial_dynamics_path, map_location=device, weights_only=True),
+            strict=spatial_refine_blocks == SPATIAL_REFINE_BLOCKS,
+        )
+        print(f"Loaded spatial dynamics model from: {spatial_dynamics_path}")
+        if spatial_refine_blocks != SPATIAL_REFINE_BLOCKS:
+            print(f"Missing keys after partial load: {len(load_result.missing_keys)}")
+            print(f"Unexpected keys after partial load: {len(load_result.unexpected_keys)}")
+
+    result = train_frame_rollout_phase(
+        model,
+        train_sequences,
+        val_sequences,
+        n_epochs,
+        output_dir,
+        dataset_name,
+        early_stopping_patience,
+        early_stopping_min_delta,
+        pixel_feedback_mode,
+        tracker_prefix="spatial_dynamics",
+        artifact_suffix="spatial-dynamics",
+        tracker=tracker,
+    )
+    print(f"\nPhase 1 complete. Best model saved to: {result['best_model_path']}")
+    print(f"Best validation loss: {result['best_val_loss']:.6f}")
+    return result
 
 
 # =============================================================================
@@ -1811,9 +1897,9 @@ def main():
     )
     parser.add_argument(
         "--dynamics-mode",
-        choices=("latent", "pixel"),
+        choices=("latent", "pixel", "spatial"),
         default="latent",
-        help="Train either the existing latent-space model or a direct pixel predictor",
+        help="Train a latent model, a direct pixel predictor, or a spatial-latent world model",
     )
     parser.add_argument(
         "--epochs", type=int, default=TRAIN_N_EPOCHS, help="Number of epochs per phase"
@@ -1903,6 +1989,18 @@ def main():
         help="Number of extra action-conditioned residual refinement blocks in the pixel model",
     )
     parser.add_argument(
+        "--spatial-latent-channels",
+        type=int,
+        default=SPATIAL_LATENT_CHANNELS,
+        help="Channel count of the spatial latent map used by the world model",
+    )
+    parser.add_argument(
+        "--spatial-refine-blocks",
+        type=int,
+        default=SPATIAL_REFINE_BLOCKS,
+        help="Number of action-conditioned residual blocks in the spatial latent dynamics model",
+    )
+    parser.add_argument(
         "--encode-batch-size",
         type=int,
         default=None,
@@ -1927,6 +2025,12 @@ def main():
         type=str,
         default=None,
         help="Optional path to a pre-trained pixel dynamics checkpoint to resume from",
+    )
+    parser.add_argument(
+        "--spatial-dynamics-path",
+        type=str,
+        default=None,
+        help="Optional path to a pre-trained spatial dynamics checkpoint to resume from",
     )
 
     load_dotenv()
@@ -1979,13 +2083,16 @@ def main():
     print(f"Pixel feedback mode: {args.pixel_feedback_mode}")
     print(f"Pixel refine blocks: {args.pixel_refine_blocks}")
     print(f"Pixel dynamics resume path: {args.pixel_dynamics_path}")
+    print(f"Spatial latent channels: {args.spatial_latent_channels}")
+    print(f"Spatial refine blocks: {args.spatial_refine_blocks}")
+    print(f"Spatial dynamics resume path: {args.spatial_dynamics_path}")
     print(f"Output directory: {args.output_dir}")
     print("=" * 60)
 
     tracker = TrainingTracker()
 
     # Load and preprocess data
-    if args.dynamics_mode == "pixel":
+    if args.dynamics_mode in {"pixel", "spatial"}:
         train_sequences, val_sequences, dataset_stats = load_pixel_rollout_dataset(
             args.dataset,
             unroll_steps=args.pixel_unroll_steps,
@@ -2009,7 +2116,7 @@ def main():
         print("Error: No training sequences found!")
         sys.exit(1)
 
-    if args.dynamics_mode == "pixel":
+    if args.dynamics_mode in {"pixel", "spatial"}:
         tracker.init_run(
             args,
             {
@@ -2023,10 +2130,10 @@ def main():
         tracker.log_run_metrics(dataset_stats)
 
         if args.skip_dynamics:
-            print("\nSkipping pixel dynamics model training")
-            pixel_result = None
-        else:
-            pixel_result = train_pixel_dynamics_phase(
+            print(f"\nSkipping {args.dynamics_mode} dynamics model training")
+            frame_result = None
+        elif args.dynamics_mode == "pixel":
+            frame_result = train_pixel_dynamics_phase(
                 train_sequences,
                 val_sequences,
                 TRAIN_N_EPOCHS,
@@ -2037,6 +2144,21 @@ def main():
                 pixel_dynamics_path=args.pixel_dynamics_path,
                 pixel_feedback_mode=args.pixel_feedback_mode,
                 pixel_refine_blocks=args.pixel_refine_blocks,
+                tracker=tracker,
+            )
+        else:
+            frame_result = train_spatial_dynamics_phase(
+                train_sequences,
+                val_sequences,
+                TRAIN_N_EPOCHS,
+                args.output_dir,
+                dataset_name,
+                EARLY_STOPPING_PATIENCE,
+                EARLY_STOPPING_MIN_DELTA,
+                spatial_dynamics_path=args.spatial_dynamics_path,
+                pixel_feedback_mode=args.pixel_feedback_mode,
+                spatial_latent_channels=args.spatial_latent_channels,
+                spatial_refine_blocks=args.spatial_refine_blocks,
                 tracker=tracker,
             )
     else:
@@ -2138,10 +2260,15 @@ def main():
         "run/output_dir": args.output_dir,
     }
     if args.dynamics_mode == "pixel":
-        if not args.skip_dynamics and pixel_result is not None:
-            summary["pixel_dynamics/best_val_loss"] = pixel_result["best_val_loss"]
-            summary["pixel_dynamics/best_epoch"] = pixel_result["best_epoch"]
-            summary["pixel_dynamics/best_model_path"] = pixel_result["best_model_path"]
+        if not args.skip_dynamics and frame_result is not None:
+            summary["pixel_dynamics/best_val_loss"] = frame_result["best_val_loss"]
+            summary["pixel_dynamics/best_epoch"] = frame_result["best_epoch"]
+            summary["pixel_dynamics/best_model_path"] = frame_result["best_model_path"]
+    elif args.dynamics_mode == "spatial":
+        if not args.skip_dynamics and frame_result is not None:
+            summary["spatial_dynamics/best_val_loss"] = frame_result["best_val_loss"]
+            summary["spatial_dynamics/best_epoch"] = frame_result["best_epoch"]
+            summary["spatial_dynamics/best_model_path"] = frame_result["best_model_path"]
     else:
         if autoencoder_result is not None:
             summary["autoencoder/best_val_loss"] = autoencoder_result["best_val_loss"]
