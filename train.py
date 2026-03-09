@@ -20,6 +20,7 @@ from dataset_utils import infer_history_length
 from device_utils import configure_torch, get_device, move_batch_tensor, prepare_conv_module
 from game_config import BREAKOUT_CONFIG, infer_game_config
 from pixel_feedback import feedback_from_logits
+from pixel_model import FrameDynamicsModel
 from preprocessing import encode_action, has_valid_black_background, preprocess_frame
 
 # =============================================================================
@@ -50,6 +51,7 @@ DICE_LOSS_WEIGHT = 1.0
 PIXEL_CHANGE_LOSS_WEIGHT = 24.0
 PIXEL_UNROLL_STEPS = 4
 PIXEL_FEEDBACK_MODE = "soft"
+PIXEL_REFINE_BLOCKS = 0
 
 GAME_CONFIG = BREAKOUT_CONFIG
 N_ACTIONS = GAME_CONFIG.n_actions
@@ -215,28 +217,6 @@ class DynamicsModel(nn.Module):
         all_deltas = torch.stack([head(hidden) for head in self.action_heads], dim=1)
         action_weights = action.unsqueeze(-1)
         return (all_deltas * action_weights).sum(dim=1)
-
-
-class FrameDynamicsModel(nn.Module):
-    """Predict the next preprocessed frame directly from history and action."""
-
-    def __init__(self, history_length=HISTORY_LENGTH, n_actions=N_ACTIONS):
-        super().__init__()
-        in_channels = history_length + n_actions
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 24, kernel_size=5, padding=2),
-            nn.GELU(),
-            nn.Conv2d(24, 24, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(24, 1, kernel_size=3, padding=1),
-        )
-
-    def forward(self, history_frames, action):
-        height, width = history_frames.shape[-2:]
-        action_planes = action[:, :, None, None].expand(-1, -1, height, width)
-        x = torch.cat([history_frames, action_planes], dim=1)
-        baseline = history_frames[:, -1:, :, :].clamp(1e-4, 1.0 - 1e-4)
-        return torch.logit(baseline) + self.net(x)
 
 
 # =============================================================================
@@ -1009,6 +989,7 @@ def train_pixel_dynamics_phase(
     early_stopping_min_delta,
     pixel_dynamics_path=None,
     pixel_feedback_mode=PIXEL_FEEDBACK_MODE,
+    pixel_refine_blocks=PIXEL_REFINE_BLOCKS,
 ):
     """Train a direct frame predictor on history windows and actions."""
 
@@ -1036,14 +1017,19 @@ def train_pixel_dynamics_phase(
         FrameDynamicsModel(
             history_length=HISTORY_LENGTH,
             n_actions=N_ACTIONS,
+            refine_blocks=pixel_refine_blocks,
         ),
         device,
     )
     if pixel_dynamics_path:
-        model.load_state_dict(
-            torch.load(pixel_dynamics_path, map_location=device, weights_only=True)
+        load_result = model.load_state_dict(
+            torch.load(pixel_dynamics_path, map_location=device, weights_only=True),
+            strict=pixel_refine_blocks == 0,
         )
         print(f"Loaded pixel dynamics model from: {pixel_dynamics_path}")
+        if pixel_refine_blocks > 0:
+            print(f"Missing keys after partial load: {len(load_result.missing_keys)}")
+            print(f"Unexpected keys after partial load: {len(load_result.unexpected_keys)}")
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -1289,6 +1275,12 @@ def main():
         help="How pixel predictions are fed back into history during training rollouts",
     )
     parser.add_argument(
+        "--pixel-refine-blocks",
+        type=int,
+        default=PIXEL_REFINE_BLOCKS,
+        help="Number of extra action-conditioned residual refinement blocks in the pixel model",
+    )
+    parser.add_argument(
         "--encode-batch-size",
         type=int,
         default=None,
@@ -1362,6 +1354,7 @@ def main():
     print(f"Sequence stride: {args.sequence_stride}")
     print(f"Pixel unroll steps: {args.pixel_unroll_steps}")
     print(f"Pixel feedback mode: {args.pixel_feedback_mode}")
+    print(f"Pixel refine blocks: {args.pixel_refine_blocks}")
     print(f"Pixel dynamics resume path: {args.pixel_dynamics_path}")
     print(f"Output directory: {args.output_dir}")
     print("=" * 60)
@@ -1402,6 +1395,7 @@ def main():
                 EARLY_STOPPING_MIN_DELTA,
                 pixel_dynamics_path=args.pixel_dynamics_path,
                 pixel_feedback_mode=args.pixel_feedback_mode,
+                pixel_refine_blocks=args.pixel_refine_blocks,
             )
     else:
         train_frames = extract_unique_frames(train_sequences)

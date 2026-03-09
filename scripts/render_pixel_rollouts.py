@@ -3,32 +3,13 @@ from collections import deque
 
 import numpy as np
 import torch
-import torch.nn as nn
 from datasets import load_dataset
 from PIL import Image, ImageDraw
 
 from game_config import BREAKOUT_CONFIG, infer_game_config
-from pixel_feedback import feedback_from_logits
+from pixel_feedback import feedback_from_logits, static_noop_mask
+from pixel_model import FrameDynamicsModel
 from preprocessing import has_valid_black_background, preprocess_frame
-
-
-class FrameDynamicsModel(nn.Module):
-    def __init__(self, history_length, n_actions):
-        super().__init__()
-        in_channels = history_length + n_actions
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 24, kernel_size=5, padding=2),
-            nn.GELU(),
-            nn.Conv2d(24, 24, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(24, 1, kernel_size=3, padding=1),
-        )
-
-    def forward(self, history_frames, action):
-        height, width = history_frames.shape[-2:]
-        action_planes = action[:, :, None, None].expand(-1, -1, height, width)
-        baseline = history_frames[:, -1:, :, :].clamp(1e-4, 1.0 - 1e-4)
-        return torch.logit(baseline) + self.net(torch.cat([history_frames, action_planes], dim=1))
 
 
 def parse_args():
@@ -42,6 +23,14 @@ def parse_args():
     parser.add_argument("--image-width", type=int, default=80)
     parser.add_argument("--image-height", type=int, default=96)
     parser.add_argument("--steps", type=int, default=16)
+    parser.add_argument("--pixel-refine-blocks", type=int, default=0)
+    parser.add_argument(
+        "--pixel-static-noop-hold",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--pixel-static-history-threshold", type=float, default=40.0)
+    parser.add_argument("--pixel-static-predicted-diff-threshold", type=float, default=4.0)
     parser.add_argument(
         "--feedback",
         choices=("soft", "hard"),
@@ -127,7 +116,16 @@ def fetch_seed_history(args, game_config):
     return first_window
 
 
-def rollout_policy(model, seed_history, policy_actions, steps, feedback):
+def rollout_policy(
+    model,
+    seed_history,
+    policy_actions,
+    steps,
+    feedback,
+    static_noop_hold,
+    static_history_threshold,
+    static_predicted_diff_threshold,
+):
     history = torch.from_numpy(seed_history).unsqueeze(0).float()
     frames = [seed_history[-1]]
 
@@ -135,8 +133,21 @@ def rollout_policy(model, seed_history, policy_actions, steps, feedback):
         action_index = min(step, len(policy_actions) - 1)
         action = torch.from_numpy(policy_actions[action_index]).unsqueeze(0).float()
         with torch.inference_mode():
+            current_frame = history[:, -1:, :, :]
             logits = model(history, action)
-            probs, binary, next_input = feedback_from_logits(logits, feedback)
+            _, binary, next_input = feedback_from_logits(logits, feedback)
+            if static_noop_hold:
+                hold_mask = static_noop_mask(history, action, static_history_threshold)
+                if bool(hold_mask.any()):
+                    current_binary = (current_frame >= 0.5).float()
+                    predicted_diff = (binary - current_binary).abs().sum(dim=(1, 2, 3))
+                    hold_mask = hold_mask & (
+                        predicted_diff <= static_predicted_diff_threshold
+                    )
+                    if bool(hold_mask.any()):
+                        hold_mask = hold_mask[:, None, None, None]
+                        binary = torch.where(hold_mask, current_binary, binary)
+                        next_input = torch.where(hold_mask, current_frame, next_input)
         history = torch.cat([history[:, 1:, :, :], next_input], dim=1)
         frames.append(binary[0, 0].cpu().numpy())
 
@@ -144,7 +155,7 @@ def rollout_policy(model, seed_history, policy_actions, steps, feedback):
 
 
 def sample_frame_indices(total_frames):
-    candidates = [0, 1, 2, 4, 8, 12, 16]
+    candidates = [0, 1, 2, 4, 8, 16, 32]
     return [idx for idx in candidates if idx < total_frames]
 
 
@@ -189,6 +200,7 @@ def main():
     model = FrameDynamicsModel(
         history_length=args.history_length,
         n_actions=game_config.n_actions,
+        refine_blocks=args.pixel_refine_blocks,
     )
     model.load_state_dict(torch.load(args.model_path, map_location="cpu", weights_only=True))
     model.eval()
@@ -196,7 +208,16 @@ def main():
     seed_history = fetch_seed_history(args, game_config)
     policies = build_policies(game_config, game_config.n_actions)
     rollouts = {
-        label: rollout_policy(model, seed_history, actions, args.steps, args.feedback)
+        label: rollout_policy(
+            model,
+            seed_history,
+            actions,
+            args.steps,
+            args.feedback,
+            args.pixel_static_noop_hold,
+            args.pixel_static_history_threshold,
+            args.pixel_static_predicted_diff_threshold,
+        )
         for label, actions in policies.items()
     }
 

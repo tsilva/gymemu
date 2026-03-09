@@ -12,7 +12,8 @@ from PIL import Image
 from dataset_utils import infer_history_length
 from device_utils import configure_torch, get_device, move_batch_tensor, prepare_conv_module
 from game_config import BREAKOUT_CONFIG, infer_game_config
-from pixel_feedback import feedback_from_logits
+from pixel_feedback import feedback_from_logits, static_noop_mask
+from pixel_model import FrameDynamicsModel
 from preprocessing import has_valid_black_background, preprocess_frame
 
 MODEL_COMPILE_DEFAULT = True
@@ -24,6 +25,7 @@ IMAGE_HEIGHT = 96
 HISTORY_LENGTH = 1
 DISPLAY_SCALE = 4
 DEFAULT_MPS_DISPLAY_SCALE = 3
+PIXEL_REFINE_BLOCKS = 0
 
 
 class ConvAutoencoder(nn.Module):
@@ -112,26 +114,6 @@ class DynamicsModel(nn.Module):
         return (all_deltas * action_weights).sum(dim=1)
 
 
-class FrameDynamicsModel(nn.Module):
-    def __init__(self, history_length=HISTORY_LENGTH, n_actions=BREAKOUT_CONFIG.n_actions):
-        super().__init__()
-        in_channels = history_length + n_actions
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 24, kernel_size=5, padding=2),
-            nn.GELU(),
-            nn.Conv2d(24, 24, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(24, 1, kernel_size=3, padding=1),
-        )
-
-    def forward(self, history_frames, action):
-        height, width = history_frames.shape[-2:]
-        action_planes = action[:, :, None, None].expand(-1, -1, height, width)
-        x = torch.cat([history_frames, action_planes], dim=1)
-        baseline = history_frames[:, -1:, :, :].clamp(1e-4, 1.0 - 1e-4)
-        return torch.logit(baseline) + self.net(x)
-
-
 def maybe_compile(model, enabled, device):
     if enabled and device.type == "cuda":
         return torch.compile(model)
@@ -155,6 +137,7 @@ def load_trained_models(args, device, n_actions):
             FrameDynamicsModel(
                 history_length=args.history_length,
                 n_actions=n_actions,
+                refine_blocks=args.pixel_refine_blocks,
             ),
             device,
         )
@@ -380,6 +363,30 @@ def parse_args():
         default="soft",
         help="How pixel predictions are fed back into history at runtime",
     )
+    parser.add_argument(
+        "--pixel-refine-blocks",
+        type=int,
+        default=PIXEL_REFINE_BLOCKS,
+        help="Number of extra action-conditioned residual refinement blocks in the pixel model",
+    )
+    parser.add_argument(
+        "--pixel-static-noop-hold",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When history is static and the action is NOOP, keep the frame fixed exactly",
+    )
+    parser.add_argument(
+        "--pixel-static-history-threshold",
+        type=float,
+        default=40.0,
+        help="Maximum recent pixel motion sum treated as effectively static for NOOP hold",
+    )
+    parser.add_argument(
+        "--pixel-static-predicted-diff-threshold",
+        type=float,
+        default=4.0,
+        help="Maximum predicted changed-pixel count still treated as stationary during NOOP hold",
+    )
     return parser.parse_args()
 
 
@@ -410,6 +417,13 @@ def main():
     print(f"Dynamics mode: {args.dynamics_mode}")
     print(f"Frame size: {IMAGE_WIDTH}x{IMAGE_HEIGHT}")
     print(f"History length: {args.history_length}")
+    print(f"Pixel refine blocks: {args.pixel_refine_blocks}")
+    print(f"Pixel static NOOP hold: {args.pixel_static_noop_hold}")
+    print(f"Pixel static history threshold: {args.pixel_static_history_threshold}")
+    print(
+        "Pixel static predicted diff threshold: "
+        f"{args.pixel_static_predicted_diff_threshold}"
+    )
 
     representation_model, dynamics_model = load_trained_models(
         args, device, game_config.n_actions
@@ -452,11 +466,30 @@ def main():
 
         with torch.inference_mode():
             if args.dynamics_mode == "pixel":
+                current_frame = frame_history[:, -1:, :, :]
                 logits = dynamics_model(frame_history, action_tensor)
                 _, next_binary, next_input = feedback_from_logits(
                     logits,
                     args.pixel_feedback,
                 )
+                if args.pixel_static_noop_hold:
+                    hold_mask = static_noop_mask(
+                        frame_history,
+                        action_tensor,
+                        args.pixel_static_history_threshold,
+                    )
+                    if bool(hold_mask.any()):
+                        current_binary = (current_frame >= 0.5).float()
+                        predicted_diff = (next_binary - current_binary).abs().sum(
+                            dim=(1, 2, 3)
+                        )
+                        hold_mask = hold_mask & (
+                            predicted_diff <= args.pixel_static_predicted_diff_threshold
+                        )
+                        if bool(hold_mask.any()):
+                            hold_mask = hold_mask[:, None, None, None]
+                            next_binary = torch.where(hold_mask, current_binary, next_binary)
+                            next_input = torch.where(hold_mask, current_frame, next_input)
                 frame_history = torch.cat([frame_history[:, 1:, :, :], next_input], dim=1)
                 recon_frame = next_binary.squeeze().detach().cpu().numpy()
             else:
