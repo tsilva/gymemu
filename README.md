@@ -21,6 +21,10 @@ For Breakout, the pipeline:
 Training and runtime share the same preprocessing so rollouts use the exact same frame
 format the model was trained on.
 
+Training can also corrupt the seed history with mild noise and foreground dropout so
+the model learns to recover from slightly imperfect context during autoregressive
+rollouts. This corruption is training-only; runtime inference is unchanged.
+
 ## Setup
 
 ```bash
@@ -50,9 +54,9 @@ new dataset, build a prepared dataset with `train` and `validation` splits:
 ```bash
 python scripts/build_training_dataset.py \
   --source-dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
-  --target-dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll8_train_ready \
+  --target-dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll16_train_ready \
   --history-length 4 \
-  --unroll-steps 8 \
+  --unroll-steps 16 \
   --sequence-stride 16
 ```
 
@@ -83,7 +87,7 @@ Run a remote training job:
 
 ```bash
 modal run modal_train.py \
-  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll8_train_ready \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll16_train_ready \
   --epochs 50 \
   --batch-size 16
 ```
@@ -138,10 +142,10 @@ Example:
 
 ```bash
 python train.py \
-  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll8_train_ready \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll16_train_ready \
   --game breakout \
   --history-length 4 \
-  --unroll-steps 8 \
+  --unroll-steps 16 \
   --epochs 50 \
   --early-stopping-patience 5 \
   --spatial-latent-channels 32 \
@@ -153,6 +157,9 @@ python train.py \
 Useful knobs:
 
 - `--feedback-mode`: `soft`, `hard`, or `ste`
+- `--history-corruption` / `--no-history-corruption`: enable or disable seed-history corruption
+- `--history-corruption-max-strength`: cap the per-sequence Gaussian noise scale
+- `--history-corruption-foreground-dropout-max`: cap foreground pixel dropout probability
 - `--spatial-dynamics-path`: resume from an existing spatial checkpoint
 - `--rollout-samples-per-epoch`: cap weighted rollout sampling per epoch
 - `--model-compile`: enable or disable `torch.compile()` on CUDA
@@ -175,6 +182,22 @@ python main.py \
   --models-dir ./models \
   --image-width 80 \
   --image-height 96
+
+# or point directly at a checkpoint without renaming it
+python main.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --game breakout \
+  --history-length 4 \
+  --spatial-dynamics-path ./models/modal_real_20260310/tsilva__gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll8_train_ready-spatial-dynamics.pt \
+  --image-width 80 \
+  --image-height 96
+
+# or only advance when an action key is pressed
+python main.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --game breakout \
+  --history-length 4 \
+  --runtime-mode on-action
 ```
 
 You can also let runtime download the model from Hugging Face by omitting
@@ -187,6 +210,11 @@ Controls:
 - `Left Arrow`: `LEFT`
 - no key: `NOOP`
 - `Escape`: quit
+
+`--runtime-mode realtime` is the default and keeps generating frames at 30 FPS using
+the current held key state. `--runtime-mode on-action` waits until you press one of the
+bound action keys, then advances exactly one model step for that action. Idle time does
+not generate `NOOP` frames in `on-action` mode.
 
 ## Files
 

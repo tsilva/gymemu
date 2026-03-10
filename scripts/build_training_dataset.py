@@ -24,7 +24,7 @@ from rollout_dataset import (  # noqa: E402
 DEFAULT_IMAGE_WIDTH = 80
 DEFAULT_IMAGE_HEIGHT = 96
 DEFAULT_HISTORY_LENGTH = 4
-DEFAULT_UNROLL_STEPS = 8
+DEFAULT_UNROLL_STEPS = 16
 DEFAULT_VAL_SPLIT = 0.2
 DEFAULT_SEQUENCE_STRIDE = 16
 
@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Target Hugging Face dataset ID. Defaults to "
-            "<source>_stack4_unroll8_train_ready style naming."
+            "<source>_stack4_unroll16_train_ready style naming."
         ),
     )
     parser.add_argument(

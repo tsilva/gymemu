@@ -53,7 +53,9 @@ def load_spatial_model(args, device, n_actions):
         device,
     )
     model = maybe_compile(model, args.model_compile, device)
-    model_path = resolve_model_path(args.dataset, args.use_local_models, args.models_dir)
+    model_path = args.spatial_dynamics_path
+    if model_path is None:
+        model_path = resolve_model_path(args.dataset, args.use_local_models, args.models_dir)
     load_result = load_spatial_model_state_dict(
         model,
         torch.load(model_path, map_location=device, weights_only=True),
@@ -167,6 +169,16 @@ def build_action_vector(keys, game_config, allow_fire=True):
     return action
 
 
+def build_action_vector_for_key(key, game_config):
+    action = np.zeros(game_config.n_actions, dtype=np.float32)
+    for binding in game_config.key_bindings:
+        if key != getattr(pygame, binding.pygame_key):
+            continue
+        action[binding.action_id] = 1.0
+        return action
+    return None
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the spatial latent emulator")
     parser.add_argument(
@@ -222,6 +234,11 @@ def parse_args():
         help="Directory containing locally trained spatial checkpoints",
     )
     parser.add_argument(
+        "--spatial-dynamics-path",
+        default=None,
+        help="Optional exact path to a local spatial checkpoint to load",
+    )
+    parser.add_argument(
         "--model-compile",
         action=argparse.BooleanOptionalAction,
         default=MODEL_COMPILE_DEFAULT,
@@ -238,6 +255,15 @@ def parse_args():
         choices=("soft", "hard"),
         default="soft",
         help="How model predictions are fed back into history at runtime",
+    )
+    parser.add_argument(
+        "--runtime-mode",
+        choices=("realtime", "on-action"),
+        default="realtime",
+        help=(
+            "Run continuously at 30 FPS with held-key actions, or only advance one frame "
+            "when an action key is pressed."
+        ),
     )
     parser.add_argument(
         "--spatial-latent-channels",
@@ -281,6 +307,7 @@ def main():
     print(f"Frame size: {IMAGE_WIDTH}x{IMAGE_HEIGHT}")
     print(f"History length: {args.history_length}")
     print(f"Feedback mode: {args.feedback}")
+    print(f"Runtime mode: {args.runtime_mode}")
     print(f"Spatial latent channels: {args.spatial_latent_channels}")
     print(f"Spatial refine blocks: {args.spatial_refine_blocks}")
 
@@ -308,16 +335,39 @@ def main():
     clock = pygame.time.Clock()
 
     while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
+        action = None
+
+        if args.runtime_mode == "on-action":
+            events = [pygame.event.wait()]
+            events.extend(pygame.event.get())
+            for event in events:
+                if event.type == pygame.QUIT:
+                    running = False
+                    break
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running = False
+                        break
+                    action = build_action_vector_for_key(event.key, game_config)
+                    if action is not None:
+                        break
+            if not running:
+                continue
+            if action is None:
+                continue
+        else:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+            if not running:
+                continue
+
+            keys = pygame.key.get_pressed()
+            if keys[pygame.K_ESCAPE]:
                 running = False
+                continue
 
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_ESCAPE]:
-            running = False
-            continue
-
-        action = build_action_vector(keys, game_config)
+            action = build_action_vector(keys, game_config)
         action_tensor = torch.from_numpy(action).unsqueeze(0).to(device)
 
         with torch.inference_mode():
@@ -327,7 +377,8 @@ def main():
             next_frame = next_binary[0, 0].detach().cpu().numpy()
 
         render_frame(screen, np.clip(next_frame * 255, 0, 255).astype(np.uint8))
-        clock.tick(30)
+        if args.runtime_mode == "realtime":
+            clock.tick(30)
 
     pygame.quit()
 

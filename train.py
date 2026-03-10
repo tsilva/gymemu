@@ -9,6 +9,10 @@ from dotenv import load_dotenv
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from tqdm import tqdm
 
+from context_corruption import (
+    apply_seed_history_corruption,
+    sample_history_corruption_strengths,
+)
 from dataset_utils import infer_history_length
 from device_utils import configure_torch, get_device, move_batch_tensor, prepare_conv_module
 from game_config import BREAKOUT_CONFIG, infer_game_config
@@ -44,8 +48,11 @@ FRAME_CHANGE_BCE_LOSS_WEIGHT = 4.0
 FRAME_CHANGE_DICE_LOSS_WEIGHT = 1.0
 SPATIAL_LATENT_CHANNELS = 32
 SPATIAL_REFINE_BLOCKS = 4
-UNROLL_STEPS = 8
+UNROLL_STEPS = 16
 FEEDBACK_MODE = "soft"
+HISTORY_CORRUPTION_DEFAULT = True
+HISTORY_CORRUPTION_MAX_STRENGTH = 0.08
+HISTORY_CORRUPTION_FOREGROUND_DROPOUT_MAX = 0.06
 RARE_ACTION_SAMPLING_POWER = 0.5
 MAX_SEQUENCE_SAMPLE_WEIGHT = 8.0
 ROLLOUT_SAMPLES_PER_EPOCH = 1024
@@ -369,6 +376,23 @@ def make_train_loader(train_dataset, train_weights, batch_size, rollout_samples_
     return loader
 
 
+def maybe_corrupt_seed_history(history_frames, args):
+    if not args.history_corruption:
+        return history_frames, torch.zeros(history_frames.size(0), device=history_frames.device)
+
+    strengths = sample_history_corruption_strengths(
+        history_frames.size(0),
+        max_strength=args.history_corruption_max_strength,
+        device=history_frames.device,
+    )
+    corrupted = apply_seed_history_corruption(
+        history_frames,
+        strengths,
+        foreground_dropout_max=args.history_corruption_foreground_dropout_max,
+    )
+    return corrupted, strengths
+
+
 def train_spatial_model(
     args,
     game_config,
@@ -453,7 +477,7 @@ def train_spatial_model(
 
             optimizer.zero_grad(set_to_none=True)
 
-            rollout_history = history_frames
+            rollout_history, corruption_strengths = maybe_corrupt_seed_history(history_frames, args)
             n_steps = action_seq.size(1)
             loss = torch.zeros((), device=device)
             batch_metric_sums = {}
@@ -496,6 +520,7 @@ def train_spatial_model(
             )
             batch_metrics["dice_step_1"] = metric_value(first_step_metrics["dice"])
             batch_metrics["dice_step_last"] = metric_value(last_step_metrics["dice"])
+            batch_metrics["history_corruption_strength"] = metric_value(corruption_strengths.mean())
             add_weighted_metric_sums(train_metric_sums, batch_metrics, batch_size)
 
             if batch_idx == 1 or batch_idx % 20 == 0:
@@ -510,6 +535,9 @@ def train_spatial_model(
                             "train/loss_last_over_first": batch_metrics["loss_last_over_first"],
                             "train/dice_step_1": batch_metrics["dice_step_1"],
                             "train/dice_step_last": batch_metrics["dice_step_last"],
+                            "train/history_corruption_strength": batch_metrics[
+                                "history_corruption_strength"
+                            ],
                             "train/change_dice": batch_metrics["change_dice"],
                             "train/loss_frame_bce": batch_metrics["loss_frame_bce"],
                             "train/loss_change_bce": batch_metrics["loss_change_bce"],
@@ -760,6 +788,24 @@ def parse_args():
         help="How predicted frames are fed back into history during training",
     )
     parser.add_argument(
+        "--history-corruption",
+        action=argparse.BooleanOptionalAction,
+        default=HISTORY_CORRUPTION_DEFAULT,
+        help="Corrupt the seed history during training with mild noise and foreground dropout",
+    )
+    parser.add_argument(
+        "--history-corruption-max-strength",
+        type=float,
+        default=HISTORY_CORRUPTION_MAX_STRENGTH,
+        help="Maximum per-sequence Gaussian noise scale for seed-history corruption",
+    )
+    parser.add_argument(
+        "--history-corruption-foreground-dropout-max",
+        type=float,
+        default=HISTORY_CORRUPTION_FOREGROUND_DROPOUT_MAX,
+        help="Maximum per-foreground-pixel dropout probability for seed-history corruption",
+    )
+    parser.add_argument(
         "--spatial-latent-channels",
         type=int,
         default=SPATIAL_LATENT_CHANNELS,
@@ -815,6 +861,12 @@ def main():
     print(f"History length: {args.history_length}")
     print(f"Unroll steps: {args.unroll_steps}")
     print(f"Feedback mode: {args.feedback_mode}")
+    print(f"History corruption: {args.history_corruption}")
+    print(f"History corruption max strength: {args.history_corruption_max_strength}")
+    print(
+        "History corruption foreground dropout max: "
+        f"{args.history_corruption_foreground_dropout_max}"
+    )
     print(f"Spatial latent channels: {args.spatial_latent_channels}")
     print(f"Spatial refine blocks: {args.spatial_refine_blocks}")
     print(f"Spatial dynamics resume path: {args.spatial_dynamics_path}")
