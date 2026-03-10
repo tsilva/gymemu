@@ -16,7 +16,7 @@ from rollout_dataset import (
     default_prepared_dataset_id,
     is_prepared_rollout_dataset,
     load_dataset_with_fallback,
-    load_prepared_rollout_splits,
+    prepared_rollout_dimensions,
 )
 from rollout_feedback import feedback_from_logits
 from spatial_model import SpatialLatentWorldModel, load_spatial_model_state_dict
@@ -27,7 +27,7 @@ IMAGE_WIDTH = 80
 IMAGE_HEIGHT = 96
 HISTORY_LENGTH = 1
 TRAIN_N_EPOCHS = 50
-TRAIN_BATCH_SIZE = 64
+TRAIN_BATCH_SIZE = 16
 TRAIN_LEARNING_RATE = 0.001
 TRAIN_WEIGHT_DECAY = 0.0
 TRAIN_MAX_GRAD_NORM = 0.0
@@ -135,17 +135,16 @@ def action_fraction_metrics(prefix, histogram):
 
 
 def compute_sequence_sample_weights(
-    sequences,
+    sequence_action_ids,
     n_actions,
     rarity_power=RARE_ACTION_SAMPLING_POWER,
     max_weight=MAX_SEQUENCE_SAMPLE_WEIGHT,
 ):
-    if not sequences:
+    if not sequence_action_ids:
         return None, None
 
     action_hist = np.zeros(n_actions, dtype=np.float64)
-    for _, action_seq, _ in sequences:
-        action_ids = action_seq.argmax(axis=1)
+    for action_ids in sequence_action_ids:
         np.add.at(action_hist, action_ids, 1)
 
     total = action_hist.sum()
@@ -163,8 +162,7 @@ def compute_sequence_sample_weights(
     )
 
     sequence_weights = []
-    for _, action_seq, _ in sequences:
-        action_ids = action_seq.argmax(axis=1)
+    for action_ids in sequence_action_ids:
         sequence_weights.append(float(action_weights[action_ids].max()))
 
     return torch.as_tensor(sequence_weights, dtype=torch.double), action_weights
@@ -179,17 +177,17 @@ def fixed_sample_indices(n_items, n_samples):
 
 
 class RolloutDataset(Dataset):
-    def __init__(self, sequences):
-        self.sequences = sequences
+    def __init__(self, dataset_split):
+        self.dataset_split = dataset_split
 
     def __len__(self):
-        return len(self.sequences)
+        return len(self.dataset_split)
 
     def __getitem__(self, idx):
-        history_frames, action_seq, target_frames = self.sequences[idx]
-        history_tensor = torch.from_numpy(history_frames).float()
-        action_tensor = torch.from_numpy(action_seq).float()
-        target_tensor = torch.from_numpy(target_frames).unsqueeze(1).float()
+        row = self.dataset_split[int(idx)]
+        history_tensor = torch.as_tensor(row["history"], dtype=torch.float32)
+        action_tensor = torch.as_tensor(row["action_seq"], dtype=torch.float32)
+        target_tensor = torch.as_tensor(row["target_frames"], dtype=torch.float32).unsqueeze(1)
         return history_tensor, action_tensor, target_tensor
 
 
@@ -249,9 +247,30 @@ def make_rollout_media_grid(history_frames, predicted_rollouts, target_rollouts)
     return make_image_grid(rows)
 
 
-def build_rollout_eval_examples(val_sequences, n_samples=4):
-    indices = fixed_sample_indices(len(val_sequences), n_samples)
-    return [val_sequences[index] for index in indices]
+def build_rollout_eval_examples(val_split, n_samples=4):
+    indices = fixed_sample_indices(len(val_split), n_samples)
+    examples = []
+    for index in indices:
+        row = val_split[int(index)]
+        examples.append(
+            (
+                np.asarray(row["history"], dtype=np.float32),
+                np.asarray(row["action_seq"], dtype=np.float32),
+                np.asarray(row["target_frames"], dtype=np.float32),
+            )
+        )
+    return examples
+
+
+def collect_split_action_data(dataset_split, n_actions):
+    histogram = action_histogram_dict(n_actions)
+    sequence_action_ids = []
+    for row in dataset_split:
+        action_ids = np.asarray(row["action_seq"], dtype=np.float32).argmax(axis=1)
+        sequence_action_ids.append(action_ids)
+        for action_id in action_ids:
+            histogram[int(action_id)] += 1
+    return histogram, sequence_action_ids
 
 
 def load_rollout_dataset(
@@ -277,7 +296,9 @@ def load_rollout_dataset(
 
     print(f"Train split rows: {len(dataset_dict['train'])}")
     print(f"Validation split rows: {len(dataset_dict['validation'])}")
-    train_rollouts, val_rollouts, prepared_dims = load_prepared_rollout_splits(dataset_id)
+    train_split = dataset_dict["train"]
+    val_split = dataset_dict["validation"]
+    prepared_dims = prepared_rollout_dimensions(train_split)
     if prepared_dims["history_length"] != history_length:
         raise ValueError(
             f"Prepared dataset history length is {prepared_dims['history_length']}, "
@@ -303,32 +324,32 @@ def load_rollout_dataset(
             f"{image_width}x{image_height}. Using the stored rollout tensors as-is."
         )
 
-    train_action_hist = action_histogram_dict(game_config.n_actions)
-    val_action_hist = action_histogram_dict(game_config.n_actions)
-    for _, action_seq, _ in train_rollouts:
-        for action_array in action_seq:
-            log_action_histogram(train_action_hist, action_array)
-    for _, action_seq, _ in val_rollouts:
-        for action_array in action_seq:
-            log_action_histogram(val_action_hist, action_array)
+    train_action_hist, train_sequence_action_ids = collect_split_action_data(
+        train_split,
+        game_config.n_actions,
+    )
+    val_action_hist, _ = collect_split_action_data(val_split, game_config.n_actions)
 
-    print(f"Train rollout sequences: {len(train_rollouts)}")
-    print(f"Validation rollout sequences: {len(val_rollouts)}")
+    print(f"Train rollout sequences: {len(train_split)}")
+    print(f"Validation rollout sequences: {len(val_split)}")
     dataset_stats = {
         "data/prepared_rollout_dataset": 1.0,
-        "data/train_sequences": len(train_rollouts),
-        "data/val_sequences": len(val_rollouts),
+        "data/train_sequences": len(train_split),
+        "data/val_sequences": len(val_split),
     }
     dataset_stats.update(action_fraction_metrics("data/train_action_fraction", train_action_hist))
     dataset_stats.update(action_fraction_metrics("data/val_action_fraction", val_action_hist))
-    return train_rollouts, val_rollouts, dataset_stats
+    train_weights, action_weights = compute_sequence_sample_weights(
+        train_sequence_action_ids,
+        game_config.n_actions,
+    )
+    return train_split, val_split, dataset_stats, train_weights, action_weights
 
 
-def make_train_loader(train_dataset, train_sequences, batch_size, n_actions, rollout_samples_per_epoch):
+def make_train_loader(train_dataset, train_weights, batch_size, rollout_samples_per_epoch):
     sampler = None
-    train_weights, action_weights = compute_sequence_sample_weights(train_sequences, n_actions)
     if train_weights is not None and rollout_samples_per_epoch > 0:
-        num_samples = max(1, min(int(rollout_samples_per_epoch), len(train_sequences)))
+        num_samples = max(1, min(int(rollout_samples_per_epoch), len(train_dataset)))
         sampler = WeightedRandomSampler(
             train_weights,
             num_samples=num_samples,
@@ -341,10 +362,18 @@ def make_train_loader(train_dataset, train_sequences, batch_size, n_actions, rol
         sampler=sampler,
         **dataloader_kwargs(device),
     )
-    return loader, action_weights
+    return loader
 
 
-def train_spatial_model(args, game_config, train_sequences, val_sequences, tracker=None):
+def train_spatial_model(
+    args,
+    game_config,
+    train_split,
+    val_split,
+    train_weights,
+    action_weights,
+    tracker=None,
+):
     dataset_name = args.dataset.replace("/", "__")
     model = prepare_conv_module(
         SpatialLatentWorldModel(
@@ -370,13 +399,12 @@ def train_spatial_model(args, game_config, train_sequences, val_sequences, track
         if load_result["unexpected_keys"]:
             print(f"Unexpected keys after partial load: {len(load_result['unexpected_keys'])}")
 
-    train_dataset = RolloutDataset(train_sequences)
-    val_dataset = RolloutDataset(val_sequences)
-    train_loader, action_weights = make_train_loader(
+    train_dataset = RolloutDataset(train_split)
+    val_dataset = RolloutDataset(val_split)
+    train_loader = make_train_loader(
         train_dataset,
-        train_sequences,
+        train_weights,
         args.batch_size,
-        game_config.n_actions,
         args.rollout_samples_per_epoch,
     )
     val_loader = DataLoader(
@@ -391,7 +419,7 @@ def train_spatial_model(args, game_config, train_sequences, val_sequences, track
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
-    eval_examples = build_rollout_eval_examples(val_sequences, n_samples=4)
+    eval_examples = build_rollout_eval_examples(val_split, n_samples=4)
     best_val_loss = float("inf")
     best_model_path = None
     best_epoch = None
@@ -787,7 +815,7 @@ def main():
     print(f"Spatial refine blocks: {args.spatial_refine_blocks}")
     print(f"Spatial dynamics resume path: {args.spatial_dynamics_path}")
 
-    train_sequences, val_sequences, dataset_stats = load_rollout_dataset(
+    train_split, val_split, dataset_stats, train_weights, action_weights = load_rollout_dataset(
         args.dataset,
         game_config,
         history_length=args.history_length,
@@ -803,8 +831,10 @@ def main():
     result = train_spatial_model(
         args,
         game_config,
-        train_sequences,
-        val_sequences,
+        train_split,
+        val_split,
+        train_weights,
+        action_weights,
         tracker=tracker,
     )
 
