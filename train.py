@@ -5,7 +5,6 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
-from datasets import load_dataset
 from dotenv import load_dotenv
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from tqdm import tqdm
@@ -13,7 +12,12 @@ from tqdm import tqdm
 from dataset_utils import infer_history_length
 from device_utils import configure_torch, get_device, move_batch_tensor, prepare_conv_module
 from game_config import BREAKOUT_CONFIG, infer_game_config
-from preprocessing import encode_action, has_valid_black_background, preprocess_frame
+from rollout_dataset import (
+    default_prepared_dataset_id,
+    is_prepared_rollout_dataset,
+    load_dataset_with_fallback,
+    load_prepared_rollout_splits,
+)
 from rollout_feedback import feedback_from_logits
 from spatial_model import SpatialLatentWorldModel, load_spatial_model_state_dict
 from wandb_utils import TrainingTracker, make_image_grid
@@ -29,7 +33,6 @@ TRAIN_WEIGHT_DECAY = 0.0
 TRAIN_MAX_GRAD_NORM = 0.0
 EARLY_STOPPING_PATIENCE = 5
 EARLY_STOPPING_MIN_DELTA = 0.0
-VAL_SPLIT_RATIO = 0.2
 MAX_FOREGROUND_LOSS_WEIGHT = 64.0
 FRAME_CHANGE_LOSS_WEIGHT = 24.0
 FRAME_CHANGE_MAP_LOSS_WEIGHT = 32.0
@@ -42,8 +45,12 @@ FEEDBACK_MODE = "soft"
 RARE_ACTION_SAMPLING_POWER = 0.5
 MAX_SEQUENCE_SAMPLE_WEIGHT = 8.0
 ROLLOUT_SAMPLES_PER_EPOCH = 1024
-SEQUENCE_STRIDE = 16
 MODEL_COMPILE_DEFAULT = True
+DEFAULT_PREPARED_TRAIN_DATASET = default_prepared_dataset_id(
+    BREAKOUT_CONFIG.dataset_id,
+    4,
+    UNROLL_STEPS,
+)
 
 torch.manual_seed(SEED)
 np.random.seed(SEED)
@@ -107,18 +114,6 @@ def normalize_metric_sums(metric_sums, total_weight):
 
 def is_val_improved(current_loss, best_loss, min_delta):
     return current_loss < (best_loss - min_delta)
-
-
-def use_single_episode_val_slot(sequence_index, val_split):
-    if val_split <= 0:
-        return False
-    return int((sequence_index + 1) * val_split) > int(sequence_index * val_split)
-
-
-def normalize_episode_id(raw_episode_id):
-    if isinstance(raw_episode_id, bytes):
-        return raw_episode_id.hex()
-    return str(raw_episode_id)
 
 
 def action_histogram_dict(n_actions):
@@ -266,155 +261,66 @@ def load_rollout_dataset(
     image_width,
     image_height,
     unroll_steps,
-    val_split,
-    sequence_stride,
 ):
     print(f"\nLoading dataset: {dataset_id}")
-
-    try:
-        dataset = load_dataset(dataset_id, split="train")
-    except Exception as exc:
-        print(f"Error loading dataset: {exc}")
-        print("Attempting to load with trust_remote_code=True...")
-        dataset = load_dataset(dataset_id, split="train", trust_remote_code=True)
-
-    print(f"Dataset loaded: {len(dataset)} samples")
-    if {"history", "action", "next_frame"}.issubset(set(dataset.column_names)):
+    dataset_dict = load_dataset_with_fallback(dataset_id)
+    if "train" not in dataset_dict or "validation" not in dataset_dict:
         raise ValueError(
-            "Spatial training expects a raw observation dataset so it can build rollout windows."
+            "train.py only accepts prepared rollout datasets with 'train' and 'validation' "
+            "splits. Build one with scripts/build_training_dataset.py."
+        )
+    if not is_prepared_rollout_dataset(dataset_dict["train"].column_names):
+        raise ValueError(
+            "train.py only accepts prepared rollout datasets built by "
+            "scripts/build_training_dataset.py."
         )
 
-    episodes = {}
-    for i, sample in enumerate(dataset):
-        episode_id = normalize_episode_id(sample.get("episode_id", 0))
-        episodes.setdefault(episode_id, []).append((i, sample))
+    print(f"Train split rows: {len(dataset_dict['train'])}")
+    print(f"Validation split rows: {len(dataset_dict['validation'])}")
+    train_rollouts, val_rollouts, prepared_dims = load_prepared_rollout_splits(dataset_id)
+    if prepared_dims["history_length"] != history_length:
+        raise ValueError(
+            f"Prepared dataset history length is {prepared_dims['history_length']}, "
+            f"but training was configured for {history_length}."
+        )
+    if prepared_dims["unroll_steps"] != unroll_steps:
+        raise ValueError(
+            f"Prepared dataset unroll steps is {prepared_dims['unroll_steps']}, "
+            f"but training was configured for {unroll_steps}."
+        )
+    if prepared_dims["n_actions"] != game_config.n_actions:
+        raise ValueError(
+            f"Prepared dataset action size is {prepared_dims['n_actions']}, "
+            f"but game profile expects {game_config.n_actions}."
+        )
+    if (
+        prepared_dims["image_width"] != image_width
+        or prepared_dims["image_height"] != image_height
+    ):
+        print(
+            "Prepared dataset frame size differs from the requested preprocessing size: "
+            f"{prepared_dims['image_width']}x{prepared_dims['image_height']} vs "
+            f"{image_width}x{image_height}. Using the stored rollout tensors as-is."
+        )
 
-    print(f"Found {len(episodes)} episodes")
-
-    episode_ids = list(episodes.keys())
-    np.random.shuffle(episode_ids)
-
-    if len(episode_ids) > 1:
-        n_val_episodes = max(1, int(len(episode_ids) * val_split))
-        val_episode_ids = set(episode_ids[:n_val_episodes])
-    else:
-        val_episode_ids = set()
-
-    train_rollouts = []
-    val_rollouts = []
-    skipped_invalid_frames = 0
-    skipped_terminal_pairs = 0
     train_action_hist = action_histogram_dict(game_config.n_actions)
     val_action_hist = action_histogram_dict(game_config.n_actions)
-
-    for episode_id, samples in episodes.items():
-        samples.sort(key=lambda item: item[0])
-        segment_frames = []
-        segment_actions = []
-        kept_window_index = 0
-
-        def flush_segment():
-            nonlocal kept_window_index
-
-            if len(segment_frames) < history_length + unroll_steps:
-                segment_frames.clear()
-                segment_actions.clear()
-                return
-
-            n_windows = len(segment_frames) - history_length - unroll_steps + 1
-            for window_index in range(n_windows):
-                if window_index % sequence_stride != 0:
-                    continue
-
-                history_frames = np.stack(
-                    segment_frames[window_index : window_index + history_length],
-                    axis=0,
-                )
-                action_seq = np.stack(
-                    segment_actions[
-                        window_index
-                        + history_length
-                        - 1 : window_index
-                        + history_length
-                        - 1
-                        + unroll_steps
-                    ],
-                    axis=0,
-                )
-                target_frames = np.stack(
-                    segment_frames[
-                        window_index + history_length : window_index + history_length + unroll_steps
-                    ],
-                    axis=0,
-                )
-
-                if len(episode_ids) > 1:
-                    target_list = (
-                        val_rollouts if episode_id in val_episode_ids else train_rollouts
-                    )
-                else:
-                    target_list = (
-                        val_rollouts
-                        if use_single_episode_val_slot(kept_window_index, val_split)
-                        else train_rollouts
-                    )
-                    kept_window_index += 1
-
-                target_list.append((history_frames, action_seq, target_frames))
-                target_hist = val_action_hist if target_list is val_rollouts else train_action_hist
-                for action_array in action_seq:
-                    log_action_histogram(target_hist, action_array)
-
-            segment_frames.clear()
-            segment_actions.clear()
-
-        for _, sample in samples:
-            frame = sample["observations"]
-            current_valid = has_valid_black_background(frame, game_config)
-            if not current_valid:
-                skipped_invalid_frames += 1
-                flush_segment()
-                continue
-
-            processed = preprocess_frame(
-                frame,
-                game_config,
-                target_size=(image_width, image_height),
-            )
-            try:
-                action_array = encode_action(sample["actions"], game_config)
-            except ValueError:
-                skipped_invalid_frames += 1
-                flush_segment()
-                continue
-
-            segment_frames.append(processed.astype(np.float32, copy=False))
-            segment_actions.append(action_array)
-
-            if sample.get("terminations") or sample.get("truncations"):
-                skipped_terminal_pairs += 1
-                flush_segment()
-
-        flush_segment()
+    for _, action_seq, _ in train_rollouts:
+        for action_array in action_seq:
+            log_action_histogram(train_action_hist, action_array)
+    for _, action_seq, _ in val_rollouts:
+        for action_array in action_seq:
+            log_action_histogram(val_action_hist, action_array)
 
     print(f"Train rollout sequences: {len(train_rollouts)}")
     print(f"Validation rollout sequences: {len(val_rollouts)}")
-    print(f"Skipped invalid-background pairs: {skipped_invalid_frames}")
-    print(f"Skipped terminated/truncated pairs: {skipped_terminal_pairs}")
-
     dataset_stats = {
-        "data/raw_samples": len(dataset),
-        "data/episode_count": len(episode_ids),
-        "data/train_episodes": len(episode_ids) - len(val_episode_ids),
-        "data/val_episodes": len(val_episode_ids),
+        "data/prepared_rollout_dataset": 1.0,
         "data/train_sequences": len(train_rollouts),
         "data/val_sequences": len(val_rollouts),
-        "data/skipped_invalid_background": skipped_invalid_frames,
-        "data/skipped_terminal_pairs": skipped_terminal_pairs,
     }
     dataset_stats.update(action_fraction_metrics("data/train_action_fraction", train_action_hist))
     dataset_stats.update(action_fraction_metrics("data/val_action_fraction", val_action_hist))
-
     return train_rollouts, val_rollouts, dataset_stats
 
 
@@ -760,8 +666,8 @@ def parse_args():
     parser.add_argument(
         "--dataset",
         type=str,
-        default=BREAKOUT_CONFIG.dataset_id,
-        help="Hugging Face dataset ID",
+        default=DEFAULT_PREPARED_TRAIN_DATASET,
+        help="Prepared Hugging Face dataset ID built by scripts/build_training_dataset.py",
     )
     parser.add_argument(
         "--game",
@@ -808,8 +714,6 @@ def parse_args():
         type=float,
         default=EARLY_STOPPING_MIN_DELTA,
     )
-    parser.add_argument("--val-split", type=float, default=VAL_SPLIT_RATIO)
-    parser.add_argument("--sequence-stride", type=int, default=SEQUENCE_STRIDE)
     parser.add_argument("--unroll-steps", type=int, default=UNROLL_STEPS)
     parser.add_argument(
         "--rollout-samples-per-epoch",
@@ -869,8 +773,6 @@ def main():
         raise ValueError("history-length must be at least 1")
     if args.unroll_steps < 1:
         raise ValueError("unroll-steps must be at least 1")
-    if args.sequence_stride < 1:
-        raise ValueError("sequence-stride must be at least 1")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -892,8 +794,6 @@ def main():
         image_width=args.image_width,
         image_height=args.image_height,
         unroll_steps=args.unroll_steps,
-        val_split=args.val_split,
-        sequence_stride=args.sequence_stride,
     )
 
     tracker = TrainingTracker()
