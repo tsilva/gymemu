@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import re
+import sys
 from collections import deque
 
 import numpy as np
 from datasets import load_dataset
 from PIL import Image, ImageDraw
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from dataset_utils import infer_history_length
 from game_config import BREAKOUT_CONFIG, infer_game_config
@@ -36,6 +40,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-samples", type=int, default=12)
     parser.add_argument("--sample-scale", type=int, default=2)
     parser.add_argument("--coverage-width", type=int, default=1200)
+    parser.add_argument(
+        "--emit-gifs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Write one animated GIF per sampled transition to <output-dir>/gifs/",
+    )
+    parser.add_argument(
+        "--gif-frame-duration-ms",
+        type=int,
+        default=220,
+        help="Frame duration for emitted GIFs",
+    )
+    parser.add_argument(
+        "--gif-final-hold-frames",
+        type=int,
+        default=4,
+        help="How many extra times to repeat the final frame in each GIF",
+    )
     parser.add_argument(
         "--output-dir",
         default=".cache/dataset_inspection",
@@ -197,7 +219,7 @@ def render_samples_image(
 
     for column in range(history_length):
         x = label_width + column * (tile_width + frame_gap)
-        draw.text((x, 4), f"h-{history_length - column}", fill=(0, 0, 0))
+        draw.text((x, 4), f"h-{history_length - column - 1}", fill=(0, 0, 0))
     next_x = label_width + history_length * (tile_width + frame_gap)
     draw.text((next_x, 4), "next", fill=(0, 0, 0))
 
@@ -223,6 +245,85 @@ def render_samples_image(
         canvas.paste(make_frame_tile(np.asarray(sample["next_frame"], dtype=np.float32), scale), (x, row_y))
 
     canvas.save(output_path)
+
+
+def render_transition_gif(
+    sample: dict[str, object],
+    sample_index: int,
+    labels: dict[int, str],
+    output_path: str,
+    scale: int,
+    frame_duration_ms: int,
+    final_hold_frames: int,
+) -> None:
+    history_frames = np.asarray(sample["history"], dtype=np.float32)
+    next_frame = np.asarray(sample["next_frame"], dtype=np.float32)
+    action_id = int(sample["action_id"])
+    action_label = labels.get(action_id, str(action_id))
+    source_index = int(sample["source_index"])
+    frame_sequence = [*history_frames, next_frame]
+    frame_labels = [
+        *(f"h-{history_frames.shape[0] - offset - 1}" for offset in range(history_frames.shape[0])),
+        "next",
+    ]
+
+    frames: list[Image.Image] = []
+    durations = [frame_duration_ms] * len(frame_sequence)
+    if final_hold_frames > 0:
+        durations[-1] = frame_duration_ms * (final_hold_frames + 1)
+
+    for frame_label, frame in zip(frame_labels, frame_sequence):
+        tile = make_frame_tile(frame, scale)
+        canvas = Image.new("RGB", (tile.width + 16, tile.height + 44), color=(255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((8, 4), f"#{sample_index} src={source_index}", fill=(0, 0, 0))
+        draw.text((8, 18), f"{frame_label} act={action_label}", fill=(0, 0, 0))
+        canvas.paste(tile, (8, 36))
+        frames.append(canvas)
+
+    frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=durations,
+        loop=0,
+        disposal=2,
+    )
+
+
+def render_transition_gifs(
+    samples: list[dict[str, object]],
+    sample_indices: np.ndarray,
+    labels: dict[int, str],
+    output_dir: str,
+    scale: int,
+    frame_duration_ms: int,
+    final_hold_frames: int,
+) -> list[str]:
+    gif_dir = os.path.join(output_dir, "gifs")
+    os.makedirs(gif_dir, exist_ok=True)
+    output_paths = []
+
+    for sample_index in sample_indices:
+        sample = samples[int(sample_index)]
+        action_label = labels.get(int(sample["action_id"]), str(sample["action_id"]))
+        safe_action_label = action_label.lower().replace("+", "_").replace("/", "_")
+        output_path = os.path.join(
+            gif_dir,
+            f"sample_{int(sample_index):05d}_src_{int(sample['source_index']):06d}_{safe_action_label}.gif",
+        )
+        render_transition_gif(
+            sample,
+            int(sample_index),
+            labels,
+            output_path,
+            scale,
+            frame_duration_ms,
+            final_hold_frames,
+        )
+        output_paths.append(output_path)
+
+    return output_paths
 
 
 def bucket_mask(mask: np.ndarray, width: int) -> np.ndarray:
@@ -354,6 +455,17 @@ def main() -> None:
     sample_indices = fixed_sample_indices(len(samples), args.num_samples)
     samples_path = os.path.join(args.output_dir, "samples.png")
     render_samples_image(samples, sample_indices, labels, samples_path, args.sample_scale)
+    gif_paths: list[str] = []
+    if args.emit_gifs:
+        gif_paths = render_transition_gifs(
+            samples,
+            sample_indices,
+            labels,
+            args.output_dir,
+            args.sample_scale,
+            args.gif_frame_duration_ms,
+            args.gif_final_hold_frames,
+        )
 
     coverage_stats = None
     coverage_path = None
@@ -380,6 +492,9 @@ def main() -> None:
     print(f"transitions={len(samples)}")
     print(f"stacked_dataset={uses_stacked_samples}")
     print(f"samples_image={samples_path}")
+    if gif_paths:
+        print(f"gif_dir={os.path.dirname(gif_paths[0])}")
+        print(f"gif_count={len(gif_paths)}")
     if coverage_path is not None and coverage_stats is not None:
         print(f"coverage_image={coverage_path}")
         for key, value in coverage_stats.items():

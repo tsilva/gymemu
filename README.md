@@ -42,20 +42,73 @@ cp .env.example .env
 - `WANDB_PROJECT=gymemu`
 - optional `WANDB_ENTITY`, `WANDB_API_KEY`, `WANDB_RUN_NAME`, `WANDB_TAGS`, `WANDB_NOTES`
 
+## Prepare Train-Ready Dataset
+
+If you want to precompute the rollout windows used by training and publish them as a
+new dataset, build a prepared dataset with `train` and `validation` splits:
+
+```bash
+python scripts/build_training_dataset.py \
+  --source-dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --target-dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll8_train_ready \
+  --history-length 4 \
+  --unroll-steps 8 \
+  --sequence-stride 16
+```
+
+This applies the same filtering and preprocessing expected by `train.py`, then stores:
+
+- `history`: stacked preprocessed input frames
+- `action_seq`: one-hot actions for each rollout step
+- `target_frames`: the target rollout frames for autoregressive training
+
+Useful flags:
+
+- `--skip-upload`: build and validate the dataset locally without pushing
+- `--max-rows`: smoke-test the pipeline on only the first N raw rows
+- `--private`: create the target dataset as private on Hugging Face
+
+## Inspect Datasets
+
+To visually confirm that a deduped stacked dataset still contains the gameplay you
+recorded, render a contact sheet plus a source-episode coverage view:
+
+```bash
+python scripts/inspect_dataset.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_deduped \
+  --source-dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --emit-gifs \
+  --num-samples 12 \
+  --output-dir .cache/dataset_inspection
+```
+
+This writes:
+
+- `.cache/dataset_inspection/samples.png`: evenly spaced `(history -> next)` strips from
+  the inspected dataset, with `source_index` and action labels
+- `.cache/dataset_inspection/gifs/*.gif`: one short animation per sampled transition,
+  showing the history frames followed by the target next frame
+- `.cache/dataset_inspection/coverage.png`: a timeline view of the source episode showing
+  which rows were valid after preprocessing, which rows were kept in the deduped dataset,
+  and which valid rows were dropped
+
+The script also works on raw observation datasets. In that case it builds transition
+windows with the same preprocessing used by training/runtime before rendering the same
+spot-check images.
+
 ## Train
 
-`train.py` is spatial-only. It expects a raw observation dataset so it can build
-autoregressive rollout windows internally.
+`train.py` is spatial-only. It only trains from a prepared rollout dataset created by
+`scripts/build_training_dataset.py`.
 
 Example:
 
 ```bash
 python train.py \
-  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll8_train_ready \
   --game breakout \
   --history-length 4 \
   --unroll-steps 8 \
-  --sequence-stride 16 \
   --epochs 50 \
   --early-stopping-patience 5 \
   --spatial-latent-channels 32 \
@@ -104,12 +157,16 @@ Controls:
 
 ## Files
 
-- `train.py`: trains the spatial latent world model
+- `train.py`: trains the spatial latent world model from a prepared rollout dataset
 - `main.py`: runs the spatial latent emulator in Pygame
 - `spatial_model.py`: model definition and checkpoint compatibility loader
 - `preprocessing.py`: shared crop, validation, binarization, and action encoding
+- `rollout_dataset.py`: shared rollout-window building and prepared-dataset helpers
 - `rollout_feedback.py`: feedback modes for autoregressive rollout
 - `game_config.py`: game-specific preprocessing and controls
+- `scripts/build_training_dataset.py`: builds and uploads train-ready rollout datasets
+- `scripts/inspect_dataset.py`: renders frame strips and source-coverage images for raw or
+  deduped datasets
 
 ## Notes
 
