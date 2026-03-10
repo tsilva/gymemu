@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+COMPILED_STATE_PREFIX = "_orig_mod."
+
+
 def _normalized_flow_grid(flow_pixels: torch.Tensor) -> torch.Tensor:
     batch_size, _, height, width = flow_pixels.shape
     device = flow_pixels.device
@@ -21,13 +24,28 @@ def _normalized_flow_grid(flow_pixels: torch.Tensor) -> torch.Tensor:
     return base_grid + flow_grid
 
 
+def normalized_spatial_model_state_dict(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    normalized_state = {}
+    for key, value in state_dict.items():
+        normalized_key = key
+        if normalized_key.startswith(COMPILED_STATE_PREFIX):
+            normalized_key = normalized_key[len(COMPILED_STATE_PREFIX) :]
+        normalized_state[normalized_key] = value
+    return normalized_state
+
+
 def load_spatial_model_state_dict(
     model: nn.Module,
     state_dict: dict[str, torch.Tensor],
 ) -> dict[str, list[str]]:
     model_state = model.state_dict()
-    remapped_state = dict(state_dict)
+    remapped_state = normalized_spatial_model_state_dict(state_dict)
     notes = []
+
+    if remapped_state.keys() != state_dict.keys():
+        notes.append("stripped torch.compile _orig_mod prefixes from checkpoint")
 
     legacy_decoder_keys = [
         "decoder.0.weight",
