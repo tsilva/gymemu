@@ -487,10 +487,15 @@ def train_spatial_model(
             for step_idx in range(n_steps):
                 logits = model(rollout_history, action_seq[:, step_idx, :])
                 target_frame = target_frames[:, step_idx, :, :, :]
+                current_frame = (
+                    history_frames[:, -1:, :, :]
+                    if step_idx == 0
+                    else rollout_history[:, -1:, :, :]
+                )
                 step_metrics = frame_prediction_components(
                     logits,
                     target_frame,
-                    rollout_history[:, -1:, :, :],
+                    current_frame,
                 )
                 loss = loss + step_metrics["loss_total"]
                 add_weighted_metric_sums(batch_metric_sums, step_metrics, 1.0)
@@ -597,10 +602,15 @@ def train_spatial_model(
                 for step_idx in range(n_steps):
                     logits = model(rollout_history, action_seq[:, step_idx, :])
                     target_frame = target_frames[:, step_idx, :, :, :]
+                    current_frame = (
+                        history_frames[:, -1:, :, :]
+                        if step_idx == 0
+                        else rollout_history[:, -1:, :, :]
+                    )
                     step_metrics = frame_prediction_components(
                         logits,
                         target_frame,
-                        rollout_history[:, -1:, :, :],
+                        current_frame,
                     )
                     loss = loss + step_metrics["loss_total"]
                     add_weighted_metric_sums(batch_metric_sums, step_metrics, 1.0)

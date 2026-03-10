@@ -19,6 +19,7 @@ DEFAULT_CACHE_VOLUME = os.environ.get("GYMEMU_MODAL_CACHE_VOLUME", "gymemu-hf-ca
 DEFAULT_MODELS_VOLUME = os.environ.get("GYMEMU_MODAL_MODELS_VOLUME", "gymemu-models")
 
 SOURCE_FILES = [
+    "context_corruption.py",
     "train.py",
     "dataset_utils.py",
     "device_utils.py",
@@ -73,6 +74,9 @@ def train_remote(
     output_subdir: str = "",
     wandb_mode: str = "disabled",
     model_compile: bool = True,
+    history_corruption: bool = True,
+    history_corruption_max_strength: float = 0.08,
+    history_corruption_foreground_dropout_max: float = 0.06,
 ) -> dict[str, object]:
     import json
     import subprocess
@@ -122,6 +126,15 @@ def train_remote(
         output_dir,
     ]
     command.append("--model-compile" if model_compile else "--no-model-compile")
+    command.append("--history-corruption" if history_corruption else "--no-history-corruption")
+    command.extend(
+        [
+            "--history-corruption-max-strength",
+            str(history_corruption_max_strength),
+            "--history-corruption-foreground-dropout-max",
+            str(history_corruption_foreground_dropout_max),
+        ]
+    )
 
     print("Running:", " ".join(command))
     subprocess.run(command, cwd=REMOTE_ROOT, env=env, check=True)
@@ -157,6 +170,9 @@ def main(
     output_subdir: str = "",
     wandb_mode: str = "disabled",
     model_compile: bool = True,
+    history_corruption: bool = True,
+    history_corruption_max_strength: float = 0.08,
+    history_corruption_foreground_dropout_max: float = 0.06,
 ) -> None:
     import json
 
@@ -175,5 +191,8 @@ def main(
         output_subdir=output_subdir,
         wandb_mode=wandb_mode,
         model_compile=model_compile,
+        history_corruption=history_corruption,
+        history_corruption_max_strength=history_corruption_max_strength,
+        history_corruption_foreground_dropout_max=history_corruption_foreground_dropout_max,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
