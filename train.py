@@ -19,7 +19,11 @@ from rollout_dataset import (
     prepared_rollout_dimensions,
 )
 from rollout_feedback import feedback_from_logits
-from spatial_model import SpatialLatentWorldModel, load_spatial_model_state_dict
+from spatial_model import (
+    SpatialLatentWorldModel,
+    load_spatial_model_state_dict,
+    normalized_spatial_model_state_dict,
+)
 from wandb_utils import TrainingTracker, make_image_grid
 
 SEED = 42
@@ -615,7 +619,7 @@ def train_spatial_model(
             best_epoch = epoch + 1
             epochs_without_improvement = 0
             best_model_path = os.path.join(args.output_dir, f"{dataset_name}-spatial-dynamics.pt")
-            torch.save(model.state_dict(), best_model_path)
+            torch.save(normalized_spatial_model_state_dict(model.state_dict()), best_model_path)
             print(f"  -> Saved best model (val_loss: {best_val_loss:.6f})")
             best_val_improved = True
         elif args.early_stopping_patience > 0:
