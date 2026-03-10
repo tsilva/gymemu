@@ -59,10 +59,10 @@ for relative_path in SOURCE_FILES:
     },
 )
 def train_remote(
-    dataset: str = "tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll8_train_ready",
+    dataset: str = "tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll16_train_ready",
     game: str = "breakout",
     history_length: int = 4,
-    unroll_steps: int = 8,
+    unroll_steps: int = 16,
     epochs: int = 50,
     batch_size: int = 16,
     learning_rate: float = 0.001,
@@ -143,10 +143,10 @@ def train_remote(
 
 @app.local_entrypoint()
 def main(
-    dataset: str = "tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll8_train_ready",
+    dataset: str = "tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll16_train_ready",
     game: str = "breakout",
     history_length: int = 4,
-    unroll_steps: int = 8,
+    unroll_steps: int = 16,
     epochs: int = 50,
     batch_size: int = 16,
     learning_rate: float = 0.001,
