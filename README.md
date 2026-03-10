@@ -68,6 +68,39 @@ Useful flags:
 - `--max-rows`: smoke-test the pipeline on only the first N raw rows
 - `--private`: create the target dataset as private on Hugging Face
 
+## Train On Modal
+
+If you want CUDA without running training locally, use `modal_train.py`.
+
+Install Modal locally first:
+
+```bash
+pip install modal
+modal setup
+```
+
+Run a remote training job:
+
+```bash
+modal run modal_train.py \
+  --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll8_train_ready \
+  --epochs 50 \
+  --batch-size 16
+```
+
+The Modal app:
+
+- installs the training dependencies in a Linux image with CUDA PyTorch wheels
+- runs `train.py` on a GPU worker
+- persists Hugging Face cache data in the `gymemu-hf-cache` volume
+- persists checkpoints in the `gymemu-models` volume
+
+Useful environment overrides before `modal run`:
+
+- `GYMEMU_MODAL_GPU=L40S` to change the GPU class from the default `A10G`
+- `GYMEMU_MODAL_TIMEOUT_S=43200` to increase the job timeout
+- `GYMEMU_MODAL_CACHE_VOLUME=...` and `GYMEMU_MODAL_MODELS_VOLUME=...` to change volume names
+
 ## Inspect Datasets
 
 To visually confirm that a deduped stacked dataset still contains the gameplay you
@@ -159,6 +192,7 @@ Controls:
 
 - `train.py`: trains the spatial latent world model from a prepared rollout dataset
 - `main.py`: runs the spatial latent emulator in Pygame
+- `modal_train.py`: launches CUDA training on Modal with persistent cache/model volumes
 - `spatial_model.py`: model definition and checkpoint compatibility loader
 - `preprocessing.py`: shared crop, validation, binarization, and action encoding
 - `rollout_dataset.py`: shared rollout-window building and prepared-dataset helpers

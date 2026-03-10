@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 from datasets import Array2D, Array3D, Dataset, DatasetDict, Features, load_dataset
 
@@ -85,131 +87,126 @@ def build_rollout_sequences_from_raw_dataset(
     progress_every: int = 0,
     split_seed: int = DEFAULT_SPLIT_SEED,
 ):
-    episodes = {}
     rows_seen = 0
-    for row_index, sample in enumerate(dataset):
-        if max_rows is not None and row_index >= max_rows:
-            break
-        rows_seen += 1
-        raw_episode_id = sample.get("episode_id", 0)
-        if isinstance(raw_episode_id, bytes):
-            episode_id = raw_episode_id.hex()
-        else:
-            episode_id = str(raw_episode_id)
-        episodes.setdefault(episode_id, []).append((row_index, sample))
-        if progress_every > 0 and rows_seen % progress_every == 0:
-            print(f"[builder] grouped_rows={rows_seen} episodes={len(episodes)}")
-
-    episode_ids = list(episodes.keys())
-    np.random.default_rng(split_seed).shuffle(episode_ids)
-
-    if len(episode_ids) > 1:
-        n_val_episodes = max(1, int(len(episode_ids) * val_split)) if val_split > 0 else 0
-        val_episode_ids = set(episode_ids[:n_val_episodes])
-    else:
-        val_episode_ids = set()
-
     train_rollouts = []
     val_rollouts = []
     skipped_invalid_frames = 0
     skipped_terminal_pairs = 0
+    episode_count = 0
+    val_episode_count = 0
+    train_episode_count = 0
+    current_episode_id = None
+    current_episode_split = "train"
+    segment_frames = []
+    segment_actions = []
 
-    for episode_index, episode_id in enumerate(episode_ids, start=1):
-        samples = episodes[episode_id]
-        samples.sort(key=lambda item: item[0])
-        segment_frames = []
-        segment_actions = []
-        kept_window_index = 0
-
-        def flush_segment():
-            nonlocal kept_window_index
-
-            if len(segment_frames) < history_length + unroll_steps:
-                segment_frames.clear()
-                segment_actions.clear()
-                return
-
-            n_windows = len(segment_frames) - history_length - unroll_steps + 1
-            for window_index in range(n_windows):
-                if window_index % sequence_stride != 0:
-                    continue
-
-                history_frames = np.stack(
-                    segment_frames[window_index : window_index + history_length],
-                    axis=0,
-                )
-                action_seq = np.stack(
-                    segment_actions[
-                        window_index
-                        + history_length
-                        - 1 : window_index
-                        + history_length
-                        - 1
-                        + unroll_steps
-                    ],
-                    axis=0,
-                )
-                target_frames = np.stack(
-                    segment_frames[
-                        window_index + history_length : window_index + history_length + unroll_steps
-                    ],
-                    axis=0,
-                )
-
-                if len(episode_ids) > 1:
-                    target_list = val_rollouts if episode_id in val_episode_ids else train_rollouts
-                else:
-                    target_list = (
-                        val_rollouts
-                        if _use_single_episode_val_slot(kept_window_index, val_split)
-                        else train_rollouts
-                    )
-                    kept_window_index += 1
-
-                target_list.append((history_frames, action_seq, target_frames))
-
+    def flush_segment():
+        if len(segment_frames) < history_length + unroll_steps:
             segment_frames.clear()
             segment_actions.clear()
+            return
 
-        for _, sample in samples:
-            frame = sample["observations"]
-            if not has_valid_black_background(frame, game_config):
-                skipped_invalid_frames += 1
-                flush_segment()
+        n_windows = len(segment_frames) - history_length - unroll_steps + 1
+        for window_index in range(n_windows):
+            if window_index % sequence_stride != 0:
                 continue
 
-            processed = preprocess_frame(
-                frame,
-                game_config,
-                target_size=(image_width, image_height),
-            ).astype(np.uint8, copy=False)
-            try:
-                action_array = encode_action(sample["actions"], game_config)
-            except ValueError:
-                skipped_invalid_frames += 1
+            history_frames = np.stack(
+                segment_frames[window_index : window_index + history_length],
+                axis=0,
+            )
+            action_seq = np.stack(
+                segment_actions[
+                    window_index
+                    + history_length
+                    - 1 : window_index
+                    + history_length
+                    - 1
+                    + unroll_steps
+                ],
+                axis=0,
+            )
+            target_frames = np.stack(
+                segment_frames[
+                    window_index + history_length : window_index + history_length + unroll_steps
+                ],
+                axis=0,
+            )
+
+            target_list = (
+                val_rollouts if current_episode_split == "validation" else train_rollouts
+            )
+
+            target_list.append((history_frames, action_seq, target_frames))
+
+        segment_frames.clear()
+        segment_actions.clear()
+
+    for row_index, sample in enumerate(dataset):
+        if max_rows is not None and row_index >= max_rows:
+            break
+        rows_seen += 1
+        episode_id = _normalize_episode_id(sample.get("episode_id", 0))
+
+        if current_episode_id is None or episode_id != current_episode_id:
+            if current_episode_id is not None:
                 flush_segment()
-                continue
+            current_episode_id = episode_id
+            current_episode_split = _episode_split(episode_id, val_split, split_seed)
+            episode_count += 1
+            if current_episode_split == "validation":
+                val_episode_count += 1
+            else:
+                train_episode_count += 1
 
-            segment_frames.append(processed)
-            segment_actions.append(action_array.astype(np.float32, copy=False))
+        if progress_every > 0 and rows_seen % progress_every == 0:
+            print(f"[builder] grouped_rows={rows_seen} episodes={episode_count}")
 
-            if sample.get("terminations") or sample.get("truncations"):
-                skipped_terminal_pairs += 1
-                flush_segment()
+        frame = sample["observations"]
+        if not has_valid_black_background(frame, game_config):
+            skipped_invalid_frames += 1
+            flush_segment()
+            continue
 
+        processed = preprocess_frame(
+            frame,
+            game_config,
+            target_size=(image_width, image_height),
+        ).astype(np.uint8, copy=False)
+        try:
+            action_array = encode_action(sample["actions"], game_config)
+        except ValueError:
+            skipped_invalid_frames += 1
+            flush_segment()
+            continue
+
+        segment_frames.append(processed)
+        segment_actions.append(action_array.astype(np.float32, copy=False))
+
+        if sample.get("terminations") or sample.get("truncations"):
+            skipped_terminal_pairs += 1
+            flush_segment()
+
+    if current_episode_id is not None:
         flush_segment()
 
-        if progress_every > 0 and episode_index % max(1, progress_every // 1000) == 0:
-            print(
-                f"[builder] processed_episodes={episode_index}/{len(episode_ids)} "
-                f"train_sequences={len(train_rollouts)} val_sequences={len(val_rollouts)}"
-            )
+    if episode_count == 1 and val_split > 0:
+        combined_rollouts = train_rollouts + val_rollouts
+        train_rollouts = []
+        val_rollouts = []
+        for sequence_index, rollout in enumerate(combined_rollouts):
+            if _use_single_episode_val_slot(sequence_index, val_split):
+                val_rollouts.append(rollout)
+            else:
+                train_rollouts.append(rollout)
+        train_episode_count = 1 if train_rollouts else 0
+        val_episode_count = 1 if val_rollouts else 0
 
     dataset_stats = {
         "data/raw_samples": rows_seen,
-        "data/episode_count": len(episode_ids),
-        "data/train_episodes": len(episode_ids) - len(val_episode_ids),
-        "data/val_episodes": len(val_episode_ids),
+        "data/episode_count": episode_count,
+        "data/train_episodes": train_episode_count,
+        "data/val_episodes": val_episode_count,
         "data/train_sequences": len(train_rollouts),
         "data/val_sequences": len(val_rollouts),
         "data/skipped_invalid_background": skipped_invalid_frames,
@@ -294,3 +291,18 @@ def _use_single_episode_val_slot(sequence_index: int, val_split: float) -> bool:
     if val_split <= 0:
         return False
     return int((sequence_index + 1) * val_split) > int(sequence_index * val_split)
+
+
+def _normalize_episode_id(raw_episode_id) -> str:
+    if isinstance(raw_episode_id, bytes):
+        return raw_episode_id.hex()
+    return str(raw_episode_id)
+
+
+def _episode_split(episode_id: str, val_split: float, split_seed: int) -> str:
+    if val_split <= 0:
+        return "train"
+    payload = f"{split_seed}:{episode_id}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    bucket = int.from_bytes(digest, byteorder="big") / float(1 << 64)
+    return "validation" if bucket < val_split else "train"
