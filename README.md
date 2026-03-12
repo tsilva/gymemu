@@ -23,7 +23,8 @@ format the model was trained on.
 
 Training can also corrupt the seed history with mild noise and foreground dropout so
 the model learns to recover from slightly imperfect context during autoregressive
-rollouts. This corruption is training-only; runtime inference is unchanged.
+rollouts. The corruption is applied coherently across the history window so motion cues
+stay physically plausible. This corruption is training-only; runtime inference is unchanged.
 
 ## Setup
 
@@ -160,6 +161,8 @@ Useful knobs:
 - `--history-corruption` / `--no-history-corruption`: enable or disable seed-history corruption
 - `--history-corruption-max-strength`: cap the per-sequence Gaussian noise scale
 - `--history-corruption-foreground-dropout-max`: cap foreground pixel dropout probability
+- `--robust-history-validation`: validate on corrupted seed histories as well and use that for checkpoint selection
+- `--robust-validation-weight`: control how much the robust validation loss influences best-model selection
 - `--spatial-dynamics-path`: resume from an existing spatial checkpoint
 - `--rollout-samples-per-epoch`: cap weighted rollout sampling per epoch
 - `--model-compile`: enable or disable `torch.compile()` on CUDA

@@ -13,7 +13,12 @@ class SeedHistoryCorruptionTests(unittest.TestCase):
         )
         strengths = torch.zeros(history.size(0), dtype=torch.float32)
 
-        corrupted = apply_seed_history_corruption(history, strengths, foreground_dropout_max=0.06)
+        corrupted = apply_seed_history_corruption(
+            history,
+            strengths,
+            max_strength=0.08,
+            foreground_dropout_max=0.06,
+        )
 
         self.assertTrue(torch.equal(corrupted, history))
 
@@ -25,6 +30,7 @@ class SeedHistoryCorruptionTests(unittest.TestCase):
         corrupted = apply_seed_history_corruption(
             history,
             strengths,
+            max_strength=0.08,
             foreground_dropout_max=0.06,
             generator=generator,
         )
@@ -43,11 +49,47 @@ class SeedHistoryCorruptionTests(unittest.TestCase):
         corrupted = apply_seed_history_corruption(
             history,
             strengths,
+            max_strength=1.0,
             foreground_dropout_max=1.0,
             generator=generator,
         )
 
         self.assertEqual(int(torch.count_nonzero(corrupted)), 0)
+
+    def test_max_strength_reaches_configured_dropout_cap(self):
+        generator = torch.Generator().manual_seed(0)
+        history = torch.ones((1, 3, 8, 8), dtype=torch.float32)
+        strengths = torch.tensor([0.08], dtype=torch.float32)
+
+        corrupted = apply_seed_history_corruption(
+            history,
+            strengths,
+            max_strength=0.08,
+            foreground_dropout_max=1.0,
+            generator=generator,
+        )
+
+        self.assertEqual(int(torch.count_nonzero(corrupted)), 0)
+
+    def test_corruption_is_temporally_consistent_for_identical_frames(self):
+        generator = torch.Generator().manual_seed(7)
+        frame = torch.tensor(
+            [[[0.0, 1.0], [1.0, 0.0]]],
+            dtype=torch.float32,
+        )
+        history = frame.repeat(1, 4, 1, 1)
+        strengths = torch.tensor([0.08], dtype=torch.float32)
+
+        corrupted = apply_seed_history_corruption(
+            history,
+            strengths,
+            max_strength=0.08,
+            foreground_dropout_max=0.5,
+            generator=generator,
+        )
+
+        self.assertTrue(torch.equal(corrupted[:, 0], corrupted[:, 1]))
+        self.assertTrue(torch.equal(corrupted[:, 1], corrupted[:, 2]))
 
 
 if __name__ == "__main__":

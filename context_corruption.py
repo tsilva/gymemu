@@ -14,9 +14,27 @@ def sample_history_corruption_strengths(
     )
 
 
+def _random_tensor(
+    shape: tuple[int, ...],
+    target_device: torch.device,
+    dtype: torch.dtype,
+    generator: torch.Generator | None,
+    normal: bool,
+) -> torch.Tensor:
+    sample_device = target_device if generator is None else torch.device("cpu")
+    if normal:
+        tensor = torch.randn(shape, device=sample_device, dtype=dtype, generator=generator)
+    else:
+        tensor = torch.rand(shape, device=sample_device, dtype=dtype, generator=generator)
+    if tensor.device != target_device:
+        tensor = tensor.to(device=target_device, dtype=dtype)
+    return tensor
+
+
 def apply_seed_history_corruption(
     history_frames: torch.Tensor,
     strengths: torch.Tensor,
+    max_strength: float,
     foreground_dropout_max: float,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
@@ -37,27 +55,28 @@ def apply_seed_history_corruption(
         return history_frames
 
     strength_scale = strengths[:, None, None, None]
-    noise = torch.randn(
-        history_frames.shape,
-        device=history_frames.device,
+    shared_noise = _random_tensor(
+        (history_frames.size(0), 1, history_frames.size(2), history_frames.size(3)),
+        target_device=history_frames.device,
         dtype=history_frames.dtype,
         generator=generator,
+        normal=True,
     )
-    noisy = history_frames + noise * strength_scale
+    noisy = history_frames + shared_noise * strength_scale
     corrupted = noisy.clamp(0.0, 1.0)
 
-    if foreground_dropout_max > 0:
-        dropout_probs = (strengths * float(foreground_dropout_max)).clamp(0.0, 1.0)
+    if foreground_dropout_max > 0 and max_strength > 0:
+        normalized_strengths = (strengths / float(max_strength)).clamp(0.0, 1.0)
+        dropout_probs = normalized_strengths * float(foreground_dropout_max)
         foreground_mask = history_frames > 0.5
-        dropout_mask = foreground_mask & (
-            torch.rand(
-                history_frames.shape,
-                device=history_frames.device,
-                dtype=history_frames.dtype,
-                generator=generator,
-            )
-            < dropout_probs[:, None, None, None]
+        shared_dropout = _random_tensor(
+            (history_frames.size(0), 1, history_frames.size(2), history_frames.size(3)),
+            target_device=history_frames.device,
+            dtype=history_frames.dtype,
+            generator=generator,
+            normal=False,
         )
+        dropout_mask = foreground_mask & (shared_dropout < dropout_probs[:, None, None, None])
         corrupted = corrupted.masked_fill(dropout_mask, 0.0)
 
     return corrupted
