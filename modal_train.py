@@ -77,6 +77,8 @@ def train_remote(
     history_corruption: bool = True,
     history_corruption_max_strength: float = 0.08,
     history_corruption_foreground_dropout_max: float = 0.06,
+    robust_history_validation: bool = True,
+    robust_validation_weight: float = 0.5,
 ) -> dict[str, object]:
     import json
     import subprocess
@@ -135,6 +137,17 @@ def train_remote(
             str(history_corruption_foreground_dropout_max),
         ]
     )
+    command.append(
+        "--robust-history-validation"
+        if robust_history_validation
+        else "--no-robust-history-validation"
+    )
+    command.extend(
+        [
+            "--robust-validation-weight",
+            str(robust_validation_weight),
+        ]
+    )
 
     print("Running:", " ".join(command))
     subprocess.run(command, cwd=REMOTE_ROOT, env=env, check=True)
@@ -173,6 +186,8 @@ def main(
     history_corruption: bool = True,
     history_corruption_max_strength: float = 0.08,
     history_corruption_foreground_dropout_max: float = 0.06,
+    robust_history_validation: bool = True,
+    robust_validation_weight: float = 0.5,
 ) -> None:
     import json
 
@@ -194,5 +209,7 @@ def main(
         history_corruption=history_corruption,
         history_corruption_max_strength=history_corruption_max_strength,
         history_corruption_foreground_dropout_max=history_corruption_foreground_dropout_max,
+        robust_history_validation=robust_history_validation,
+        robust_validation_weight=robust_validation_weight,
     )
     print(json.dumps(result, indent=2, sort_keys=True))

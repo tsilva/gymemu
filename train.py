@@ -53,6 +53,8 @@ FEEDBACK_MODE = "soft"
 HISTORY_CORRUPTION_DEFAULT = True
 HISTORY_CORRUPTION_MAX_STRENGTH = 0.08
 HISTORY_CORRUPTION_FOREGROUND_DROPOUT_MAX = 0.06
+ROBUST_HISTORY_VALIDATION_DEFAULT = True
+ROBUST_VALIDATION_WEIGHT = 0.5
 RARE_ACTION_SAMPLING_POWER = 0.5
 MAX_SEQUENCE_SAMPLE_WEIGHT = 8.0
 ROLLOUT_SAMPLES_PER_EPOCH = 1024
@@ -388,9 +390,32 @@ def maybe_corrupt_seed_history(history_frames, args):
     corrupted = apply_seed_history_corruption(
         history_frames,
         strengths,
+        max_strength=args.history_corruption_max_strength,
         foreground_dropout_max=args.history_corruption_foreground_dropout_max,
     )
     return corrupted, strengths
+
+
+def robust_seed_history(history_frames, args, generator):
+    strengths = torch.full(
+        (history_frames.size(0),),
+        fill_value=args.history_corruption_max_strength,
+        device=history_frames.device,
+        dtype=history_frames.dtype,
+    )
+    return apply_seed_history_corruption(
+        history_frames,
+        strengths,
+        max_strength=args.history_corruption_max_strength,
+        foreground_dropout_max=args.history_corruption_foreground_dropout_max,
+        generator=generator,
+    )
+
+
+def selection_loss(clean_val_loss, robust_val_loss, robust_weight, robust_enabled):
+    if not robust_enabled:
+        return clean_val_loss
+    return ((1.0 - robust_weight) * clean_val_loss) + (robust_weight * robust_val_loss)
 
 
 def train_spatial_model(
@@ -449,6 +474,8 @@ def train_spatial_model(
     )
     eval_examples = build_rollout_eval_examples(val_split, n_samples=4)
     best_val_loss = float("inf")
+    best_robust_val_loss = float("inf")
+    best_selection_score = float("inf")
     best_model_path = None
     best_epoch = None
     epochs_without_improvement = 0
@@ -644,21 +671,130 @@ def train_spatial_model(
             val_sample_count / val_epoch_time if val_epoch_time > 0 else 0.0
         )
         avg_val_loss = val_metrics["val/loss_total"]
+        robust_validation_enabled = (
+            args.robust_history_validation
+            and args.history_corruption
+            and args.history_corruption_max_strength > 0
+        )
+        avg_robust_val_loss = 0.0
 
-        print(
-            "Epoch "
-            f"{epoch + 1}/{args.epochs} - Train Loss: {avg_train_loss:.6f}, "
-            f"Val Loss: {avg_val_loss:.6f}"
+        if robust_validation_enabled:
+            robust_val_metric_sums = {}
+            robust_val_sample_count = 0
+            robust_val_epoch_start = time.perf_counter()
+            robust_generator = torch.Generator(device="cpu")
+            robust_generator.manual_seed(SEED + epoch)
+
+            with torch.inference_mode():
+                for history_frames, action_seq, target_frames in tqdm(
+                    val_loader,
+                    desc=f"Epoch {epoch + 1}/{args.epochs} [Robust Val]",
+                    leave=False,
+                ):
+                    history_frames = move_batch_tensor(
+                        history_frames, device, non_blocking=device.type == "cuda"
+                    )
+                    action_seq = action_seq.to(device, non_blocking=device.type == "cuda")
+                    target_frames = move_batch_tensor(
+                        target_frames, device, non_blocking=device.type == "cuda"
+                    )
+                    batch_size = history_frames.size(0)
+
+                    rollout_history = robust_seed_history(history_frames, args, robust_generator)
+                    n_steps = action_seq.size(1)
+                    loss = torch.zeros((), device=device)
+                    batch_metric_sums = {}
+                    first_step_metrics = None
+                    last_step_metrics = None
+
+                    for step_idx in range(n_steps):
+                        logits = model(rollout_history, action_seq[:, step_idx, :])
+                        target_frame = target_frames[:, step_idx, :, :, :]
+                        current_frame = (
+                            history_frames[:, -1:, :, :]
+                            if step_idx == 0
+                            else rollout_history[:, -1:, :, :]
+                        )
+                        step_metrics = frame_prediction_components(
+                            logits,
+                            target_frame,
+                            current_frame,
+                        )
+                        loss = loss + step_metrics["loss_total"]
+                        add_weighted_metric_sums(batch_metric_sums, step_metrics, 1.0)
+                        if step_idx == 0:
+                            first_step_metrics = step_metrics
+                        if step_idx == n_steps - 1:
+                            last_step_metrics = step_metrics
+                        _, _, next_input = feedback_from_logits(logits, args.feedback_mode)
+                        rollout_history = torch.cat([rollout_history[:, 1:, :, :], next_input], dim=1)
+
+                    loss = loss / n_steps
+                    batch_metrics = normalize_metric_sums(batch_metric_sums, n_steps)
+                    batch_metrics["loss_total"] = metric_value(loss)
+                    batch_metrics["loss_step_1"] = metric_value(first_step_metrics["loss_total"])
+                    batch_metrics["loss_step_last"] = metric_value(last_step_metrics["loss_total"])
+                    batch_metrics["loss_last_over_first"] = batch_metrics["loss_step_last"] / max(
+                        batch_metrics["loss_step_1"], 1e-8
+                    )
+                    batch_metrics["dice_step_1"] = metric_value(first_step_metrics["dice"])
+                    batch_metrics["dice_step_last"] = metric_value(last_step_metrics["dice"])
+                    add_weighted_metric_sums(robust_val_metric_sums, batch_metrics, batch_size)
+                    robust_val_sample_count += batch_size
+
+            robust_val_metrics = {
+                f"robust_val/{key}": value
+                for key, value in normalize_metric_sums(
+                    robust_val_metric_sums, robust_val_sample_count
+                ).items()
+            }
+            robust_val_epoch_time = time.perf_counter() - robust_val_epoch_start
+            robust_val_metrics["robust_val/epoch_time_s"] = robust_val_epoch_time
+            robust_val_metrics["robust_val/samples_per_s"] = (
+                robust_val_sample_count / robust_val_epoch_time if robust_val_epoch_time > 0 else 0.0
+            )
+            avg_robust_val_loss = robust_val_metrics["robust_val/loss_total"]
+        else:
+            robust_val_metrics = {}
+
+        current_selection_score = selection_loss(
+            avg_val_loss,
+            avg_robust_val_loss,
+            args.robust_validation_weight,
+            robust_validation_enabled,
         )
 
+        status_message = (
+            f"Epoch {epoch + 1}/{args.epochs} - Train Loss: {avg_train_loss:.6f}, "
+            f"Val Loss: {avg_val_loss:.6f}"
+        )
+        if robust_validation_enabled:
+            status_message += (
+                f", Robust Val Loss: {avg_robust_val_loss:.6f}, "
+                f"Selection Loss: {current_selection_score:.6f}"
+            )
+        print(status_message)
+
         best_val_improved = False
-        if is_val_improved(avg_val_loss, best_val_loss, args.early_stopping_min_delta):
+        if is_val_improved(
+            current_selection_score, best_selection_score, args.early_stopping_min_delta
+        ):
+            best_selection_score = current_selection_score
             best_val_loss = avg_val_loss
+            best_robust_val_loss = avg_robust_val_loss
             best_epoch = epoch + 1
             epochs_without_improvement = 0
             best_model_path = os.path.join(args.output_dir, f"{dataset_name}-spatial-dynamics.pt")
             torch.save(normalized_spatial_model_state_dict(model.state_dict()), best_model_path)
-            print(f"  -> Saved best model (val_loss: {best_val_loss:.6f})")
+            if robust_validation_enabled:
+                print(
+                    "  -> Saved best model "
+                    f"(selection_loss: {best_selection_score:.6f}, "
+                    f"val_loss: {best_val_loss:.6f}, "
+                    f"robust_val_loss: {best_robust_val_loss:.6f})"
+                )
+            else:
+                print(f"  -> Saved best model (val_loss: {best_val_loss:.6f})")
             best_val_improved = True
         elif args.early_stopping_patience > 0:
             epochs_without_improvement += 1
@@ -677,9 +813,11 @@ def train_spatial_model(
         epoch_metrics = {}
         epoch_metrics.update(train_metrics)
         epoch_metrics.update(val_metrics)
+        epoch_metrics.update(robust_val_metrics)
         epoch_metrics["health/generalization_gap_ratio"] = (
             avg_val_loss / avg_train_loss if avg_train_loss > 0 else 0.0
         )
+        epoch_metrics["health/selection_loss"] = current_selection_score
         epoch_metrics["health/best_val_improved"] = float(best_val_improved)
         epoch_metrics["health/epochs_without_improvement"] = epochs_without_improvement
         if tracker is not None:
@@ -727,6 +865,8 @@ def train_spatial_model(
     return {
         "best_model_path": best_model_path,
         "best_val_loss": best_val_loss,
+        "best_robust_val_loss": best_robust_val_loss,
+        "best_selection_loss": best_selection_score,
         "best_epoch": best_epoch,
     }
 
@@ -816,6 +956,18 @@ def parse_args():
         help="Maximum per-foreground-pixel dropout probability for seed-history corruption",
     )
     parser.add_argument(
+        "--robust-history-validation",
+        action=argparse.BooleanOptionalAction,
+        default=ROBUST_HISTORY_VALIDATION_DEFAULT,
+        help="Evaluate corrupted seed histories during validation and use them for model selection",
+    )
+    parser.add_argument(
+        "--robust-validation-weight",
+        type=float,
+        default=ROBUST_VALIDATION_WEIGHT,
+        help="Weight of robust validation loss when selecting the best checkpoint",
+    )
+    parser.add_argument(
         "--spatial-latent-channels",
         type=int,
         default=SPATIAL_LATENT_CHANNELS,
@@ -877,6 +1029,8 @@ def main():
         "History corruption foreground dropout max: "
         f"{args.history_corruption_foreground_dropout_max}"
     )
+    print(f"Robust history validation: {args.robust_history_validation}")
+    print(f"Robust validation weight: {args.robust_validation_weight}")
     print(f"Spatial latent channels: {args.spatial_latent_channels}")
     print(f"Spatial refine blocks: {args.spatial_refine_blocks}")
     print(f"Spatial dynamics resume path: {args.spatial_dynamics_path}")
@@ -906,6 +1060,8 @@ def main():
 
     summary = {
         "spatial_dynamics/best_val_loss": result["best_val_loss"],
+        "spatial_dynamics/best_robust_val_loss": result["best_robust_val_loss"],
+        "spatial_dynamics/best_selection_loss": result["best_selection_loss"],
         "spatial_dynamics/best_epoch": result["best_epoch"],
         "spatial_dynamics/best_model_path": result["best_model_path"],
     }
