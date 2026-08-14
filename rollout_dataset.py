@@ -54,7 +54,9 @@ def prepared_rollout_features(
         {
             "history": Array3D(shape=(history_length, image_height, image_width), dtype="uint8"),
             "action_seq": Array2D(shape=(unroll_steps, n_actions), dtype="float32"),
-            "target_frames": Array3D(shape=(unroll_steps, image_height, image_width), dtype="uint8"),
+            "target_frames": Array3D(
+                shape=(unroll_steps, image_height, image_width), dtype="uint8"
+            ),
         }
     )
 
@@ -117,9 +119,7 @@ def build_rollout_sequences_from_raw_dataset(
             )
             action_seq = np.stack(
                 segment_actions[
-                    window_index
-                    + history_length
-                    - 1 : window_index
+                    window_index + history_length - 1 : window_index
                     + history_length
                     - 1
                     + unroll_steps
@@ -133,9 +133,7 @@ def build_rollout_sequences_from_raw_dataset(
                 axis=0,
             )
 
-            target_list = (
-                val_rollouts if current_episode_split == "validation" else train_rollouts
-            )
+            target_list = val_rollouts if current_episode_split == "validation" else train_rollouts
 
             target_list.append((history_frames, action_seq, target_frames))
 

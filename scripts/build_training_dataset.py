@@ -186,7 +186,8 @@ def main() -> None:
         )
     if not val_sequences:
         raise RuntimeError(
-            "No validation rollout windows were produced. Increase --max-rows or increase --val-split."
+            "No validation rollout windows were produced. Increase --max-rows "
+            "or increase --val-split."
         )
 
     prepared_dataset = create_prepared_rollout_dataset(
@@ -221,7 +222,8 @@ def main() -> None:
         private=args.private,
         max_shard_size=args.max_shard_size,
         commit_message=(
-            f"Add train-ready rollout dataset (stack{args.history_length}, unroll{args.unroll_steps})"
+            "Add train-ready rollout dataset "
+            f"(stack{args.history_length}, unroll{args.unroll_steps})"
         ),
         commit_description=(
             f"Source dataset: {args.source_dataset}\n"

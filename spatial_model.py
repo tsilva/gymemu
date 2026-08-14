@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 COMPILED_STATE_PREFIX = "_orig_mod."
 
 

@@ -15,17 +15,15 @@ as `NOOP`, `FIRE`, `RIGHT`, and `LEFT`.
 ## Install
 
 ```bash
-git clone git@github.com:tsilva/gym-emu.git
-cd gym-emu
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --extra-index-url https://download.pytorch.org/whl/cu118 -e .
+git clone git@github.com:tsilva/gymemu.git
+cd gymemu
+uv sync --frozen --all-extras --no-config
 ```
 
 Run the emulator from the repo root:
 
 ```bash
-python main.py \
+uv run python main.py \
   --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
   --game breakout \
   --history-length 4
@@ -38,21 +36,21 @@ movement, and `Escape` to quit.
 
 ```bash
 # Build a prepared rollout dataset.
-python scripts/build_training_dataset.py \
+uv run python scripts/build_training_dataset.py \
   --source-dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
   --target-dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll16_train_ready \
   --history-length 4 \
   --unroll-steps 16
 
 # Train locally from a prepared dataset.
-python train.py \
+uv run python train.py \
   --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_unroll16_train_ready \
   --game breakout \
   --history-length 4 \
   --unroll-steps 16
 
 # Run from a local checkpoint directory.
-python main.py \
+uv run python main.py \
   --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
   --game breakout \
   --history-length 4 \
@@ -60,13 +58,20 @@ python main.py \
   --models-dir ./models
 
 # Render dataset inspection images and GIFs.
-python scripts/inspect_dataset.py \
+uv run python scripts/inspect_dataset.py \
   --dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4_stack4_deduped \
   --source-dataset tsilva/gymrec__BreakoutNoFrameskip_dash_v4 \
   --emit-gifs
 
 # Launch remote CUDA training on Modal.
 modal run modal_train.py --epochs 50 --batch-size 16
+
+# Verify the locked environment.
+uv lock --check --no-config
+uv audit --locked --no-config
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -q
 ```
 
 ## Notes
