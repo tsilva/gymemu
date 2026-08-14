@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.11.13
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Verify lock and install dependencies
+        run: |
+          uv lock --check --no-config
+          uv sync --frozen --all-extras --no-config
+
+      - name: Audit locked dependencies
+        run: uv audit --locked --no-config
+
+      - name: Check formatting
+        run: uv run --no-config ruff format --check .
+
+      - name: Lint
+        run: uv run --no-config ruff check .
+
+      - name: Test
+        run: uv run --no-config pytest -q
+
+      - name: Smoke-test entry points
+        env:
+          SDL_VIDEODRIVER: dummy
+        run: |
+          uv run --no-config python main.py --help
+          uv run --no-config python train.py --help

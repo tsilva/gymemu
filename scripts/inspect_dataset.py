@@ -15,9 +15,13 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from dataset_utils import infer_history_length
-from game_config import BREAKOUT_CONFIG, infer_game_config
-from preprocessing import encode_action, has_valid_black_background, preprocess_frame
+from dataset_utils import infer_history_length  # noqa: E402
+from game_config import BREAKOUT_CONFIG, infer_game_config  # noqa: E402
+from preprocessing import (  # noqa: E402
+    encode_action,
+    has_valid_black_background,
+    preprocess_frame,
+)
 
 STACKED_SUFFIX_PATTERN = re.compile(r"_stack\d+(?:_[A-Za-z0-9_]+)?$")
 
@@ -156,7 +160,9 @@ def load_transition_samples(
             samples.append(
                 {
                     "episode_id": episode_id,
-                    "source_index": previous_source_index if previous_source_index is not None else -1,
+                    "source_index": previous_source_index
+                    if previous_source_index is not None
+                    else -1,
                     "history": np.stack(frame_history, axis=0),
                     "action_id": previous_action_id,
                     "next_frame": processed,
@@ -242,7 +248,9 @@ def render_samples_image(
             canvas.paste(make_frame_tile(frame, scale), (x, row_y))
 
         x = label_width + history_length * (tile_width + frame_gap)
-        canvas.paste(make_frame_tile(np.asarray(sample["next_frame"], dtype=np.float32), scale), (x, row_y))
+        canvas.paste(
+            make_frame_tile(np.asarray(sample["next_frame"], dtype=np.float32), scale), (x, row_y)
+        )
 
     canvas.save(output_path)
 
