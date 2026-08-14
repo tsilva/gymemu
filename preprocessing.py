@@ -41,9 +41,7 @@ def has_valid_black_background(image: Image.Image | np.ndarray, game_config: Gam
     background_region = image_array[top:bottom, left:right]
     if background_region.size == 0:
         return False
-    background_pixels = np.all(
-        background_region <= game_config.background_tolerance, axis=2
-    )
+    background_pixels = np.all(background_region <= game_config.background_tolerance, axis=2)
     return float(background_pixels.mean()) >= game_config.background_threshold
 
 
@@ -78,9 +76,7 @@ def encode_action(action_value: int | Sequence[int], game_config: GameConfig) ->
         action_id = int(action_value)
 
     if not 0 <= action_id < game_config.n_actions:
-        raise ValueError(
-            f"Action id {action_id} is outside [0, {game_config.n_actions - 1}]"
-        )
+        raise ValueError(f"Action id {action_id} is outside [0, {game_config.n_actions - 1}]")
 
     action = np.zeros(game_config.n_actions, dtype=np.float32)
     action[action_id] = 1.0

@@ -44,9 +44,7 @@ class TrainingTracker:
                 "dynamics_mode",
                 "run",
             )
-            run_name = _sanitize_run_name(
-                f"{args.dataset}-{model_family}-{timestamp}"
-            )
+            run_name = _sanitize_run_name(f"{args.dataset}-{model_family}-{timestamp}")
         tags_env = os.getenv("WANDB_TAGS", "").strip()
         tags = [tag.strip() for tag in tags_env.split(",") if tag.strip()]
         notes = os.getenv("WANDB_NOTES", "").strip() or None
@@ -161,9 +159,7 @@ def make_image_grid(rows, pad=2, pad_value=32):
     if not rendered_rows:
         return np.zeros((1, 1, 3), dtype=np.uint8)
 
-    total_height = sum(row.shape[0] for row in rendered_rows) + pad * max(
-        0, len(rendered_rows) - 1
-    )
+    total_height = sum(row.shape[0] for row in rendered_rows) + pad * max(0, len(rendered_rows) - 1)
     total_width = max(row.shape[1] for row in rendered_rows)
     grid = np.full((total_height, total_width, 3), pad_value, dtype=np.uint8)
 
