@@ -111,7 +111,7 @@ def compute_grad_norm(parameters):
         grad_norm_sq += float(parameter.grad.detach().pow(2).sum().cpu().item())
     if not has_grad:
         return 0.0
-    return grad_norm_sq ** 0.5
+    return grad_norm_sq**0.5
 
 
 def add_weighted_metric_sums(metric_sums, metrics, weight):
@@ -327,10 +327,7 @@ def load_rollout_dataset(
             f"Prepared dataset action size is {prepared_dims['n_actions']}, "
             f"but game profile expects {game_config.n_actions}."
         )
-    if (
-        prepared_dims["image_width"] != image_width
-        or prepared_dims["image_height"] != image_height
-    ):
+    if prepared_dims["image_width"] != image_width or prepared_dims["image_height"] != image_height:
         print(
             "Prepared dataset frame size differs from the requested preprocessing size: "
             f"{prepared_dims['image_width']}x{prepared_dims['image_height']} vs "
@@ -515,9 +512,7 @@ def train_spatial_model(
                 logits = model(rollout_history, action_seq[:, step_idx, :])
                 target_frame = target_frames[:, step_idx, :, :, :]
                 current_frame = (
-                    history_frames[:, -1:, :, :]
-                    if step_idx == 0
-                    else rollout_history[:, -1:, :, :]
+                    history_frames[:, -1:, :, :] if step_idx == 0 else rollout_history[:, -1:, :, :]
                 )
                 step_metrics = frame_prediction_components(
                     logits,
@@ -574,12 +569,8 @@ def train_spatial_model(
                             "train/loss_frame_bce": batch_metrics["loss_frame_bce"],
                             "train/loss_change_bce": batch_metrics["loss_change_bce"],
                             "train/loss_change_dice": batch_metrics["loss_change_dice"],
-                            "train/foreground_ratio_error": batch_metrics[
-                                "foreground_ratio_error"
-                            ],
-                            "train/foreground_weight_mean": batch_metrics[
-                                "foreground_weight_mean"
-                            ],
+                            "train/foreground_ratio_error": batch_metrics["foreground_ratio_error"],
+                            "train/foreground_weight_mean": batch_metrics["foreground_weight_mean"],
                             "train/change_weight_mean": batch_metrics["change_weight_mean"],
                             "train/change_target_ratio": batch_metrics["change_target_ratio"],
                             "train/change_pred_ratio": batch_metrics["change_pred_ratio"],
@@ -727,7 +718,9 @@ def train_spatial_model(
                         if step_idx == n_steps - 1:
                             last_step_metrics = step_metrics
                         _, _, next_input = feedback_from_logits(logits, args.feedback_mode)
-                        rollout_history = torch.cat([rollout_history[:, 1:, :, :], next_input], dim=1)
+                        rollout_history = torch.cat(
+                            [rollout_history[:, 1:, :, :], next_input], dim=1
+                        )
 
                     loss = loss / n_steps
                     batch_metrics = normalize_metric_sums(batch_metric_sums, n_steps)
@@ -751,7 +744,9 @@ def train_spatial_model(
             robust_val_epoch_time = time.perf_counter() - robust_val_epoch_start
             robust_val_metrics["robust_val/epoch_time_s"] = robust_val_epoch_time
             robust_val_metrics["robust_val/samples_per_s"] = (
-                robust_val_sample_count / robust_val_epoch_time if robust_val_epoch_time > 0 else 0.0
+                robust_val_sample_count / robust_val_epoch_time
+                if robust_val_epoch_time > 0
+                else 0.0
             )
             avg_robust_val_loss = robust_val_metrics["robust_val/loss_total"]
         else:
@@ -803,10 +798,7 @@ def train_spatial_model(
                 f"({epochs_without_improvement}/{args.early_stopping_patience})"
             )
             if epochs_without_improvement >= args.early_stopping_patience:
-                print(
-                    "  -> Early stopping triggered for spatial dynamics "
-                    f"after epoch {epoch + 1}"
-                )
+                print(f"  -> Early stopping triggered for spatial dynamics after epoch {epoch + 1}")
                 empty_device_cache()
                 break
 
@@ -839,7 +831,9 @@ def train_spatial_model(
                         logits = model(rollout_history, action_tensor[:, step_idx, :])
                         probs, _, next_input = feedback_from_logits(logits, args.feedback_mode)
                         rollout_predictions.append(probs[0, 0].detach().cpu().numpy())
-                        rollout_history = torch.cat([rollout_history[:, 1:, :, :], next_input], dim=1)
+                        rollout_history = torch.cat(
+                            [rollout_history[:, 1:, :, :], next_input], dim=1
+                        )
                     predicted_rollouts.append(rollout_predictions)
                     target_rollouts.append([frame for frame in target_frames])
                     history_last_frames.append(history_frames[-1])
