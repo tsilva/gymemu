@@ -9,3 +9,8 @@ checkpoint_seconds: 60
 limit_episodes: null
 train_batches: null
 eval_batches: null
+frame_cache: null
+compile: false
+prefetch: false
+sync_batches: 1
+loader: standard

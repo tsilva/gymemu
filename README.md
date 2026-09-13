@@ -89,6 +89,30 @@ The latent approach's `model` group configures its codec. Set
 [training guide](docs/training.md) for config inheritance and artifacts, and
 [approach guide](docs/approaches.md) for adding models or pipelines.
 
+## Faster CUDA training
+
+For large datasets, build a lossless frame cache once and reuse it across runs.
+The cache preserves every RGB pixel and verifies source and cache checksums.
+Use the same immutable dataset revision for caching and training.
+
+```bash
+uv run python cache_frames.py \
+  --dataset tsilva/gradlab-breakout-trajectories \
+  --revision 676ff6388f4218d3c3a3ce9f2f33e075fa7314a3 \
+  --output data/breakout-cache
+
+uv run python train.py experiment=cuda_cached \
+  game.revision=676ff6388f4218d3c3a3ce9f2f33e075fa7314a3 \
+  trainer.frame_cache=data/breakout-cache trainer.epochs=10 \
+  output=runs/breakout-cached
+```
+
+This preset uses two loading threads, compiled computation, and overlapping CUDA
+transfers. It retains the direct CNN, full RGB frames, eight-frame history, and pixel
+MSE. Compilation adds startup time; checkpoints also load on CPUs without compilation
+or a frame cache. See [performance measurements](docs/performance.md) for results,
+reproduction commands, and the synchronization tradeoff.
+
 ## Other games
 
 The training path is game-independent. Supply a dataset with the supported RGB-frame,

@@ -19,6 +19,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from gymemu.approaches import build_approach
+from gymemu.batches import CachedBatchLoader
 from gymemu.checkpoints import load_model, save_model
 from gymemu.data import Frames, Windows, read_episodes, resolve_dataset
 from gymemu.runtime import device_for
@@ -33,7 +34,7 @@ def _positive(value, name):
 def validate(config):
     _positive(config["history"], "history")
     trainer = config["trainer"]
-    for name in ("batch_size", "epochs", "checkpoint_seconds"):
+    for name in ("batch_size", "epochs", "checkpoint_seconds", "sync_batches"):
         _positive(trainer[name], name)
     for name in ("threads", "limit_episodes", "train_batches", "eval_batches"):
         if trainer[name] is not None:
@@ -46,6 +47,10 @@ def validate(config):
         raise ValueError("device must be auto, cpu, cuda, or mps")
     if config["game"]["train_split"] == config["game"]["eval_split"]:
         raise ValueError("Training and evaluation splits must differ")
+    if trainer["loader"] not in ("standard", "cached"):
+        raise ValueError("loader must be standard or cached")
+    if trainer["loader"] == "cached" and not trainer["frame_cache"]:
+        raise ValueError("cached loader requires trainer.frame_cache")
     stages = config["approach"]["stages"]
     if not stages or len({s["name"] for s in stages}) != len(stages):
         raise ValueError("Stages must be nonempty with unique names")
@@ -61,6 +66,44 @@ def validate(config):
             raise ValueError("learning_rate must be finite and positive")
 
 
+def device_batches(loader, count, device, prefetch=False):
+    """Overlap pinned host transfers with computation without changing sample order."""
+    iterator = iter(islice(loader, count))
+    if not prefetch or device.type != "cuda":
+        for batch in iterator:
+            yield tuple(value.to(device, non_blocking=True) for value in batch)
+        return
+    stream = torch.cuda.Stream(device=device)
+
+    def copy_next():
+        batch = next(iterator, None)
+        if batch is None:
+            return None
+        with torch.cuda.stream(stream):
+            return tuple(value.to(device, non_blocking=True) for value in batch)
+
+    pending = copy_next()
+    while pending is not None:
+        current = torch.cuda.current_stream(device)
+        current.wait_stream(stream)
+        batch = pending
+        for value in batch:
+            value.record_stream(current)
+        pending = copy_next()
+        yield batch
+
+
+def batch_loss(model, history, action, target, compact, training):
+    history, target = history.float(), target.float()
+    if compact:
+        history = history / 255
+        target = target / 255
+    if training:
+        return model.loss(history, action, target), target.new_zeros(())
+    loss, prediction = model.evaluate(history, action, target)
+    return loss, F.mse_loss(prediction.float(), target)
+
+
 def run_epoch(
     model,
     loader,
@@ -72,57 +115,62 @@ def run_epoch(
     label="",
     checkpoint=None,
     checkpoint_seconds=60,
+    prefetch=False,
+    loss_function=batch_loss,
+    sync_batches=1,
 ):
     model.train(optimizer is not None)
     samples = batches = 0
-    total_loss = total_mse = 0.0
+    total_loss = torch.zeros((), device=device, dtype=torch.float64)
+    total_mse = torch.zeros_like(total_loss)
     started = last_checkpoint = time.monotonic()
     count = min(len(loader), max_batches) if max_batches else len(loader)
-    for history, action, target in islice(loader, count):
-        history = history.to(device, non_blocking=True).float()
-        target = target.to(device, non_blocking=True).float()
-        if loader.dataset.frames.compact:
-            history.div_(255)
-            target.div_(255)
-        action = action.to(device, non_blocking=True)
+    for history, action, target in device_batches(loader, count, device, prefetch):
         with torch.set_grad_enabled(optimizer is not None):
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
-                loss = model.loss(history, action, target)
-                if optimizer is None:
-                    # Every approach is compared in the same observed RGB space.
-                    mse = F.mse_loss(model(history, action).float(), target.float())
-            if not torch.isfinite(loss):
+                loss, mse = loss_function(
+                    model,
+                    history,
+                    action,
+                    target,
+                    loader.dataset.frames.compact,
+                    optimizer is not None,
+                )
+            if sync_batches == 1 and not torch.isfinite(loss):
                 raise ValueError("Non-finite training or validation loss")
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
-            else:
-                if not torch.isfinite(mse):
-                    raise ValueError("Non-finite pixel MSE")
-                total_mse += mse.item() * len(target)
-        total_loss += loss.item() * len(target)
+        total_loss += loss.detach().double() * len(target)
+        total_mse += mse.detach().double() * len(target)
         samples += len(target)
         batches += 1
+        save = checkpoint and time.monotonic() - last_checkpoint >= checkpoint_seconds
+        if batches % sync_batches == 0 or batches == count or save:
+            # Check before every checkpoint; CUDA runs may defer host synchronization.
+            if not torch.isfinite(total_loss) or not torch.isfinite(total_mse):
+                raise ValueError("Non-finite training or validation loss / pixel MSE")
         if batches % 100 == 0 or batches == count:
             print(
                 f"{label} {'train' if optimizer else 'eval'} batches={batches}/{count} "
-                f"loss={total_loss / samples:.6f}",
+                f"loss={total_loss.item() / samples:.6f} "
+                f"samples/s={samples / (time.monotonic() - started):.0f}",
                 flush=True,
             )
-        if checkpoint and time.monotonic() - last_checkpoint >= checkpoint_seconds:
+        if save:
             checkpoint(batches, samples)
             last_checkpoint = time.monotonic()
     if not samples:
         raise ValueError("An epoch must contain at least one sample")
     result = {
-        "loss": total_loss / samples,
+        "loss": total_loss.item() / samples,
         "samples": samples,
         "batches": batches,
         "seconds": time.monotonic() - started,
     }
     if optimizer is None:
-        result["mse"] = total_mse / samples
+        result["mse"] = total_mse.item() / samples
     return result
 
 
@@ -207,7 +255,7 @@ def train(cfg):
         torch.backends.cudnn.benchmark = True
     print("Loading episode trajectories.", flush=True)
     root, provenance = resolve_dataset(game["dataset"], game["revision"])
-    frames = Frames(root, compact=True)
+    frames = Frames(root, compact=True, cache=trainer["frame_cache"])
     # Check all episode IDs before applying smoke limits.
     train_episodes = read_episodes(root, game["train_split"])
     eval_episodes = read_episodes(root, game["eval_split"])
@@ -224,6 +272,7 @@ def train(cfg):
     evaluation = Windows(frames, eval_episodes, config["history"], actions)
     model = build_approach(spec, config["history"], len(actions), frames.shape).to(device)
     model.validate_stages(spec["stages"])
+    loss_function = torch.compile(batch_loss) if trainer["compile"] else batch_loss
     evaluation_contract = _evaluation_contract(
         _dataset_identity(root, provenance), eval_episodes, evaluation, trainer
     )
@@ -258,8 +307,17 @@ def train(cfg):
     }
     if trainer["workers"]:
         options.update(multiprocessing_context="spawn", persistent_workers=True, prefetch_factor=2)
-    train_loader = DataLoader(training, shuffle=True, **options)
-    eval_loader = DataLoader(evaluation, shuffle=False, **options)
+    if trainer["loader"] == "cached":
+        cached_options = dict(
+            batch_size=trainer["batch_size"],
+            workers=trainer["workers"],
+            pin_memory=device.type == "cuda",
+        )
+        train_loader = CachedBatchLoader(training, shuffle=True, **cached_options)
+        eval_loader = CachedBatchLoader(evaluation, shuffle=False, **cached_options)
+    else:
+        train_loader = DataLoader(training, shuffle=True, **options)
+        eval_loader = DataLoader(evaluation, shuffle=False, **options)
     parameters = sum(p.numel() for p in model.parameters())
     print(
         json.dumps(
@@ -302,6 +360,9 @@ def train(cfg):
                 device,
                 optimizer,
                 trainer["train_batches"],
+                loss_function=loss_function,
+                prefetch=trainer["prefetch"],
+                sync_batches=trainer["sync_batches"],
                 precision=trainer["precision"],
                 label=f"{stage['name']} epoch={epoch}",
                 checkpoint=snapshot,
@@ -315,6 +376,9 @@ def train(cfg):
                 eval_loader,
                 device,
                 max_batches=trainer["eval_batches"],
+                loss_function=loss_function,
+                prefetch=trainer["prefetch"],
+                sync_batches=trainer["sync_batches"],
                 precision="fp32",
                 label=f"{stage['name']} epoch={epoch}",
             )
