@@ -1,0 +1,10 @@
+# @package _global_
+# Ablation of breakout_cnn: add previous executed actions, keep its data and budget.
+defaults:
+  - breakout_cnn
+  - override /approach: direct_actions
+  - override /model: action_history_cnn
+  - _self_
+name: breakout-actions
+model:
+  action_history: ${history}

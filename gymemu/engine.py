@@ -22,6 +22,8 @@ from gymemu.approaches import build_approach
 from gymemu.batches import CachedBatchLoader
 from gymemu.checkpoints import load_model, save_model
 from gymemu.data import Frames, Windows, read_episodes, resolve_dataset
+from gymemu.optimizers import build_optimizer, validate_optimizer
+from gymemu.recipes import save_reproduction
 from gymemu.runtime import device_for
 from gymemu.scenes import write_scene
 
@@ -33,6 +35,7 @@ def _positive(value, name):
 
 def validate(config):
     _positive(config["history"], "history")
+    validate_optimizer(config["optimizer"])
     trainer = config["trainer"]
     for name in ("batch_size", "epochs", "checkpoint_seconds", "sync_batches"):
         _positive(trainer[name], name)
@@ -255,6 +258,14 @@ def train(cfg):
         torch.backends.cudnn.benchmark = True
     print("Loading episode trajectories.", flush=True)
     root, provenance = resolve_dataset(game["dataset"], game["revision"])
+    # Freeze mutable Hub references and local paths in replay artifacts.
+    game["revision"] = provenance["revision"]
+    if provenance["revision"] is None:
+        game["dataset"] = str(root)
+    if trainer["frame_cache"]:
+        trainer["frame_cache"] = str(Path(trainer["frame_cache"]).expanduser().resolve())
+    if game["start_scene"]:
+        game["start_scene"] = str(Path(game["start_scene"]).expanduser().resolve())
     frames = Frames(root, compact=True, cache=trainer["frame_cache"])
     # Check all episode IDs before applying smoke limits.
     train_episodes = read_episodes(root, game["train_split"])
@@ -268,20 +279,28 @@ def train(cfg):
     actions = sorted({int(a) for episode in train_episodes for a in episode.actions})
     if not actions:
         raise ValueError("Training requires at least one executed action")
-    training = Windows(frames, train_episodes, config["history"], actions)
-    evaluation = Windows(frames, eval_episodes, config["history"], actions)
     model = build_approach(spec, config["history"], len(actions), frames.shape).to(device)
     model.validate_stages(spec["stages"])
+    input_options = {"action_history": model.action_history}
+    training = Windows(frames, train_episodes, config["history"], actions, **input_options)
+    evaluation = Windows(frames, eval_episodes, config["history"], actions, **input_options)
     loss_function = torch.compile(batch_loss) if trainer["compile"] else batch_loss
-    evaluation_contract = _evaluation_contract(
-        _dataset_identity(root, provenance), eval_episodes, evaluation, trainer
-    )
+    identity = _dataset_identity(root, provenance)
+    if config.get("expected_dataset") is not None and config["expected_dataset"] != identity:
+        raise ValueError(
+            "Dataset differs from saved recipe; set expected_dataset=null for a new experiment"
+        )
+    config["expected_dataset"] = identity
+    evaluation_contract = _evaluation_contract(identity, eval_episodes, evaluation, trainer)
     config["output"] = str(output)
     metadata = {
         "format_version": 2,
         "history": config["history"],
         "shape": list(frames.shape),
         "action_values": actions,
+        "action_history": model.action_history,
+        "action_padding": "start_token",
+        "action_order": "oldest_to_current",
         "approach": spec,
         "dataset": provenance,
         "game": game,
@@ -298,6 +317,10 @@ def train(cfg):
     # Exclusive marker also protects simultaneous jobs choosing the same directory.
     with (output / "resolved.yaml").open("x") as stream:
         stream.write(OmegaConf.to_yaml(OmegaConf.create(config)))
+    recipe_sha256 = save_reproduction(
+        output, config, cfg, device, evaluation_contract["dataset"]
+    )
+    metadata["recipe_sha256"] = recipe_sha256
     (output / "config.json").write_text(json.dumps(metadata, indent=2) + "\n")
     write_scene(output / "start-scene.npz", game, metadata, frames, splits)
     options = {
@@ -336,8 +359,8 @@ def train(cfg):
         final = stage_index == len(spec["stages"]) - 1
         stage_dir = output / "stages" / stage["name"]
         stage_dir.mkdir(parents=True)
-        optimizer = torch.optim.Adam(
-            model.prepare_stage(stage["objective"]), lr=stage["learning_rate"]
+        optimizer = build_optimizer(
+            model.prepare_stage(stage["objective"]), config["optimizer"], stage["learning_rate"]
         )
         best = float("inf")
         for epoch in range(1, stage["epochs"] + 1):
@@ -407,7 +430,10 @@ def train(cfg):
         model.load_state_dict(restored.state_dict())
     summary = {
         "status": "complete",
+        "recipe_sha256": recipe_sha256,
+        "optimizer": config["optimizer"],
         "history": config["history"],
+        "action_history": model.action_history,
         "seconds": time.monotonic() - started,
         "optimizer_steps": total_updates,
         "train_samples_seen": total_train_samples,

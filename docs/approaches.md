@@ -9,11 +9,18 @@ needs its next-frame prediction interface.
 | Config | Models | Training stages |
 | --- | --- | --- |
 | `approach=direct` | Original action-conditioned RGB CNN | Predict the next frame with uniform pixel MSE |
+| `approach=direct_actions` | RGB CNN with chronological action-history planes | Predict the next frame with uniform pixel MSE |
 | `approach=latent` | Frame codec and separate latent CNN | Reconstruct recorded frames, freeze the codec, then predict successor latents |
 
 The direct model preserves the original architecture, RGB input, action encoding,
 stride padding, and sigmoid output. `model=direct_small` inherits `direct_cnn` and
 changes only its width. Width overrides also work without creating another YAML file.
+
+`direct_actions` selects `action_history_cnn`. It keeps the direct encoder/decoder
+but widens the first convolution to accept one-hot planes for each action slot.
+`model.action_history` includes the current action and defaults to the RGB history
+length. The [action-history recipe](recipes.md#action-history-experiment) describes
+the comparison and tuning controls.
 
 The latent approach is an experimental example of multiple models and stages, not a
 claim of better emulation. Its codec compresses individual RGB frames spatially by
@@ -56,8 +63,13 @@ module, and register a stable name in `APPROACHES`.
 The interface consists of:
 
 - `forward(history, action)`: normalized RGB `[B, C, H, W]` from RGB history
-  `[B, history, C, H, W]` and integer action indices `[B]`. The reserved final index
-  means `START`, not a game action.
+  `[B, history, C, H, W]` and integer action indices `[B]` when `action_history=1`.
+  An approach may declare `action_history=A`, with `1 < A <= history`, to receive
+  `[B, A]` tokens ordered from oldest to current. The last token is the action toward
+  the target frame; preceding tokens are the most recent actions between history
+  frames. Missing context is left-padded with the reserved `START` index, which means
+  absence of an action rather than a game action. The shared loaders and player use
+  this declared contract, also saved in checkpoints.
 - `loss(history, action, target)`: a scalar training loss for the active stage.
 - `prepare_stage(objective)`: set trainable weights and modes, then return the
   parameters the runner should optimize. Override `train()` when frozen models need
@@ -67,9 +79,10 @@ The interface consists of:
 
 Add an approach config with `kind`, named `models`, and `stages`. Every stage has a
 unique `name`, an `objective`, `epochs`, and `learning_rate`. Register all models as
-submodules so `state_dict()` includes everything needed by inference. A stage uses Adam;
-new optimizer families, sequence datasets, or non-frame objectives may require extending
-this interface. Those are not implemented through arbitrary YAML targets.
+submodules so `state_dict()` includes everything needed by inference. The optimizer
+registry supports Adam and AdamW; new optimizer families, sequence targets, or non-frame
+objectives may require extending this interface. Those are not implemented through
+arbitrary YAML targets.
 
 Config construction and checkpoint reconstruction share the explicit registries.
 Checkpoint files contain weights and plain metadata, loaded with `weights_only=True`.

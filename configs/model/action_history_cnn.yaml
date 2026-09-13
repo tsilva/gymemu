@@ -1,0 +1,4 @@
+kind: action_history_cnn
+width: 32
+# Includes the current action; the other slots hold previous executed actions.
+action_history: ${history}

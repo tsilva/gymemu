@@ -7,16 +7,38 @@ import numpy as np
 import torch
 
 
-def load_scene(path: Path, config: dict) -> list[torch.Tensor]:
+class SceneHistory(list):
+    """List-compatible RGB history with the executed native actions between its frames."""
+
+    def __init__(self, frames, actions):
+        super().__init__(frames)
+        self.actions = actions
+
+
+def load_scene(path: Path, config: dict) -> SceneHistory:
     with np.load(path, allow_pickle=False) as archive:
         frames = archive["frames"]
+        actions = archive["actions"] if "actions" in archive.files else None
     if frames.dtype != np.uint8 or frames.ndim != 4:
         raise ValueError("Scene frames must be uint8 [history, channels, height, width]")
     if tuple(frames.shape[1:]) != tuple(config["shape"]):
         raise ValueError("Scene dimensions differ from the model")
     if not 1 <= len(frames) <= config["history"]:
         raise ValueError("Scene must contain between one frame and the model history length")
-    return list(torch.from_numpy(frames.copy()).float().div_(255).unbind(0))
+    required = min(config.get("action_history", 1) - 1, len(frames) - 1)
+    if actions is None:
+        if required > 0:
+            raise ValueError("Scene lacks recorded action history required by this model")
+        actions = np.empty(0, dtype=np.int64)
+    if actions.ndim != 1 or not np.issubdtype(actions.dtype, np.integer):
+        raise ValueError("Scene actions must be a one-dimensional integer array")
+    if not required <= len(actions) <= len(frames) - 1:
+        raise ValueError("Scene action history does not match its frame history")
+    if any(int(action) not in config["action_values"] for action in actions):
+        raise ValueError("Scene contains an unknown executed action")
+    return SceneHistory(
+        torch.from_numpy(frames.copy()).float().div_(255).unbind(0), actions.tolist()
+    )
 
 
 def write_scene(output, game, metadata, frames, splits):
@@ -49,4 +71,7 @@ def write_scene(output, game, metadata, frames, splits):
         "frame_ids": ids.tolist(),
         "order": "oldest_to_newest",
     }
-    np.savez_compressed(output, frames=pixels, metadata=json.dumps(info))
+    # Native actions linking each pair of recorded history frames; no future action.
+    actions = episode.actions[position + 1 - len(ids) : position]
+    info["action_order"] = "between_frames_oldest_to_newest"
+    np.savez_compressed(output, frames=pixels, actions=actions, metadata=json.dumps(info))

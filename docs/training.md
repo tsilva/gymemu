@@ -5,8 +5,8 @@ See the [README](../README.md) for setup, playback, and comparison commands.
 ## Hierarchical configuration
 
 [Hydra](https://hydra.cc/docs/intro/) composes YAML defaults and command-line overrides.
-`configs/config.yaml` selects the defaults, and `experiment` presets can override any
-layer. `hydra.job.chdir` is false, so relative dataset and scene paths remain relative
+`configs/config.yaml` selects the defaults. Named `recipe` files collect complete
+experiment settings; `experiment` presets apply afterward for runtime or smoke overrides. `hydra.job.chdir` is false, so relative dataset and scene paths remain relative
 to the directory where you launch the command.
 
 | Group | Controls |
@@ -15,9 +15,13 @@ to the directory where you launch the command.
 | `model` | Direct predictor or latent codec architecture and dimensions |
 | `approach` | Named models and ordered stages with objectives, epochs, and learning rates |
 | `trainer` | Batch size, runtime device, precision, workers, and smoke limits |
+| `optimizer` | Registered Adam or AdamW settings; each stage supplies its learning rate |
+| `recipe` | Named experiment assembled from the other groups |
 | `experiment` | Reusable overrides across groups, such as smoke or CUDA settings |
 
 Top-level `history`, `seed`, `name`, and `output` apply to the whole experiment.
+Saved recipes populate `expected_dataset` to reject changed data on replay. See the
+[recipe guide](recipes.md) for `recipe=breakout_cnn` and `--recipe path/to/recipe.yaml`.
 The latent approach selects the frame codec model group automatically. A command-line
 `model=...` selection overrides that choice and must satisfy the codec interface.
 Configs do not download data until training begins. Use `--cfg job --resolve` to inspect
@@ -70,6 +74,11 @@ Tune these settings for available resources; they are not benchmark guarantees.
 CUDA loading uses pinned memory and nonblocking transfers. Workers keep image pixels
 as exact uint8 values; normalization happens on the device. Nonzero workers use spawn
 and persistent workers. `trainer.threads` limits main-process PyTorch CPU threads.
+`experiment=cuda_cached` uses a verified LZ4 frame cache, two in-process loading
+threads, compiled loss, CUDA prefetch, and finiteness checks every 100 batches and
+before checkpoint writes. Set `trainer.frame_cache` to the cache directory. See
+[performance measurements](performance.md) for construction and validation.
+
 Training bfloat16 requires CUDA support. Validation and checkpoint playback use float32,
 so reported RGB MSE has the same precision across approaches.
 
@@ -81,12 +90,15 @@ smoke, provide a small compatible dataset with `game=custom`.
 
 | Artifact | Contents |
 | --- | --- |
+| `recipe.yaml` | Standalone training config with a fresh output, pinned data, and preserved internal tuning links |
+| `source.tar.gz` | Training/player Python sources, configs, Python version selection, and dependency lock |
+| `reproduction.json` | Recipe/source hashes, dataset identity, Git state, packages, hardware, and numerical settings |
 | `resolved.yaml` | Fully resolved configuration, including the absolute output path |
 | `.hydra/` | Hydra composition and override metadata for Hydra-launched runs |
 | `config.json` | Inference contract, architecture, action vocabulary, and dataset provenance |
 | `metrics.jsonl` | Stage, epoch, training loss, validation loss, RGB MSE, sample counts, and time |
 | `summary.json` | Completed-run RGB score, evaluation identity, parameter count, and training budget |
-| `start-scene.npz` | Recorded RGB history for immediate interactive playback |
+| `start-scene.npz` | Recorded RGB history and the executed actions between frames for playback |
 | `stages/<name>/best.pt` | Selected checkpoint for this stage, including all models |
 | `stages/<name>/last.pt` | Last completed epoch in this stage |
 | `stages/<name>/latest.pt` | Periodic stage snapshot, which may precede evaluation |
@@ -127,6 +139,12 @@ evaluation episode IDs must be disjoint even when smoke limits are enabled.
 Every episode supplies a bootstrap example with zero history and a reserved `START`
 category meaning no game action. Later examples use preceding recorded frames in
 chronological order with zeros on the left. Histories never cross episode boundaries.
+The default direct and latent models receive only the current executed action.
+`approach=direct_actions` also receives previous actions, oldest to current, with
+`START` padding on the left. At target frame position `p`, an action context of length
+`A` uses `episode.actions[max(0, p-A):p]`, where action `i` links frame `i` to `i+1`.
+This is the same alignment in the standard and cached loaders. See the
+[recipe guide](recipes.md#action-history-experiment) for the Breakout experiment.
 Only encoded images, trajectory arrays, and a bounded decoded-frame cache stay in memory;
 windows are assembled on demand.
 
@@ -163,5 +181,10 @@ training episode's initial frame; choose a later position if startup animation i
 
 Scene files are non-pickled NPZ archives with uint8 `frames` shaped
 `[history, channels, height, width]`, oldest to newest, containing one to `history`
-frames of the checkpoint's RGB geometry. Reset restores this scene. Subsequent frames
-come entirely from the model.
+frames of the checkpoint's RGB geometry. New scenes also contain a one-dimensional
+integer `actions` array of native action values between consecutive scene frames,
+oldest to newest, with no action toward a future frame. An action-history model requires
+at least the last `min(action_history - 1, frame_count - 1)` recorded actions. Legacy
+frame-only scenes remain valid for models that use only the current action.
+Reset restores both frames and actions. Subsequent frames come entirely from the model,
+and each prediction uses the previous actions actually pressed plus the fresh key press.

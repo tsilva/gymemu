@@ -22,6 +22,8 @@ def load_model(checkpoint: Path, device: torch.device):
         )
     else:
         raise ValueError(f"Unsupported checkpoint format {version!r}")
+    if config.get("action_history", 1) != getattr(model, "action_history", 1):
+        raise ValueError("Checkpoint action-history contract differs from its model")
     model.load_state_dict(saved["state_dict"], strict=True)
     return model.to(device).eval(), config
 

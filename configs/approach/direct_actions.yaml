@@ -1,0 +1,10 @@
+defaults:
+  - override /model@_global_.model: action_history_cnn
+kind: direct_actions
+models:
+  predictor: ${model}
+stages:
+  - name: prediction
+    objective: next_frame
+    epochs: ${trainer.epochs}
+    learning_rate: ${trainer.learning_rate}

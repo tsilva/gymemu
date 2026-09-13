@@ -162,8 +162,25 @@ def frame_stack(
     return result
 
 
+def pad_actions(indices, length, start_action):
+    """Oldest-to-newest action tokens, including current action in the last slot."""
+    recent = list(indices)[-length:]
+    return [start_action] * (length - len(recent)) + recent
+
+
 class Windows(Dataset):
-    def __init__(self, frames: Frames, episodes: list[Episode], history: int, actions: list[int]):
+    def __init__(
+        self,
+        frames: Frames,
+        episodes: list[Episode],
+        history: int,
+        actions: list[int],
+        *,
+        action_history: int = 1,
+    ):
+        if type(action_history) is not int or not 1 <= action_history <= history:
+            raise ValueError("action_history must be between 1 and the RGB history length")
+        self.action_history = action_history
         self.frames, self.episodes, self.history = frames, episodes, history
         self.action_index = {value: i for i, value in enumerate(actions)}
         self.start_action = len(actions)  # Explicit absence of a game action at reset.
@@ -175,6 +192,18 @@ class Windows(Dataset):
 
     def __len__(self):
         return int(self.ends[-1])
+
+    def action_at(self, episode, position):
+        if self.action_history == 1:
+            return (
+                self.start_action
+                if position == 0
+                else self.action_index[int(episode.actions[position - 1])]
+            )
+        past = episode.actions[max(0, position - self.action_history) : position]
+        return pad_actions(
+            [self.action_index[int(a)] for a in past], self.action_history, self.start_action
+        )
 
     def __getitem__(self, index):
         if index < 0 or index >= len(self):
@@ -189,9 +218,7 @@ class Windows(Dataset):
             self.frames.shape,
             dtype=torch.uint8 if self.frames.compact else torch.float32,
         )
-        action = (
-            self.start_action
-            if position == 0
-            else self.action_index[int(episode.actions[position - 1])]
-        )
+        action = self.action_at(episode, position)
+        if self.action_history > 1:
+            action = torch.tensor(action, dtype=torch.long)
         return history, action, self.frames.get(int(episode.frames[position]))
