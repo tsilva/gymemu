@@ -8,6 +8,7 @@ from gymemu.models import build_model
 
 
 class Approach(nn.Module):
+    action_history = 1
     objectives = ()
     predictive_objectives = ()
 
@@ -43,12 +44,25 @@ class DirectApproach(Approach):
             spec["predictor"], history=history, actions=actions, shape=shape
         )
 
+    def validate_stages(self, stages):
+        super().validate_stages(stages)
+        if getattr(self.predictor, "action_history", 1) != self.action_history:
+            raise ValueError("Predictor action history requires a matching approach input contract")
+
     def forward(self, history, action):
         return self.predictor(history, action)
 
     def evaluate(self, history, action, target):
         prediction = self(history, action)
         return F.mse_loss(prediction.float(), target.float()), prediction
+
+
+class ActionHistoryApproach(DirectApproach):
+    def __init__(self, spec, history, actions, shape):
+        super().__init__(spec, history, actions, shape)
+        if not hasattr(self.predictor, "action_history"):
+            raise ValueError("direct_actions requires a predictor declaring action_history")
+        self.action_history = self.predictor.action_history
 
 
 class LatentApproach(Approach):
@@ -103,7 +117,11 @@ class LatentApproach(Approach):
         return F.mse_loss(self.predicted_latents(history, action).float(), latent_target.float())
 
 
-APPROACHES = {"direct": DirectApproach, "latent": LatentApproach}
+APPROACHES = {
+    "direct": DirectApproach,
+    "direct_actions": ActionHistoryApproach,
+    "latent": LatentApproach,
+}
 
 
 def build_approach(spec, history, actions, shape):

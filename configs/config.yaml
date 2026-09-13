@@ -3,13 +3,17 @@ defaults:
   - model: direct_cnn
   - approach: direct
   - trainer: default
+  - optimizer: adam
   - _self_
+  - recipe: null
   - experiment: null
 
 name: ${game.name}-${approach.kind}
 history: 8
 seed: 47
 output: null
+# Saved run recipes fill this to detect changed dataset content on replay.
+expected_dataset: null
 
 hydra:
   job:

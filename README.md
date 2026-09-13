@@ -59,10 +59,36 @@ to set a binding, or `--empty-start` to test learned initialization. In empty-st
 mode the first press generates the initial frame without executing a game action.
 A missing recorded scene produces an error instead of silently switching modes.
 
+## Saved recipes
+
+The successful ten-epoch Breakout CNN run is saved as `recipe=breakout_cnn`.
+`recipe=breakout_actions` adds seven previous executed actions alongside the current
+action and eight RGB frames, using the same dataset, training budget, and MSE objective.
+Generic `recipe=direct` and `recipe=latent` presets cover the original approaches.
+
+```bash
+# Inspect a recipe without downloading data or starting training
+uv run python train.py recipe=breakout_cnn --cfg job --resolve
+
+# Train on a CUDA host after building the frame cache described below
+uv run python train.py recipe=breakout_cnn output=runs/breakout-recipe
+
+# Try the action-history variant with the same cache
+uv run python train.py recipe=breakout_actions output=runs/breakout-actions
+
+# Replay the settings captured by a previous run
+uv run python train.py --recipe runs/breakout-recipe/recipe.yaml output=runs/replay
+```
+
+Every new run saves a standalone `recipe.yaml`, a source archive, and a code/environment
+receipt. Saved recipes pin the actual dataset revision or content fingerprint and preserve
+internal tuning links, such as model dimensions and stage learning rates. See the
+[recipe guide](docs/recipes.md) for inheritance, cache setup, overrides, and reproduction limits.
+
 ## Configure and compare
 
-Configs compose in layers: `game`, `model`, `approach`, `trainer`, then an optional
-`experiment` preset. Command-line overrides take precedence.
+Configs compose in layers: `game`, `model`, `approach`, `trainer`, `optimizer`, then
+optional `recipe` and `experiment` presets. Command-line overrides take precedence.
 
 ```bash
 # Inspect the complete configuration without loading data
@@ -99,11 +125,11 @@ Use the same immutable dataset revision for caching and training.
 uv run python cache_frames.py \
   --dataset tsilva/gradlab-breakout-trajectories \
   --revision 676ff6388f4218d3c3a3ce9f2f33e075fa7314a3 \
-  --output data/breakout-cache
+  --output data/breakout-676ff638-lz4
 
 uv run python train.py experiment=cuda_cached \
   game.revision=676ff6388f4218d3c3a3ce9f2f33e075fa7314a3 \
-  trainer.frame_cache=data/breakout-cache trainer.epochs=10 \
+  trainer.frame_cache=data/breakout-676ff638-lz4 trainer.epochs=10 \
   output=runs/breakout-cached
 ```
 

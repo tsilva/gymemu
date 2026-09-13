@@ -1,8 +1,15 @@
 # @package _global_
 trainer:
   epochs: 1
+  compile: false
+  prefetch: false
+  loader: standard
+  frame_cache: null
+  sync_batches: 1
   batch_size: 2
   device: cpu
+  precision: fp32
+  workers: 0
   threads: 2
   limit_episodes: 2
   train_batches: 2

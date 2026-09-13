@@ -1,10 +1,12 @@
 """Explicit model registry. Checkpoints never import arbitrary Python targets."""
 
+from gymemu.models.action_history import ActionHistoryAutoencoder
 from gymemu.models.direct import Autoencoder
 from gymemu.models.latent import FrameCodec, LatentDynamics
 
 MODELS = {
     "direct_cnn": Autoencoder,
+    "action_history_cnn": ActionHistoryAutoencoder,
     "frame_codec": FrameCodec,
     "latent_cnn": LatentDynamics,
 }

@@ -11,16 +11,36 @@ import torch
 from PIL import Image
 
 from gymemu.checkpoints import load_model
-from gymemu.data import frame_stack
+from gymemu.data import frame_stack, pad_actions
 from gymemu.runtime import device_for, positive
 from gymemu.scenes import load_scene
 
 
 class Player:
-    def __init__(self, model, config, device, initial_history=None):
+    def __init__(self, model, config, device, initial_history=None, initial_actions=None):
         self.model, self.config, self.device = model, config, device
         self.actions = config["action_values"]
+        self.action_history = config.get("action_history", 1)
+        if (
+            type(self.action_history) is not int
+            or not 1 <= self.action_history <= config["history"]
+        ):
+            raise ValueError("Action history must be between 1 and the RGB history length")
+        if initial_actions is None:
+            initial_actions = getattr(initial_history, "actions", None)
         self.initial_history = [frame.clone() for frame in (initial_history or [])]
+        required = min(self.action_history - 1, max(0, len(self.initial_history) - 1))
+        initial_actions = [] if initial_actions is None else list(initial_actions)
+        if not required <= len(initial_actions) <= max(0, len(self.initial_history) - 1):
+            raise ValueError("Starting scene lacks aligned recorded action history")
+        if any(action not in self.actions for action in initial_actions):
+            raise ValueError("Starting scene contains an unknown executed action")
+        self.initial_actions = (
+            [self.actions.index(a) for a in initial_actions[-(self.action_history - 1) :]]
+            if self.action_history > 1
+            else []
+        )
+        self.past_actions = deque(maxlen=self.action_history - 1)
         if len(self.initial_history) > config["history"]:
             raise ValueError("Starting history is longer than the model history")
         for frame in self.initial_history:
@@ -35,14 +55,21 @@ class Player:
     @torch.inference_mode()
     def _predict(self, action_index):
         stack = frame_stack(list(self.history), self.config["history"], self.config["shape"])
-        result = self.model(
-            stack.unsqueeze(0).to(self.device), torch.tensor([action_index], device=self.device)
-        )[0].cpu()
+        context = pad_actions(
+            [*self.past_actions, action_index], self.action_history, len(self.actions)
+        )
+        action = torch.tensor(context, dtype=torch.long, device=self.device)
+        action = action if self.action_history == 1 else action.unsqueeze(0)
+        result = self.model(stack.unsqueeze(0).to(self.device), action)[0].cpu()
         self.history.append(result)
+        if action_index != len(self.actions):
+            self.past_actions.append(action_index)
         return result
 
     def reset(self):
         self.history.clear()
+        self.past_actions.clear()
+        self.past_actions.extend(self.initial_actions)
         self.history.extend(frame.clone() for frame in self.initial_history)
         self.steps = 0
         # Recorded starts are displayed immediately; neither reset path runs inference.

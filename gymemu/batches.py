@@ -42,7 +42,10 @@ class CachedBatchLoader:
         targets = torch.empty(
             (len(indices), *frames.shape), dtype=torch.uint8, pin_memory=self.pin_memory
         )
-        actions = torch.empty(len(indices), dtype=torch.long, pin_memory=self.pin_memory)
+        action_shape = (
+            (len(indices),) if data.action_history == 1 else (len(indices), data.action_history)
+        )
+        actions = torch.empty(action_shape, dtype=torch.long, pin_memory=self.pin_memory)
         # NumPy copies release the GIL and do not dispatch tiny PyTorch operations.
         history_np, targets_np, actions_np = history.numpy(), targets.numpy(), actions.numpy()
         frame_ids = []
@@ -61,11 +64,7 @@ class CachedBatchLoader:
                 destinations.append(history_np[row, column])
             frame_ids.append(episode.frames[position])
             destinations.append(targets_np[row])
-            actions_np[row] = (
-                data.start_action
-                if not position
-                else data.action_index[int(episode.actions[position - 1])]
-            )
+            actions_np[row] = data.action_at(episode, position)
         # Resolve actual IDs in one vectorized lookup; IDs are never array offsets.
         positions = frames.order[np.searchsorted(frames.ids, frame_ids)]
         images = frames.images._open()["image"]

@@ -1,0 +1,191 @@
+# Training recipes
+
+Recipes collect the settings for an experiment in YAML. They use the existing Hydra
+composition and the same runner for direct and multi-stage approaches.
+
+## Named recipes
+
+| Recipe | Purpose |
+| --- | --- |
+| `direct` | Original RGB next-frame CNN and uniform MSE |
+| `latent` | Frame reconstruction, then prediction with a frozen codec |
+| `breakout_cnn` | Settings from the successful ten-epoch CUDA Breakout run |
+| `breakout_actions` | Same Breakout experiment with previous executed actions as inputs |
+
+Run a recipe, inspect it, or override settings:
+
+```bash
+uv run python train.py recipe=breakout_cnn --cfg job --resolve
+uv run python train.py recipe=direct game=custom game.dataset=/path/to/dataset
+uv run python train.py recipe=latent experiment=smoke output=runs/latent-smoke
+uv run python train.py recipe=direct optimizer=adamw optimizer.weight_decay=0.01
+uv run python train.py --multirun recipe=direct,latent seed=47,48
+```
+
+Named recipes live in `configs/recipe/`. `experiment` presets apply after recipes;
+command-line values apply last. `experiment=smoke` resets loading and compilation
+settings as well as bounding the model and training budget.
+
+To derive another recipe, create `configs/recipe/my_cnn.yaml`:
+
+```yaml
+# @package _global_
+defaults:
+  - breakout_cnn
+  - _self_
+name: breakout-cnn-smaller
+model:
+  width: 16
+trainer:
+  learning_rate: 0.0003
+  epochs: 5
+```
+
+Select it with `recipe=my_cnn`. Dataset IDs, revisions, actions, and recorded starting
+scenes belong in `configs/game/`. A recipe selects a game through its defaults:
+
+```yaml
+defaults:
+  - direct
+  - override /game: my_game
+  - _self_
+```
+
+Model construction stays in its registry, and approach configs define their named
+models and ordered stages. Stage epochs and learning rates inherit trainer values
+unless overridden individually. `optimizer=adam` preserves the original optimizer;
+its betas, epsilon, weight decay, and AMSGrad setting are explicit YAML values.
+`optimizer=adamw` selects decoupled weight decay. The learning rate remains a stage
+setting so multi-stage recipes can tune it independently.
+
+A recipe can select implemented behavior. New losses, input corruption, or feedback
+curricula need an explicit approach implementation before a recipe can enable them.
+The direct recipe remains the reference CNN with its original objective.
+
+## Action-history experiment
+
+`recipe=breakout_actions` inherits `breakout_cnn` and selects `approach=direct_actions`
+with `model=action_history_cnn`. The default eight action slots contain seven previous
+executed actions followed by the current action. Each slot becomes its own one-hot
+spatial planes, concatenated with the eight RGB frames before the first convolution.
+The remaining encoder/decoder and uniform next-frame RGB MSE are unchanged.
+
+```bash
+uv run python train.py recipe=breakout_actions --cfg job --resolve
+uv run python train.py recipe=breakout_actions output=runs/breakout-actions
+uv run python play.py runs/breakout-actions/best.pt
+
+# Tune how much action history to supply (includes the current action)
+uv run python train.py recipe=breakout_actions model.action_history=4
+```
+
+`model.action_history` defaults to `${history}` and accepts 1 through `history`.
+With eight RGB frames, four action slots mean three previous actions plus the current
+one. Missing actions at episode start use `START`, never a game's NOOP. Bootstrap
+examples have zero RGB history and all-`START` action slots. No future action is input.
+The scene exported by training includes recorded actions between its frames; playback
+then records the actions actually pressed and resets both histories together.
+
+This experiment tests whether action history reduces prediction ambiguity. RGB motion
+already provides velocity information; action history may add information about hidden
+controller state or make dynamics easier to learn. Neither input choice guarantees
+full observability or prevents MSE averaging. Check paddle and ball behavior in generated
+rollouts as well as held-out MSE.
+
+Data revision, targets, seed, width, optimizer, and epoch budget match `breakout_cnn`.
+The extra input planes increase parameters from 343,875 to 358,211 for Breakout, so
+this is not a parameter-matched comparison. `model.action_history=1` provides a
+current-action-only architecture control. It matches the original CNN's outputs when
+given the same weights; separately initialized runs need not produce identical weights.
+No full training result is recorded for this recipe yet.
+
+## Reproduce the successful Breakout run
+
+`recipe=breakout_cnn` records the run completed on September 13, 2026:
+
+- Dataset revision `676ff6388f4218d3c3a3ce9f2f33e075fa7314a3`.
+- Original CNN, width 32, eight full RGB history frames, seed 47.
+- Adam at 0.001, batch size 64, ten epochs, bf16 training and float32 evaluation.
+- All 5,387,476 training and 1,343,754 held-out examples per epoch.
+- Verified LZ4 cache, direct pinned batches, compilation, and CUDA prefetch.
+- Best held-out RGB MSE **0.00003076008331352503**, selected at epoch 8.
+- Total training and evaluation time **7,483.9 seconds**, about 2 hours 5 minutes.
+
+These are observed reference results, not guarantees for every rerun. The original
+source archive SHA-256 is
+`355502918199cf8932004252107f0c94f5c116dd95c2770796b96c16288d076e`.
+The local run directory is `runs/beast3-20260913T115132Z`; its original source archive,
+resolved configuration, metrics, downloaded checkpoints, and delivery receipt remain
+there. The named recipe changes the run name and default cache/output locations.
+
+On a CUDA host, build the lossless cache once:
+
+```bash
+uv sync --frozen
+uv run python cache_frames.py \
+  --dataset tsilva/gradlab-breakout-trajectories \
+  --revision 676ff6388f4218d3c3a3ce9f2f33e075fa7314a3 \
+  --output data/breakout-676ff638-lz4
+uv run python train.py recipe=breakout_cnn output=runs/breakout-cnn
+```
+
+To reuse an existing verified cache, override `trainer.frame_cache=/path/to/cache`.
+The cache builder requires a new destination and checks every frame's lossless
+roundtrip. Training verifies cache identity against the dataset.
+
+## Replay a run's saved YAML
+
+Every new run saves `recipe.yaml` alongside `resolved.yaml`. The recipe contains all
+job settings without depending on the current named presets. It retains internal
+references such as `${model}` and `${trainer.epochs}` so the same tuning knobs work.
+Environment-dependent values are captured at run time. The actual dataset revision
+and local resource paths are recorded, and output is reset to null for a fresh run.
+
+```bash
+uv run python train.py --recipe runs/breakout-cnn/recipe.yaml --cfg job --resolve
+uv run python train.py --recipe runs/breakout-cnn/recipe.yaml output=runs/replay
+uv run python train.py --recipe runs/breakout-cnn/recipe.yaml \
+  trainer.epochs=5 output=runs/shorter
+uv run python train.py --recipe runs/breakout-cnn/recipe.yaml \
+  --multirun seed=47,48 hydra.sweep.dir=runs/replay-seeds
+```
+
+`--recipe` accepts an existing standalone `.yaml` file, including paths with spaces.
+A saved recipe can be copied elsewhere. Relocate `trainer.frame_cache`,
+`game.dataset`, or `game.start_scene` when moving between machines. A local dataset
+with identical contents retains its fingerprint even when moved. Changed data is
+rejected; explicitly set `expected_dataset=null` when starting a different experiment.
+
+Use named recipes for switching configuration groups, such as `approach=latent`.
+Standalone recipes have already composed those groups, so override their individual
+values, such as `optimizer.kind=adamw`, instead. Explicit per-stage values stay fixed;
+only stages that inherit `${trainer.epochs}` change with `trainer.epochs`.
+
+The Python equivalent is `compose_config(overrides, recipe=path)` followed by `train`.
+Existing legacy flags and ordinary Hydra commands remain supported.
+
+## Code, environment, and limits
+
+A recipe alone cannot recreate code or numerical libraries that have changed.
+Each new run therefore also saves:
+
+- `source.tar.gz`, containing root Python scripts, the `gymemu` package, YAML configs,
+  `pyproject.toml`, `uv.lock`, and `.python-version`, including uncommitted source edits.
+- `reproduction.json`, recording source and recipe SHA-256 hashes, Git commit/status,
+  dataset identity, package versions, device, CUDA/cuDNN versions, CPU threads, and
+  determinism flags. It does not dump environment variables.
+
+To recover the captured implementation, extract the source archive into a new directory,
+run `uv sync --frozen` there, and replay the saved recipe with that directory's `train.py`.
+The archive does not contain datasets, caches, external scene files, or checkpoints.
+Those remain separate artifacts and paths recorded by the run.
+
+Checkpoints and completed summaries include the recipe hash. Preserve the complete run
+directory when keeping a result. The existing `compare.py` continues to group runs by
+matching held-out targets and data identity.
+
+Replaying starts training from the recorded seed. It does not resume optimizer state.
+Matching settings, code, data, and dependencies supports reproducible experiments;
+CUDA kernels, compilation, hardware, and numerical nondeterminism can still change
+weights and scores. CPU smoke tests verify exact replay for both existing approaches.
+Rollout quality remains a separate evaluation from next-frame MSE.
