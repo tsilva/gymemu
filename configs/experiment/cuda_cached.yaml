@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - cuda
+  - _self_
+
+trainer:
+  loader: cached
+  workers: 2
+  compile: true
+  prefetch: true
+  sync_batches: 100
+# Pass trainer.frame_cache pointing to a cache built with cache_frames.py.

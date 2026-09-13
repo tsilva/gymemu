@@ -30,6 +30,9 @@ class Approach(nn.Module):
     def loss(self, history, action, target):
         return F.mse_loss(self(history, action).float(), target.float())
 
+    def evaluate(self, history, action, target):
+        return self.loss(history, action, target), self(history, action)
+
 
 class DirectApproach(Approach):
     objectives = predictive_objectives = ("next_frame",)
@@ -42,6 +45,10 @@ class DirectApproach(Approach):
 
     def forward(self, history, action):
         return self.predictor(history, action)
+
+    def evaluate(self, history, action, target):
+        prediction = self(history, action)
+        return F.mse_loss(prediction.float(), target.float()), prediction
 
 
 class LatentApproach(Approach):

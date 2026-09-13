@@ -46,15 +46,21 @@ def table(root: Path, kind: str, split: str, columns: list[str]) -> pa.Table:
 class Frames:
     """Encoded images in Arrow, a compact ID lookup, and a bounded decoded-image cache."""
 
-    def __init__(self, root: Path, compact: bool = False):
+    def __init__(self, root: Path, compact: bool = False, cache: Path | None = None):
         self.compact = compact
-        data = table(root, "frames", "assets", ["frame_id", "image"])
+        data = table(root, "frames", "assets", ["frame_id"] if cache else ["frame_id", "image"])
         ids = data["frame_id"].to_numpy()
         self.order = np.argsort(ids)
         self.ids = ids[self.order]
         if not len(ids) or np.any(np.diff(self.ids) <= 0):
             raise ValueError("Frame IDs must be nonempty and unique")
-        self.images = data["image"]
+        self.cached = cache is not None
+        if cache:
+            from gymemu.cache import open_cache
+
+            self.images, self.shape = open_cache(root, cache, ids)
+        else:
+            self.images = data["image"]
         first = self.get(int(self.ids[0]))
         self.shape = tuple(first.shape)  # C, H, W; no cropping, resizing or binarization.
 
@@ -63,14 +69,19 @@ class Frames:
         position = int(np.searchsorted(self.ids, frame_id))
         if position == len(self.ids) or self.ids[position] != frame_id:
             raise ValueError(f"Unknown frame ID {frame_id}")
-        value = self.images[int(self.order[position])].as_py()
-        if not value["bytes"]:
-            raise ValueError("Expected an embedded image, not an external image path")
-        with Image.open(io.BytesIO(value["bytes"])) as image:
-            if image.mode != "RGB":
-                raise ValueError("Expected RGB images")
-            pixels = np.asarray(image).copy()
-        result = torch.from_numpy(pixels).permute(2, 0, 1)
+        value = self.images[int(self.order[position])]
+        if self.cached:
+            raw = pa.decompress(value.as_buffer(), int(np.prod(self.shape)), codec="lz4")
+            result = torch.from_numpy(np.frombuffer(raw, dtype=np.uint8).reshape(self.shape))
+        else:
+            value = value.as_py()
+            if not value["bytes"]:
+                raise ValueError("Expected an embedded image, not an external image path")
+            with Image.open(io.BytesIO(value["bytes"])) as image:
+                if image.mode != "RGB":
+                    raise ValueError("Expected RGB images")
+                pixels = np.asarray(image).copy()
+            result = torch.from_numpy(pixels).permute(2, 0, 1)
         if not self.compact:
             result = result.float().div_(255)
         if hasattr(self, "shape") and tuple(result.shape) != self.shape:
@@ -142,8 +153,10 @@ def frame_stack(
     history: list[torch.Tensor], length: int, shape: tuple, dtype=torch.float32
 ) -> torch.Tensor:
     """Oldest to newest, missing frames padded with zeros on the left."""
-    result = torch.zeros((length, *shape), dtype=dtype)
     recent = history[-length:]
+    if len(recent) == length:
+        return torch.stack(recent).to(dtype=dtype)
+    result = torch.zeros((length, *shape), dtype=dtype)
     if recent:
         result[-len(recent) :] = torch.stack(recent)
     return result
