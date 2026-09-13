@@ -7,7 +7,7 @@ import pytest
 import torch
 from PIL import Image
 
-from play import Player, handle_event
+from play import Player, handle_event, load_scene
 from train import (
     Autoencoder,
     Frames,
@@ -256,3 +256,41 @@ def test_compact_windows_preserve_every_pixel_action_and_bootstrap(snapshot):
         assert action == packed_action
         assert torch.equal(history, packed_history.float() / 255)
         assert torch.equal(target, packed_target.float() / 255)
+
+
+def test_recorded_scene_starts_without_inference_and_reset_restores_it(tmp_path):
+    config = {"history": 4, "shape": [3, 21, 17], "action_values": [0, 2]}
+    frames = np.stack([np.full((3, 21, 17), value, np.uint8) for value in [30, 50]])
+    path = tmp_path / "scene.npz"
+    np.savez_compressed(path, frames=frames)
+    spy = Spy()
+    player = Player(spy, config, torch.device("cpu"), load_scene(path, config))
+    assert not spy.calls and player.steps == 0
+    assert np.array_equal(player.pixels(), frames[-1].transpose(1, 2, 0))
+    player.advance(2)
+    assert len(spy.calls) == 1 and player.steps == 1
+    history, action = spy.calls[0]
+    assert action.item() == 1  # Execute the action, never START.
+    assert not history[0, :2].any()
+    assert torch.equal(history[0, 2:], torch.from_numpy(frames).float() / 255)
+    player.advance(0)
+    assert torch.equal(spy.calls[-1][0][0, -1], torch.full((3, 21, 17), 0.1))
+    player.reset()
+    assert len(spy.calls) == 2 and player.steps == 0
+    assert np.array_equal(player.pixels(), frames[-1].transpose(1, 2, 0))
+
+
+@pytest.mark.parametrize(
+    "shape,dtype",
+    [
+        ((0, 3, 21, 17), np.uint8),
+        ((5, 3, 21, 17), np.uint8),
+        ((1, 21, 17, 3), np.uint8),
+        ((1, 3, 21, 17), np.float32),
+    ],
+)
+def test_recorded_scene_rejects_invalid_arrays(tmp_path, shape, dtype):
+    path = tmp_path / "invalid.npz"
+    np.savez_compressed(path, frames=np.zeros(shape, dtype=dtype))
+    with pytest.raises(ValueError, match="Scene"):
+        load_scene(path, {"shape": [3, 21, 17], "history": 4})
