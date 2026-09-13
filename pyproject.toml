@@ -5,9 +5,9 @@ description = "Train and play a plain convolutional next-frame emulator from tra
 requires-python = ">=3.11,<3.14"
 license = "MIT"
 dependencies = [
-    "torch>=2.6,<3",
+    "torch>=2.13.0,<3",
     "numpy>=2,<3",
-    "pillow>=11,<13",
+    "pillow>=12.3.0,<13",
     "pyarrow>=19,<24",
     "huggingface-hub>=0.34,<2",
     "pygame>=2.6,<3",
@@ -18,7 +18,17 @@ dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
 
 [tool.uv]
 exclude-newer = "7 days"
-constraint-dependencies = ["mistralai!=2.4.6", "guardrails-ai!=0.10.1"]
+constraint-dependencies = [
+    "aiohttp>=3.14.3",
+    "click>=8.3.3",
+    "gitpython>=3.1.58",
+    "guardrails-ai!=0.10.1",
+    "idna>=3.15",
+    "mistralai!=2.4.6",
+    "pygments>=2.20",
+    "setuptools>=83",
+    "urllib3>=2.7",
+]
 
 [tool.ruff]
 line-length = 100
