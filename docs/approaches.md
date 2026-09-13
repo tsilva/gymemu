@@ -80,6 +80,9 @@ The interface consists of:
 - `begin_epoch(epoch)`: update any training curriculum outside compiled computation
   and return a dictionary for metrics/checkpoint metadata. Epochs are one-based and
   restart per stage; the default returns an empty dictionary.
+- `configure_training(compile=False)`: optionally prepare compiled execution helpers.
+  The runner calls this once after constructing the model. Keep helpers out of the
+  registered module tree so inference checkpoint tensor names stay unchanged.
 
 An approach can declare `training_rollout_steps=K` to request extended training
 prefixes. Training then receives RGB `[B, history+K, C, H, W]` and action tokens
@@ -95,6 +98,13 @@ loaders implement these shapes without knowing the approach name.
 whole frames independently per example and step. Its probability buffer is excluded
 from inference weights. Additional constructor settings live in `approach.options`
 and pass only to the registered approach constructor, never arbitrary Python targets.
+
+Its optional selective implementation groups each example's first chosen replacement,
+then its second, and so on. It gathers only the preceding history from a mutable
+timeline and writes predictions back after each group. This preserves within-example
+dependencies while skipping discarded predictions. It relies on the registered CNN
+being independent across batch rows; batch normalization or stochastic predictor
+layers would require a new equivalence audit. Before-episode steps remain zero.
 
 Add an approach config with `kind`, named `models`, and `stages`. Every stage has a
 unique `name`, an `objective`, `epochs`, and `learning_rate`. Register all models as

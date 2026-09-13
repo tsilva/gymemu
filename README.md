@@ -82,6 +82,11 @@ CNN. It starts with two epochs of recorded context, then increases prediction fe
 to 80% by epoch 8. The [recipe guide](docs/recipes.md#scheduled-frame-feedback) explains
 the sampling, compute cost, and tuning controls.
 
+`recipe=breakout_scheduled_fast` accelerates the same curriculum with factored action
+inputs, bfloat16 feedback buffers, and selective prediction at low feedback rates.
+See the [matched Beast-3 benchmarks](docs/performance.md#scheduled-feedback-optimization)
+for measured gains and reproduction commands. Existing recipes remain available as controls.
+
 ```bash
 # Inspect a recipe without downloading data or starting training
 uv run python train.py recipe=breakout_cnn --cfg job --resolve

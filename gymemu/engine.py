@@ -281,6 +281,7 @@ def train(cfg):
         raise ValueError("Training requires at least one executed action")
     model = build_approach(spec, config["history"], len(actions), frames.shape).to(device)
     model.validate_stages(spec["stages"])
+    model.configure_training(compile=trainer["compile"])
     input_options = {"action_history": model.action_history}
     training = Windows(
         frames,
