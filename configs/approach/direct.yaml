@@ -1,0 +1,8 @@
+kind: direct
+models:
+  predictor: ${model}
+stages:
+  - name: prediction
+    objective: next_frame
+    epochs: ${trainer.epochs}
+    learning_rate: ${trainer.learning_rate}

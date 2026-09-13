@@ -9,13 +9,13 @@
   <a href="https://github.com/tsilva/gymemu/blob/main/LICENSE"><img src="https://img.shields.io/github/license/tsilva/gymemu" alt="MIT license" /></a>
 </p>
 
-Gymemu is a Python tool for researchers experimenting with learned game emulators.
-Train a neural network on recorded game frames and actions, then use the keyboard to
-play inside its predictions. The default dataset contains Breakout trajectories.
+Gymemu is a Python toolkit for comparing learned game emulators. Train different models
+or multi-stage pipelines on recorded game frames and actions, then play their predictions.
+Hydra config files control the game, models, training stages, and experiment settings.
 
-The baseline predicts one RGB frame from a frame history and the current action using
-a convolutional encoder/decoder and uniform pixel MSE. Playback feeds predictions back
-into the model without loading a game engine or dataset.
+The default approach is the original direct RGB CNN. An experimental latent approach
+first trains a frame autoencoder, freezes it, then trains a separate latent predictor.
+Both use the same dataset adapter, player, and held-out RGB evaluation metric.
 
 ## Install
 
@@ -27,99 +27,117 @@ cd gymemu
 uv sync --frozen
 ```
 
-The locked environment uses Python 3.13. The manifest supports Python 3.11 through 3.13.
+The locked environment uses Python 3.13. Python 3.11 through 3.13 is supported.
 
 ## Train and play
 
 From the repository root:
 
 ```bash
-uv run --frozen python train.py --output runs/breakout-001
-uv run --frozen python play.py runs/breakout-001/best.pt
+# Default direct CNN on Breakout
+uv run python train.py output=runs/breakout-direct
+
+# Frame autoencoder, then a separate latent prediction model
+uv run python train.py approach=latent output=runs/breakout-latent
+
+# Play either approach using its checkpoint
+uv run python play.py runs/breakout-direct/best.pt
 ```
 
-Training downloads the pinned
+Use a new output directory for each run. Omit `output` for a timestamped directory
+under `runs/`. Training downloads the pinned
 [Breakout dataset](https://huggingface.co/datasets/tsilva/gradlab-breakout-trajectories)
-to the Hugging Face cache. Defaults are 8 history frames, batch size 32, and 10 epochs.
-The device is selected in order of availability: CUDA, MPS, then CPU.
-Use a new output directory for each run; nonempty directories are rejected.
+and writes a recorded `start-scene.npz` beside the checkpoints.
 
-By default, the play command opens a window. Press an action key once to generate the initial
-frame. Each subsequent fresh press executes one action and predicts the next frame.
-Holding a key does not advance the model.
+The player opens that scene immediately. Every fresh action key press predicts one
+next frame. Holding a key does not advance the model; R restores the scene and Escape
+quits. Breakout uses Left, Right, and Space. Other games use checkpoint key bindings,
+or numbered keys for their action vocabulary. The player prints its bindings.
 
-| Key | Effect |
-| --- | --- |
-| Left arrow | Move left, action 2 |
-| Right arrow | Move right, action 1 |
-| Space | Button/serve, action 0 |
-| R | Reset and wait for an action key |
-| Escape | Quit |
+Use `--start-scene path/to/scene.npz` to select another scene, `--key-action left=10`
+to set a binding, or `--empty-start` to test learned initialization. In empty-start
+mode the first press generates the initial frame without executing a game action.
+A missing recorded scene produces an error instead of silently switching modes.
 
-For other integer action vocabularies, set bindings with `--key-action`, for example
-`--key-action left=10 --key-action right=20 --key-action space=30`.
+## Configure and compare
 
-To start with visible bricks, paddle, and ball from a recorded scene, add
-`--start-scene path/to/scene.npz` to the play command. The scene appears immediately;
-the first fresh key press executes an action, and R restores the scene. All later
-frames come from the model, with no corrections from recorded data.
-
-Scene files are non-pickled NumPy archives containing `frames`: a uint8 array shaped
-`[history, channels, height, width]`, ordered oldest to newest within one episode.
-Use between one frame and the checkpoint's history length, at its original dimensions.
-Short histories use left-zero padding. This start mode bypasses learned initialization.
-
-## Commands
+Configs compose in layers: `game`, `model`, `approach`, `trainer`, then an optional
+`experiment` preset. Command-line overrides take precedence.
 
 ```bash
-uv run --frozen python train.py --help  # training options
-uv run --frozen python play.py --help   # playback options
-uv run --frozen pytest -q               # pipeline tests
-uv run --frozen ruff check .            # lint
+# Inspect the complete configuration without loading data
+uv run python train.py approach=latent --cfg job --resolve
+
+# Inherit a smaller CNN config and override training settings
+uv run python train.py model=direct_small history=4 trainer.epochs=5
+
+# Reuse CUDA settings for either approach
+uv run python train.py approach=latent experiment=cuda
+
+# Tune one stage independently
+uv run python train.py approach=latent approach.stages.0.epochs=5 approach.stages.1.epochs=20
+
+# Sweep architectures and seeds; Hydra creates a separate directory per run
+uv run python train.py --multirun approach=direct,latent seed=47,48 hydra.sweep.dir=runs/comparison
+
+# Rank runs with matching evaluation targets and export their budgets and metrics
+uv run python compare.py runs/comparison --csv logs/comparison.csv
 ```
 
-For a bounded CPU smoke, use a fresh `runs/smoke` directory:
+The latent approach's `model` group configures its codec. Set
+`approach.models.dynamics.width=128` to tune its predictor. See the
+[training guide](docs/training.md) for config inheritance and artifacts, and
+[approach guide](docs/approaches.md) for adding models or pipelines.
+
+## Other games
+
+The training path is game-independent. Supply a dataset with the supported RGB-frame,
+episode, and scalar integer action schema:
 
 ```bash
-uv run --frozen python train.py --output runs/smoke --device cpu --threads 2 \
-  --epochs 1 --batch-size 4 --limit-episodes 2 --train-batches 8 --eval-batches 2
-uv run --frozen python play.py runs/smoke/best.pt --device cpu \
-  --headless-actions 0,1,1,0,2 --output logs/smoke.png
+uv run python train.py game=custom game.name=my-game game.dataset=/absolute/path/to/snapshot
 ```
 
-Open `logs/smoke.png` to inspect the output. The first action value initializes the
-frame; the remaining four advance it. This checks the pipeline, but the tiny training
-budget does not produce a playable model. The smoke still downloads the dataset snapshot.
+Hub IDs work too. Add a YAML file under `configs/game/` to save a dataset ID, immutable
+revision, splits, key bindings, and recorded start selection. Images retain their
+original dimensions and colors. Other dataset layouts, continuous actions, and compound
+actions require an adapter; a dataset name alone does not establish compatibility.
 
-See the [training guide](docs/training.md) for CUDA settings, the dataset schema,
-training defaults, and checkpoint details.
+## Checks
+
+```bash
+uv run pytest
+uv run ruff check .
+
+# Bounded training; still downloads the dataset snapshot
+uv run python train.py experiment=smoke output=runs/smoke
+uv run python play.py runs/smoke/best.pt --device cpu --headless-actions 0,1,2 --output logs/smoke.png
+```
+
+Open `logs/smoke.png` to inspect the result. A smoke checks the pipeline; its training
+budget does not produce a playable model. Add `approach=latent` to exercise both stages.
 
 ## Notes
 
-- Runs write `config.json`, `metrics.jsonl`, and three inference checkpoints.
-  `best.pt` has the lowest evaluation MSE, `last.pt` is the last completed epoch,
-  and `latest.pt` is an atomic snapshot saved every 60 seconds and after training passes.
-  Checkpoints do not support resuming optimizer progress and are incompatible with older
-  gymemu experiments.
-- Training uses recorded histories and keeps held-out episodes out of optimization.
-  Playback uses generated histories, so errors can accumulate even with low evaluation MSE.
-  Inspect ball motion, collisions, and brick persistence when comparing checkpoints.
-- Training and playback share left-zero-padding and bootstrap rules. An empty history
-  plus `START`, with no game action, predicts the initial frame. It cannot identify a
-  reset seed and may average different starting images.
+- Every run saves resolved config, dataset provenance, stage metrics, all inference
+  weights, and a comparison summary. Checkpoints support playback, not optimizer resume.
+  Existing version-1 direct CNN checkpoints still load.
+- Representation fitting and prediction fitting use training episodes only. All
+  approaches are evaluated in float32 using held-out next-frame RGB MSE. The comparison
+  command separates different datasets and target sets, and reports training budgets.
+- Playback feeds predictions back into the model, so errors can accumulate even with
+  low evaluation MSE. Check ball motion, collisions, and brick persistence in rollouts.
 - Eight history frames are a practical baseline, not a guarantee of full observability.
-  See the [history investigation](docs/history.md) for evidence and limits.
-- Images keep their original dimensions and colors. The default dataset already masks
-  the top 17 HUD rows. Each predicted transition follows its frame-skip-2 cadence.
-- `--dataset` accepts a compatible Hub dataset or local snapshot directory.
-  Generated data, runs, checkpoints, and diagnostics belong in ignored directories.
+  See the [history investigation](docs/history.md). Empty-history initialization can
+  average distinct recorded reset states.
 
 ## Architecture
 
-The diagram shows the default bootstrap path. Game thumbnails illustrate the data flow;
-they are not measured model outputs.
+The image shows the direct baseline. Alternative approaches replace its model and
+training stages while sharing data alignment, checkpoint loading, and playback.
+Game thumbnails illustrate the flow; they are not measured outputs.
 
-![Training on recorded trajectories and playing through predicted frame feedback](architecture.png)
+![Direct CNN training and playback with Breakout frames](architecture.png)
 
 ## License
 

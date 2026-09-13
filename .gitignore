@@ -13,11 +13,11 @@ __pycache__/
 !.env.*.example
 
 # Generated datasets, checkpoints, and diagnostics
-data/
-artifacts/
-logs/
-models/
-runs/
+/data/
+/artifacts/
+/logs/
+/models/
+/runs/
 *.pt
 best.tmp
 last.tmp

@@ -1,0 +1,12 @@
+# @package _global_
+trainer:
+  epochs: 1
+  batch_size: 2
+  device: cpu
+  threads: 2
+  limit_episodes: 2
+  train_batches: 2
+  eval_batches: 1
+history: 2
+model:
+  width: 4

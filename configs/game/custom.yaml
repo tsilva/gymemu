@@ -1,0 +1,12 @@
+# RGB trajectories with scalar integer actions in the documented Parquet schema.
+name: custom
+dataset: ???
+revision: null
+train_split: train
+eval_split: heldout
+key_actions: {}
+start_scene: null
+start:
+  split: null
+  episode_id: null
+  frame_position: 0

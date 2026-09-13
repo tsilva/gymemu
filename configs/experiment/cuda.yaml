@@ -1,0 +1,8 @@
+# @package _global_
+trainer:
+  device: cuda
+  precision: bf16
+  workers: 6
+  threads: 2
+  batch_size: 64
+  epochs: 1

@@ -1,0 +1,17 @@
+defaults:
+  - override /model@_global_.model: frame_codec
+kind: latent
+models:
+  codec: ${model}
+  dynamics:
+    kind: latent_cnn
+    width: 64
+stages:
+  - name: representation
+    objective: reconstruction
+    epochs: ${trainer.epochs}
+    learning_rate: ${trainer.learning_rate}
+  - name: dynamics
+    objective: latent_prediction
+    epochs: ${trainer.epochs}
+    learning_rate: ${trainer.learning_rate}
