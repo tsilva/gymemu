@@ -196,13 +196,17 @@ def test_zero_probability_and_evaluation_match_reference_without_rng_use(snapsho
 
 
 @pytest.mark.parametrize("cached", [False, True])
-def test_training_replay_checkpoint_and_player(snapshot, tmp_path, cached):
+@pytest.mark.parametrize("recipe", ["breakout_scheduled", "breakout_scheduled_fast"])
+def test_training_replay_checkpoint_and_player(snapshot, tmp_path, cached, recipe):
     cfg = configured(
+        f"recipe={recipe}",
         "game=custom",
         "trainer.epochs=3",
         "approach.options.schedule.warmup_epochs=1",
         "approach.options.schedule.ramp_epochs=2",
     )
+    if recipe.endswith("_fast"):
+        cfg.approach.options.selective_threshold = 1.0
     cfg.game.dataset = str(snapshot)
     cfg.output = str(tmp_path / "run")
     if cached:

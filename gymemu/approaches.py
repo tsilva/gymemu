@@ -15,6 +15,9 @@ class Approach(nn.Module):
     objectives = ()
     predictive_objectives = ()
 
+    def configure_training(self, *, compile=False):
+        """Configure optional execution helpers without changing saved model weights."""
+
     def begin_epoch(self, epoch):
         """Update training curricula outside compiled computation; return log metadata."""
         return {}
@@ -73,7 +76,18 @@ class ActionHistoryApproach(DirectApproach):
 
 
 class ScheduledSamplingApproach(ActionHistoryApproach):
-    def __init__(self, spec, history, actions, shape, *, rollout_steps, schedule):
+    def __init__(
+        self,
+        spec,
+        history,
+        actions,
+        shape,
+        *,
+        rollout_steps,
+        schedule,
+        feedback_dtype="fp32",
+        selective_threshold=0.0,
+    ):
         super().__init__(spec, history, actions, shape)
         if type(rollout_steps) is not int or not 1 <= rollout_steps <= history:
             raise ValueError("rollout_steps must be between 1 and the RGB history length")
@@ -91,6 +105,19 @@ class ScheduledSamplingApproach(ActionHistoryApproach):
         self.history_length = history
         self.training_rollout_steps = rollout_steps
         self.schedule = dict(schedule)
+        if feedback_dtype not in ("fp32", "autocast"):
+            raise ValueError("feedback_dtype must be fp32 or autocast")
+        if (
+            type(selective_threshold) not in (int, float)
+            or not math.isfinite(selective_threshold)
+            or not 0 <= selective_threshold <= 1
+        ):
+            raise ValueError("selective_threshold must be between 0 and 1")
+        self.feedback_dtype = feedback_dtype
+        self.selective_threshold = selective_threshold
+        self.sampling_probability = 0.0
+        self.selective_enabled = False
+        self._predict_feedback = self._selected_prediction
         # A tensor lets compiled computation see new probabilities without recompiling
         # for each epoch. This is training state, not an inference weight.
         self.register_buffer("prediction_probability", torch.tensor(0.0), persistent=False)
@@ -103,22 +130,45 @@ class ScheduledSamplingApproach(ActionHistoryApproach):
         probability = self.schedule["max_probability"] * progress
         self.prediction_probability.fill_(probability)
         self.sampling_enabled = probability > 0
+        self.sampling_probability = probability
+        self.selective_enabled = 0 < probability < self.selective_threshold
         return {"prediction_probability": probability, "rollout_steps": self.training_rollout_steps}
 
     def _model_actions(self, actions):
         return actions[:, 0] if self.action_history == 1 else actions
 
-    def mixed_history(self, recorded, actions):
+    def configure_training(self, *, compile=False):
+        self._predict_feedback = (
+            torch.compile(self._selected_prediction, dynamic=True)
+            if compile and self.selective_threshold > 0
+            else self._selected_prediction
+        )
+
+    def _feedback_history(self, recorded):
+        device = recorded.device.type
+        if self.feedback_dtype == "autocast" and torch.is_autocast_enabled(device):
+            return recorded.to(torch.get_autocast_dtype(device))
+        return recorded
+
+    def mixed_history(self, recorded, actions, *, masks=None):
         """Generate each replacement from earlier context, never from its target image."""
+        recorded = self._feedback_history(recorded)
         length = self.history_length
         context = recorded[:, :length]
         with torch.no_grad():
             for step in range(self.training_rollout_steps):
                 tokens = actions[:, step]
                 valid = tokens[:, -1] >= 0  # Negative positions precede the episode.
-                predicted = self(context, self._model_actions(tokens.clamp_min(0))).float()
+                predicted = self(context, self._model_actions(tokens.clamp_min(0))).to(
+                    recorded.dtype
+                )
                 choose_prediction = (
-                    torch.rand(len(recorded), device=recorded.device) < self.prediction_probability
+                    (
+                        torch.rand(len(recorded), device=recorded.device)
+                        < self.prediction_probability
+                    )
+                    if masks is None
+                    else masks[step].to(recorded.device)
                 ) & valid
                 frame = torch.where(
                     choose_prediction[:, None, None, None], predicted, recorded[:, length + step]
@@ -126,9 +176,54 @@ class ScheduledSamplingApproach(ActionHistoryApproach):
                 context = torch.cat((context[:, 1:], frame[:, None]), dim=1)
         return context
 
+    def _selected_prediction(self, timeline, actions, rows, steps):
+        offsets = torch.arange(self.history_length, device=timeline.device)
+        context = timeline[rows[:, None], steps[:, None] + offsets]
+        tokens = actions[rows, steps]
+        return self(context, self._model_actions(tokens.clamp_min(0)))
+
+    @torch.compiler.disable
+    def selective_history(self, recorded, actions, *, masks=None):
+        """Batch by replacement rank, preserving each example's dependencies.
+
+        First selected frames are independent, even at different time positions.
+        Generate them together, then second selections, and so on. CPU Bernoulli
+        masks avoid CUDA nonzero synchronization. Pad inference batches to multiples
+        of 16, discarding duplicate padding rows before updating the timeline.
+        """
+        recorded = self._feedback_history(recorded)
+        length, steps_count = self.history_length, self.training_rollout_steps
+        timeline = recorded.detach().clone()
+        if masks is None:
+            masks = torch.rand(steps_count, len(recorded)) < self.sampling_probability
+        positions = torch.arange(steps_count).expand(len(recorded), -1)
+        positions = positions.masked_fill(~masks.T, steps_count).sort(dim=1).values
+        with torch.no_grad():
+            for rank in range(int(masks.sum(dim=0).max())):
+                rows = (positions[:, rank] < steps_count).nonzero().flatten()
+                steps = positions[rows, rank]
+                count = len(rows)
+                padded = ((count + 15) // 16) * 16
+                rows = F.pad(rows, (0, padded - count), value=int(rows[0])).to(recorded.device)
+                steps = F.pad(steps, (0, padded - count), value=int(steps[0])).to(recorded.device)
+                prediction = self._predict_feedback(timeline, actions, rows, steps).to(
+                    recorded.dtype
+                )
+                rows, steps = rows[:count], steps[:count]
+                valid = actions[rows, steps, -1] >= 0
+                timeline[rows, length + steps] = torch.where(
+                    valid[:, None, None, None],
+                    prediction[:count],
+                    timeline[rows, length + steps],
+                )
+        return timeline[:, -length:]
+
     def loss(self, history, action, target):
         if self.sampling_enabled:
-            context = self.mixed_history(history, action)
+            if self.selective_enabled:
+                context = self.selective_history(self._feedback_history(history), action)
+            else:
+                context = self.mixed_history(history, action)
         else:
             context = history[:, -self.history_length :]
         prediction = self(context, self._model_actions(action[:, -1]))

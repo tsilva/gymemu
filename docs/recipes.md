@@ -12,6 +12,7 @@ composition and the same runner for direct and multi-stage approaches.
 | `breakout_cnn` | Settings from the successful ten-epoch CUDA Breakout run |
 | `breakout_actions` | Same Breakout experiment with previous executed actions as inputs |
 | `breakout_scheduled` | Action-history CNN with progressively sampled prediction feedback |
+| `breakout_scheduled_fast` | Same curriculum with optimized feedback execution |
 
 Run a recipe, inspect it, or override settings:
 
@@ -174,6 +175,50 @@ with recorded histories. Playback needs no curriculum configuration; it uses gen
 frames throughout, as before. Separately inspect long rollouts and paddle contacts
 before concluding that recovery improved. See [history.md](history.md#scheduled-sampling)
 for the research basis.
+
+### Optimized feedback execution
+
+`recipe=breakout_scheduled_fast` inherits the original scheduled recipe and adds:
+
+```yaml
+model:
+  factor_actions: true
+approach:
+  options:
+    feedback_dtype: autocast
+    selective_threshold: 0.2
+```
+
+`factor_actions` computes the constant one-hot planes' contribution using the existing
+first-convolution weights during autocast training. Float32 evaluation/playback retain
+the original convolution path. It includes the zero-padding boundaries and keeps all
+weight names and parameter counts. `feedback_dtype=autocast` avoids repeatedly widening generated
+frames to float32 during bf16 training; float32 operation stays float32. Targets and
+comparison MSE remain float32.
+
+Below `selective_threshold`, independent per-example/per-step Bernoulli masks are sampled
+on the CPU. The approach batches each example's first selected frame, then its second,
+and so on. Every selected prediction uses the earlier selections in its own context.
+Unused forwards are omitted, and small inference batches are padded to multiples of 16
+with duplicate rows that are discarded afterward. At higher probabilities, the dense
+compiled loop is faster. The threshold controls execution, not the selection probability.
+Set it to `0` to force dense execution; `1` selects sparse execution whenever probability
+is less than one. The default `0.2` selects it only in epoch 3 of this recipe.
+
+The original recipe defaults to `factor_actions=false`, `feedback_dtype=fp32`, and
+`selective_threshold=0`. The fast recipe keeps its dataset, batch size, optimizer,
+epochs, rollout length, and curriculum. Changed arithmetic grouping and CPU versus
+CUDA RNG mean separately trained weights need not match bit for bit. Replaying the
+same saved recipe and environment remains the reproducibility contract. No completed
+training/rollout-quality result is claimed for this optimization.
+
+```bash
+uv run python train.py recipe=breakout_scheduled_fast \
+  trainer.frame_cache=/path/to/verified-cache output=runs/breakout-scheduled-fast
+```
+
+See [matched measurements](performance.md#scheduled-feedback-optimization). A benchmark
+does not resume the stopped training run or write a replacement checkpoint.
 
 ## Reproduce the successful Breakout run
 

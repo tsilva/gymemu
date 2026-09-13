@@ -92,6 +92,14 @@ predicted-frame selection by epoch 8. Set `approach.options.schedule.warmup_epoc
 when a one-epoch smoke must exercise feedback. The extra sequential forwards make
 later epochs more expensive. See [scheduled frame feedback](recipes.md#scheduled-frame-feedback).
 
+`recipe=breakout_scheduled_fast` preserves that schedule, eight-step prefix, model
+parameters, and final-target MSE while optimizing execution. It retains feedback in
+the autocast dtype, factors the first convolution's constant action planes, and
+groups selected predictions at low feedback probabilities. Its saved recipe records
+these execution choices. Floating-point rounding and random-number streams can differ
+from the reference; compare rollout quality after training. See
+[performance measurements](performance.md#scheduled-feedback-optimization).
+
 ## Run artifacts
 
 | Artifact | Contents |
