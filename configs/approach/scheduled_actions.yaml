@@ -1,0 +1,16 @@
+defaults:
+  - override /model@_global_.model: action_history_cnn
+kind: scheduled_actions
+models:
+  predictor: ${model}
+options:
+  rollout_steps: ${history}
+  schedule:
+    warmup_epochs: 2
+    ramp_epochs: 6
+    max_probability: 0.8
+stages:
+  - name: prediction
+    objective: next_frame
+    epochs: ${trainer.epochs}
+    learning_rate: ${trainer.learning_rate}

@@ -11,6 +11,7 @@ composition and the same runner for direct and multi-stage approaches.
 | `latent` | Frame reconstruction, then prediction with a frozen codec |
 | `breakout_cnn` | Settings from the successful ten-epoch CUDA Breakout run |
 | `breakout_actions` | Same Breakout experiment with previous executed actions as inputs |
+| `breakout_scheduled` | Action-history CNN with progressively sampled prediction feedback |
 
 Run a recipe, inspect it, or override settings:
 
@@ -58,7 +59,7 @@ its betas, epsilon, weight decay, and AMSGrad setting are explicit YAML values.
 `optimizer=adamw` selects decoupled weight decay. The learning rate remains a stage
 setting so multi-stage recipes can tune it independently.
 
-A recipe can select implemented behavior. New losses, input corruption, or feedback
+A recipe can select implemented behavior. Other losses, input corruption, or feedback
 curricula need an explicit approach implementation before a recipe can enable them.
 The direct recipe remains the reference CNN with its original objective.
 
@@ -98,6 +99,81 @@ this is not a parameter-matched comparison. `model.action_history=1` provides a
 current-action-only architecture control. It matches the original CNN's outputs when
 given the same weights; separately initialized runs need not produce identical weights.
 No full training result is recorded for this recipe yet.
+
+## Scheduled frame feedback
+
+`recipe=breakout_scheduled` trains the action-history CNN from scratch, using the same
+dataset revision, width, optimizer, seed, ten epochs, and supervised targets as
+`breakout_actions`. It selects `approach=scheduled_actions` and exposes these settings:
+
+```yaml
+approach:
+  options:
+    rollout_steps: ${history}
+    schedule:
+      warmup_epochs: 2
+      ramp_epochs: 6
+      max_probability: 0.8
+```
+
+The feedback probability is zero in epochs 1 and 2, then 13.3%, 26.7%, 40%, 53.3%,
+66.7%, and 80% in epochs 3 through 8. Epochs 9 and 10 stay at 80%. The probability
+changes at epoch boundaries. These values are an initial experiment, not a measured
+optimal schedule. A short smoke can finish entirely inside warmup unless overridden.
+
+For each supervised target, the loader supplies enough earlier recorded frames and
+executed actions to generate a bounded prefix. Starting from recorded context, the
+model predicts each prefix frame in chronological order. An independent coin flip
+for each example and timestep chooses that whole prediction or the corresponding
+recorded frame. The chosen frame enters the context for the next prediction. These
+are fresh predictions from the current weights, including errors from earlier sampled
+predictions, rather than a fixed cache of generated frames.
+
+Eight prefix steps can replace all eight frames in the final context. Shorter prefixes
+replace only its newest frames. Episode boundaries remain intact: nonexistent frames
+stay zero, while a valid episode-initial frame may be replaced by the model's bootstrap
+prediction using all-START actions. Actions always come from the aligned recorded
+trajectory. The frame being predicted and later frames are never available as inputs
+to its generation.
+
+Only the final prediction receives uniform RGB MSE against its recorded target.
+Feedback generation runs without gradients, so this experiment trains recovery from
+imperfect context without backpropagating through the rollout. The model may still
+lose information after severe drift; this curriculum does not guarantee recovery or
+correct collision dynamics. It differs from optimizing a multi-step rollout loss.
+
+```bash
+# Uses the same verified cache as the previous Breakout recipes
+uv run python train.py recipe=breakout_scheduled output=runs/breakout-scheduled
+
+# Test all-generated context after the ramp
+uv run python train.py recipe=breakout_scheduled \
+  approach.options.schedule.max_probability=1.0
+
+# Shorter feedback horizon to reduce compute
+uv run python train.py recipe=breakout_scheduled approach.options.rollout_steps=4
+
+# Exercise feedback in a bounded local smoke, not just warmup
+uv run python train.py recipe=breakout_scheduled game=custom game.dataset=/path/to/fixture \
+  experiment=smoke approach.options.schedule.warmup_epochs=0 \
+  approach.options.schedule.ramp_epochs=1
+```
+
+`rollout_steps` accepts 1 through `history`; `max_probability` accepts 0 through 1.
+Set `max_probability=0` for a recorded-context control with the same architecture.
+Warmup skips the extra model forwards, although the loader still supplies extended
+prefixes. Once feedback starts, each batch does `rollout_steps` extra forward passes
+without gradients plus one supervised forward/backward pass. The epoch/sample budget
+matches the reference; the compute budget does not. Do not extrapolate total runtime
+from the first two epochs.
+
+`metrics.jsonl` and checkpoint metadata record each epoch's probability and prefix
+length under `curriculum`. Training loss uses mixed context. The comparison metric
+and checkpoint selection continue to use float32 RGB MSE on unchanged held-out targets
+with recorded histories. Playback needs no curriculum configuration; it uses generated
+frames throughout, as before. Separately inspect long rollouts and paddle contacts
+before concluding that recovery improved. See [history.md](history.md#scheduled-sampling)
+for the research basis.
 
 ## Reproduce the successful Breakout run
 
@@ -170,7 +246,8 @@ A recipe alone cannot recreate code or numerical libraries that have changed.
 Each new run therefore also saves:
 
 - `source.tar.gz`, containing root Python scripts, the `gymemu` package, YAML configs,
-  `pyproject.toml`, `uv.lock`, and `.python-version`, including uncommitted source edits.
+  curated `start_states` snapshots, `pyproject.toml`, `uv.lock`, and `.python-version`,
+  including uncommitted source edits.
 - `reproduction.json`, recording source and recipe SHA-256 hashes, Git commit/status,
   dataset identity, package versions, device, CUDA/cuDNN versions, CPU threads, and
   determinism flags. It does not dump environment variables.

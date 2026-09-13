@@ -282,7 +282,14 @@ def train(cfg):
     model = build_approach(spec, config["history"], len(actions), frames.shape).to(device)
     model.validate_stages(spec["stages"])
     input_options = {"action_history": model.action_history}
-    training = Windows(frames, train_episodes, config["history"], actions, **input_options)
+    training = Windows(
+        frames,
+        train_episodes,
+        config["history"],
+        actions,
+        rollout_steps=model.training_rollout_steps,
+        **input_options,
+    )
     evaluation = Windows(frames, eval_episodes, config["history"], actions, **input_options)
     loss_function = torch.compile(batch_loss) if trainer["compile"] else batch_loss
     identity = _dataset_identity(root, provenance)
@@ -317,9 +324,7 @@ def train(cfg):
     # Exclusive marker also protects simultaneous jobs choosing the same directory.
     with (output / "resolved.yaml").open("x") as stream:
         stream.write(OmegaConf.to_yaml(OmegaConf.create(config)))
-    recipe_sha256 = save_reproduction(
-        output, config, cfg, device, evaluation_contract["dataset"]
-    )
+    recipe_sha256 = save_reproduction(output, config, cfg, device, evaluation_contract["dataset"])
     metadata["recipe_sha256"] = recipe_sha256
     (output / "config.json").write_text(json.dumps(metadata, indent=2) + "\n")
     write_scene(output / "start-scene.npz", game, metadata, frames, splits)
@@ -364,7 +369,13 @@ def train(cfg):
         )
         best = float("inf")
         for epoch in range(1, stage["epochs"] + 1):
-            progress = {**metadata, "stage": stage["name"], "epoch": epoch}
+            curriculum = model.begin_epoch(epoch)
+            progress = {
+                **metadata,
+                "stage": stage["name"],
+                "epoch": epoch,
+                "curriculum": curriculum,
+            }
 
             def snapshot(batches, samples):
                 info = {
@@ -409,6 +420,7 @@ def train(cfg):
                 "stage": stage["name"],
                 "objective": stage["objective"],
                 "epoch": epoch,
+                "curriculum": curriculum,
                 "train": result,
                 "validation": validation,
             }

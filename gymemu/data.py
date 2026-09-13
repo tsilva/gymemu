@@ -177,10 +177,20 @@ class Windows(Dataset):
         actions: list[int],
         *,
         action_history: int = 1,
+        rollout_steps: int = 0,
     ):
         if type(action_history) is not int or not 1 <= action_history <= history:
             raise ValueError("action_history must be between 1 and the RGB history length")
         self.action_history = action_history
+        if type(rollout_steps) is not int or rollout_steps < 0:
+            raise ValueError("rollout_steps must be a nonnegative integer")
+        self.rollout_steps = rollout_steps
+        self.input_history = history + rollout_steps
+        self.action_shape = (
+            (rollout_steps + 1, action_history)
+            if rollout_steps
+            else (() if action_history == 1 else (action_history,))
+        )
         self.frames, self.episodes, self.history = frames, episodes, history
         self.action_index = {value: i for i, value in enumerate(actions)}
         self.start_action = len(actions)  # Explicit absence of a game action at reset.
@@ -194,12 +204,20 @@ class Windows(Dataset):
         return int(self.ends[-1])
 
     def action_at(self, episode, position):
+        if self.rollout_steps:
+            return [
+                self._action_tokens(episode, p) if p >= 0 else [-1] * self.action_history
+                for p in range(position - self.rollout_steps, position + 1)
+            ]
         if self.action_history == 1:
             return (
                 self.start_action
                 if position == 0
                 else self.action_index[int(episode.actions[position - 1])]
             )
+        return self._action_tokens(episode, position)
+
+    def _action_tokens(self, episode, position):
         past = episode.actions[max(0, position - self.action_history) : position]
         return pad_actions(
             [self.action_index[int(a)] for a in past], self.action_history, self.start_action
@@ -211,14 +229,14 @@ class Windows(Dataset):
         number = int(np.searchsorted(self.ends, index, side="right"))
         position = index - (int(self.ends[number - 1]) if number else 0)
         episode = self.episodes[number]
-        past = episode.frames[max(0, position - self.history) : position]
+        past = episode.frames[max(0, position - self.input_history) : position]
         history = frame_stack(
             [self.frames.get(int(i)) for i in past],
-            self.history,
+            self.input_history,
             self.frames.shape,
             dtype=torch.uint8 if self.frames.compact else torch.float32,
         )
         action = self.action_at(episode, position)
-        if self.action_history > 1:
+        if self.action_shape:
             action = torch.tensor(action, dtype=torch.long)
         return history, action, self.frames.get(int(episode.frames[position]))

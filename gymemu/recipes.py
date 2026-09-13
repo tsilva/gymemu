@@ -88,6 +88,7 @@ def save_reproduction(output, config, cfg, device, dataset_identity):
     files = set(ROOT.glob("*.py"))
     files.update((ROOT / "gymemu").rglob("*.py"))
     files.update((ROOT / "configs").rglob("*.yaml"))
+    files.update((ROOT / "start_states").rglob("*.npz"))
     files.update(ROOT / name for name in ("pyproject.toml", "uv.lock", ".python-version"))
     files = sorted(path for path in files if path.is_file())
     source_hashes = {}

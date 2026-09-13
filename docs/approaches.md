@@ -10,6 +10,7 @@ needs its next-frame prediction interface.
 | --- | --- | --- |
 | `approach=direct` | Original action-conditioned RGB CNN | Predict the next frame with uniform pixel MSE |
 | `approach=direct_actions` | RGB CNN with chronological action-history planes | Predict the next frame with uniform pixel MSE |
+| `approach=scheduled_actions` | Same action-history RGB CNN | Uniform RGB MSE with progressively sampled generated context |
 | `approach=latent` | Frame codec and separate latent CNN | Reconstruct recorded frames, freeze the codec, then predict successor latents |
 
 The direct model preserves the original architecture, RGB input, action encoding,
@@ -76,6 +77,24 @@ The interface consists of:
   to remain in evaluation mode after the runner toggles training.
 - `validate_stages(stages)`: reject incompatible objectives or ordering. The base
   implementation checks declared objectives and requires a predictive final stage.
+- `begin_epoch(epoch)`: update any training curriculum outside compiled computation
+  and return a dictionary for metrics/checkpoint metadata. Epochs are one-based and
+  restart per stage; the default returns an empty dictionary.
+
+An approach can declare `training_rollout_steps=K` to request extended training
+prefixes. Training then receives RGB `[B, history+K, C, H, W]` and action tokens
+`[B, K+1, action_history]`. The first `history` frames precede the first prefix
+prediction; each following RGB frame is its recorded alternative. Actions include
+all prefix predictions and the final supervised prediction. All-`-1` action rows
+mark steps before the episode begins, distinct from a valid all-START bootstrap.
+The approach must mask those nonexistent steps and preserve zero padding. Held-out
+evaluation and inference retain the ordinary single-target input contract. Both
+loaders implement these shapes without knowing the approach name.
+
+`scheduled_actions` builds replacements in order with detached predictions and samples
+whole frames independently per example and step. Its probability buffer is excluded
+from inference weights. Additional constructor settings live in `approach.options`
+and pass only to the registered approach constructor, never arbitrary Python targets.
 
 Add an approach config with `kind`, named `models`, and `stages`. Every stage has a
 unique `name`, an `objective`, `epochs`, and `learning_rate`. Register all models as
