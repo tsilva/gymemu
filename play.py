@@ -13,7 +13,13 @@ from PIL import Image
 from gymemu.checkpoints import load_model
 from gymemu.data import frame_stack, pad_actions
 from gymemu.runtime import device_for, positive
-from gymemu.scenes import load_scene
+from gymemu.scenes import (
+    START_STATES,
+    list_start_states,
+    load_named_scene,
+    load_scene,
+    named_scene_path,
+)
 
 
 class Player:
@@ -127,6 +133,9 @@ def main(argv=None):
     parser.add_argument("--scale", type=positive, default=3)
     startup = parser.add_mutually_exclusive_group()
     startup.add_argument(
+        "--start-state", help="Named snapshot for this game; use --list-start-states"
+    )
+    startup.add_argument(
         "--start-scene",
         type=Path,
         help="Recorded history; defaults to start-scene.npz beside the checkpoint",
@@ -135,6 +144,12 @@ def main(argv=None):
         "--empty-start",
         action="store_true",
         help="Test learned initialization from an empty history instead of a recorded scene",
+    )
+    parser.add_argument(
+        "--list-start-states", action="store_true", help="List named snapshots and exit"
+    )
+    parser.add_argument(
+        "--state-dir", type=Path, default=START_STATES, help="Snapshot library directory"
     )
     parser.add_argument(
         "--key-action",
@@ -150,14 +165,34 @@ def main(argv=None):
         if args.empty_start
         else (args.start_scene or args.checkpoint.parent / "start-scene.npz")
     )
-    if scene_path is not None and not scene_path.is_file():
+    if (
+        not args.start_state
+        and not args.list_start_states
+        and scene_path is not None
+        and not scene_path.is_file()
+    ):
         parser.error(
             f"Recorded starting scene not found: {scene_path}. Place start-scene.npz beside "
             "the checkpoint, use --start-scene PATH, or use --empty-start to test initialization."
         )
     device = device_for(args.device)
     model, config = load_model(args.checkpoint, device)
-    initial_history = load_scene(scene_path, config) if scene_path else None
+    if args.list_start_states:
+        for state in list_start_states(config, args.state_dir):
+            print(f"{state['name']}: {state.get('description', '')}")
+        return
+    if args.start_state:
+        try:
+            scene_path = named_scene_path(args.start_state, config, args.state_dir)
+        except ValueError as error:
+            parser.error(str(error))
+        if not scene_path.is_file():
+            parser.error(f"Unknown start state {args.start_state!r}. Use --list-start-states.")
+    initial_history = (
+        load_named_scene(args.start_state, config, args.state_dir)
+        if args.start_state
+        else (load_scene(scene_path, config) if scene_path else None)
+    )
     player = Player(model, config, device, initial_history)
     if scene_path:
         print(
@@ -197,7 +232,13 @@ def main(argv=None):
         _, height, width = config["shape"]
         size = (width * args.scale, height * args.scale)
         screen = pygame.display.set_mode((size[0], size[1] + 40))
-        title = "gymemu — recorded scene" if scene_path else "gymemu — action-stepped CNN emulator"
+        title = (
+            f"gymemu — {args.start_state}"
+            if args.start_state
+            else (
+                "gymemu — recorded scene" if scene_path else "gymemu — action-stepped CNN emulator"
+            )
+        )
         pygame.display.set_caption(title)
         font = pygame.font.Font(None, 22)
         clock = pygame.time.Clock()

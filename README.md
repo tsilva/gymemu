@@ -59,12 +59,28 @@ to set a binding, or `--empty-start` to test learned initialization. In empty-st
 mode the first press generates the initial frame without executing a game action.
 A missing recorded scene produces an error instead of silently switching modes.
 
+For repeatable debugging, select a named frame/action snapshot:
+
+```bash
+uv run python play.py runs/breakout-direct/best.pt --list-start-states
+uv run python play.py runs/breakout-direct/best.pt --start-state ball-up
+```
+
+Breakout includes `ball-up`, `near-bricks`, and `paddle-approach`. R restores the selected
+snapshot. These starts are shared across compatible checkpoints so you can compare the
+same situation. See [the snapshot library](start_states/README.md) for provenance and
+how to save more states with `save_start_state.py`.
+
 ## Saved recipes
 
 The successful ten-epoch Breakout CNN run is saved as `recipe=breakout_cnn`.
 `recipe=breakout_actions` adds seven previous executed actions alongside the current
 action and eight RGB frames, using the same dataset, training budget, and MSE objective.
 Generic `recipe=direct` and `recipe=latent` presets cover the original approaches.
+`recipe=breakout_scheduled` tests recovery from generated context using the action-history
+CNN. It starts with two epochs of recorded context, then increases prediction feedback
+to 80% by epoch 8. The [recipe guide](docs/recipes.md#scheduled-frame-feedback) explains
+the sampling, compute cost, and tuning controls.
 
 ```bash
 # Inspect a recipe without downloading data or starting training

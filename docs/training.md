@@ -86,6 +86,12 @@ so reported RGB MSE has the same precision across approaches.
 It still fetches the snapshot and reads the episode tables. For a truly small local
 smoke, provide a small compatible dataset with `game=custom`.
 
+`recipe=breakout_scheduled` trains the action-history model with a progressive frame
+feedback curriculum. It warms up on recorded context for two epochs and ramps to 80%
+predicted-frame selection by epoch 8. Set `approach.options.schedule.warmup_epochs=0`
+when a one-epoch smoke must exercise feedback. The extra sequential forwards make
+later epochs more expensive. See [scheduled frame feedback](recipes.md#scheduled-frame-feedback).
+
 ## Run artifacts
 
 | Artifact | Contents |
@@ -96,7 +102,7 @@ smoke, provide a small compatible dataset with `game=custom`.
 | `resolved.yaml` | Fully resolved configuration, including the absolute output path |
 | `.hydra/` | Hydra composition and override metadata for Hydra-launched runs |
 | `config.json` | Inference contract, architecture, action vocabulary, and dataset provenance |
-| `metrics.jsonl` | Stage, epoch, training loss, validation loss, RGB MSE, sample counts, and time |
+| `metrics.jsonl` | Stage, epoch, curriculum, training loss, validation loss, RGB MSE, sample counts, and time |
 | `summary.json` | Completed-run RGB score, evaluation identity, parameter count, and training budget |
 | `start-scene.npz` | Recorded RGB history and the executed actions between frames for playback |
 | `stages/<name>/best.pt` | Selected checkpoint for this stage, including all models |
@@ -145,6 +151,11 @@ The default direct and latent models receive only the current executed action.
 `A` uses `episode.actions[max(0, p-A):p]`, where action `i` links frame `i` to `i+1`.
 This is the same alignment in the standard and cached loaders. See the
 [recipe guide](recipes.md#action-history-experiment) for the Breakout experiment.
+Scheduled sampling extends only training windows with earlier frames and action
+sequences, preserving every supervised target. Negative action tokens mark nonexistent
+prefix steps before an episode; they never reach the model as game actions. Generated
+context is built inside the approach on the training device. Evaluation always uses
+the ordinary recorded-history windows for comparable next-frame MSE.
 Only encoded images, trajectory arrays, and a bounded decoded-frame cache stay in memory;
 windows are assembled on demand.
 
@@ -188,3 +199,34 @@ at least the last `min(action_history - 1, frame_count - 1)` recorded actions. L
 frame-only scenes remain valid for models that use only the current action.
 Reset restores both frames and actions. Subsequent frames come entirely from the model,
 and each prediction uses the previous actions actually pressed plus the fresh key press.
+
+## Named debug start states
+
+`play.py CHECKPOINT --start-state NAME` loads a named snapshot from
+`start_states/<game>/NAME.npz`. `--list-start-states` lists names and descriptions for
+the checkpoint's game. `--start-state`, `--start-scene`, and `--empty-start` are mutually
+exclusive; omitting all three preserves the checkpoint's normal recorded start.
+The repository's library is found regardless of the current working directory.
+Use `--state-dir /path/to/library` to select a different library.
+
+Each named snapshot stores exact uint8 RGB frames, the native actions between them,
+and a name, description, and available source provenance. R restores both histories.
+No recorded frames are injected after startup. These are visual/action contexts for
+the learned emulator, not serialized simulator states.
+
+```bash
+# Name an existing recorded scene without changing its frame or action values
+uv run python save_start_state.py runs/my-run/best.pt --name opening \
+  --scene runs/my-run/start-scene.npz --description "Recorded opening scene"
+
+# Export another point in the checkpoint's recorded dataset
+uv run python save_start_state.py runs/my-run/best.pt --name my-debug-state \
+  --episode-id 5 --frame-position 45 --split heldout \
+  --frame-cache data/breakout-676ff638-lz4
+```
+
+Dataset export defaults to the checkpoint's dataset/revision and held-out split;
+`--dataset` can select a local copy. Snapshot export never fits weights. Small curated
+states in the default library are versioned and included in new run source archives.
+Use an ignored directory under `artifacts/` for disposable snapshots. Existing names
+are never overwritten. See [the library](../start_states/README.md) for included scenes.

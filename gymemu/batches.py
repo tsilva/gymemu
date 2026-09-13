@@ -35,16 +35,14 @@ class CachedBatchLoader:
         data = self.dataset
         frames = data.frames
         history = torch.empty(
-            (len(indices), data.history, *frames.shape),
+            (len(indices), data.input_history, *frames.shape),
             dtype=torch.uint8,
             pin_memory=self.pin_memory,
         )
         targets = torch.empty(
             (len(indices), *frames.shape), dtype=torch.uint8, pin_memory=self.pin_memory
         )
-        action_shape = (
-            (len(indices),) if data.action_history == 1 else (len(indices), data.action_history)
-        )
+        action_shape = (len(indices), *data.action_shape)
         actions = torch.empty(action_shape, dtype=torch.long, pin_memory=self.pin_memory)
         # NumPy copies release the GIL and do not dispatch tiny PyTorch operations.
         history_np, targets_np, actions_np = history.numpy(), targets.numpy(), actions.numpy()
@@ -56,8 +54,8 @@ class CachedBatchLoader:
             number = int(np.searchsorted(data.ends, index, side="right"))
             episode = data.episodes[number]
             position = index - (int(data.ends[number - 1]) if number else 0)
-            ids = episode.frames[max(0, position - data.history) : position]
-            padding = data.history - len(ids)
+            ids = episode.frames[max(0, position - data.input_history) : position]
+            padding = data.input_history - len(ids)
             history_np[row, :padding] = 0
             for column, frame_id in enumerate(ids, start=padding):
                 frame_ids.append(frame_id)

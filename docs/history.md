@@ -91,3 +91,18 @@ version-pinned `BTO11` layout from
 Both lanes began with identical valid state and an equilibrium paddle; only
 `paddle_repeat` differed. This research dependency is intentionally absent from the
 trainer and player: neither script executes a real simulator.
+
+## Scheduled sampling
+
+[Bengio et al., 2015](https://arxiv.org/abs/1506.03099) introduce a curriculum that
+gradually substitutes model outputs for recorded inputs during sequence training to
+address the mismatch with autoregressive inference. Gymemu's `breakout_scheduled`
+recipe adapts this idea to whole RGB frames, keeping executed actions and supervised
+targets recorded. It uses independent frame selection within short sequential
+prefixes and detaches feedback from gradients.
+
+This is a proposed experiment for recovering from generated-frame errors, not evidence
+that the paper's results transfer to Breakout or that missing state becomes observable.
+The 80% ceiling, two-epoch warmup, and six-epoch ramp are tunable starting choices.
+Evaluate recorded-context prediction and generated rollouts separately; lower held-out
+pixel MSE alone cannot establish improved ball survival or collision behavior.
