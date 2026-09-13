@@ -1,23 +1,24 @@
 [project]
 name = "gymemu"
 version = "0.1.0"
-description = "Play retro games through a learned spatial latent world model"
-requires-python = ">=3.11"
+description = "Train and play a plain convolutional next-frame emulator from trajectory datasets"
+requires-python = ">=3.11,<3.14"
 license = "MIT"
 dependencies = [
-    "torch",
-    "numpy",
-    "pillow",
-    "pygame",
-    "python-dotenv",
-    "huggingface_hub",
-    "datasets",
-    "tqdm",
-    "wandb",
+    "torch>=2.6,<3",
+    "numpy>=2,<3",
+    "pillow>=11,<13",
+    "pyarrow>=19,<24",
+    "huggingface-hub>=0.34,<2",
+    "pygame>=2.6,<3",
 ]
 
-[tool.pip]
-extra-index-url = ["https://download.pytorch.org/whl/cu118"]
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
+
+[tool.uv]
+exclude-newer = "7 days"
+constraint-dependencies = ["mistralai!=2.4.6", "guardrails-ai!=0.10.1"]
 
 [tool.ruff]
 line-length = 100
@@ -25,9 +26,6 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
-[tool.uv]
-exclude-newer = "7 days"
-constraint-dependencies = [
-  "mistralai!=2.4.6",
-  "guardrails-ai!=0.10.1",
-]
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

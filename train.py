@@ -1,1076 +1,502 @@
+"""Plain CNN next-frame training. This module also defines the player's exact model contract."""
+
+from __future__ import annotations
+
 import argparse
-import os
+import io
+import json
+import math
+import random
 import time
+from dataclasses import dataclass
+from functools import lru_cache
+from itertools import islice
+from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
-import torch.nn.functional as F
-from dotenv import load_dotenv
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
-from tqdm import tqdm
+from huggingface_hub import HfApi, snapshot_download
+from PIL import Image
+from torch import nn
+from torch.nn import functional as F
+from torch.utils.data import DataLoader, Dataset
 
-from context_corruption import (
-    apply_seed_history_corruption,
-    sample_history_corruption_strengths,
-)
-from dataset_utils import infer_history_length
-from device_utils import configure_torch, get_device, move_batch_tensor, prepare_conv_module
-from game_config import BREAKOUT_CONFIG, infer_game_config
-from rollout_dataset import (
-    default_prepared_dataset_id,
-    is_prepared_rollout_dataset,
-    load_dataset_with_fallback,
-    prepared_rollout_dimensions,
-)
-from rollout_feedback import feedback_from_logits
-from spatial_model import (
-    SpatialLatentWorldModel,
-    load_spatial_model_state_dict,
-    normalized_spatial_model_state_dict,
-)
-from wandb_utils import TrainingTracker, make_image_grid
-
-SEED = 42
-IMAGE_WIDTH = 80
-IMAGE_HEIGHT = 96
-HISTORY_LENGTH = 1
-TRAIN_N_EPOCHS = 50
-TRAIN_BATCH_SIZE = 16
-TRAIN_LEARNING_RATE = 0.001
-TRAIN_WEIGHT_DECAY = 0.0
-TRAIN_MAX_GRAD_NORM = 0.0
-EARLY_STOPPING_PATIENCE = 5
-EARLY_STOPPING_MIN_DELTA = 0.0
-MAX_FOREGROUND_LOSS_WEIGHT = 64.0
-FRAME_CHANGE_LOSS_WEIGHT = 24.0
-FRAME_CHANGE_MAP_LOSS_WEIGHT = 32.0
-FRAME_CHANGE_BCE_LOSS_WEIGHT = 4.0
-FRAME_CHANGE_DICE_LOSS_WEIGHT = 1.0
-SPATIAL_LATENT_CHANNELS = 32
-SPATIAL_REFINE_BLOCKS = 4
-UNROLL_STEPS = 16
-FEEDBACK_MODE = "soft"
-HISTORY_CORRUPTION_DEFAULT = True
-HISTORY_CORRUPTION_MAX_STRENGTH = 0.08
-HISTORY_CORRUPTION_FOREGROUND_DROPOUT_MAX = 0.06
-ROBUST_HISTORY_VALIDATION_DEFAULT = True
-ROBUST_VALIDATION_WEIGHT = 0.5
-RARE_ACTION_SAMPLING_POWER = 0.5
-MAX_SEQUENCE_SAMPLE_WEIGHT = 8.0
-ROLLOUT_SAMPLES_PER_EPOCH = 1024
-MODEL_COMPILE_DEFAULT = True
-DEFAULT_PREPARED_TRAIN_DATASET = default_prepared_dataset_id(
-    BREAKOUT_CONFIG.dataset_id,
-    4,
-    UNROLL_STEPS,
-)
-
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
-
-device = get_device()
-configure_torch(device)
-print(f"Using device: {device}")
+DEFAULT_DATASET = "tsilva/gradlab-breakout-trajectories"
+DEFAULT_REVISION = "b8091d248295eb5135011dd9b943c75f4a7d50be"
+DEFAULT_HISTORY = 8
 
 
-def maybe_compile(model, enabled, current_device):
-    if enabled and current_device.type == "cuda":
-        return torch.compile(model)
-    return model
-
-
-def empty_device_cache():
-    if device.type == "mps" and hasattr(torch.mps, "empty_cache"):
-        torch.mps.empty_cache()
-    elif device.type == "cuda":
-        torch.cuda.empty_cache()
-
-
-def dataloader_kwargs(current_device):
-    return {
-        "num_workers": 0,
-        "pin_memory": current_device.type == "cuda",
-    }
-
-
-def metric_value(value):
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().item()
-    return float(value)
-
-
-def compute_grad_norm(parameters):
-    grad_norm_sq = 0.0
-    has_grad = False
-    for parameter in parameters:
-        if parameter.grad is None:
-            continue
-        has_grad = True
-        grad_norm_sq += float(parameter.grad.detach().pow(2).sum().cpu().item())
-    if not has_grad:
-        return 0.0
-    return grad_norm_sq ** 0.5
-
-
-def add_weighted_metric_sums(metric_sums, metrics, weight):
-    for key, value in metrics.items():
-        metric_sums[key] = metric_sums.get(key, 0.0) + metric_value(value) * weight
-
-
-def normalize_metric_sums(metric_sums, total_weight):
-    if total_weight <= 0:
-        return {key: 0.0 for key in metric_sums}
-    return {key: value / total_weight for key, value in metric_sums.items()}
-
-
-def is_val_improved(current_loss, best_loss, min_delta):
-    return current_loss < (best_loss - min_delta)
-
-
-def action_histogram_dict(n_actions):
-    return {action_id: 0 for action_id in range(n_actions)}
-
-
-def log_action_histogram(target_hist, action_array):
-    action_id = int(np.argmax(action_array))
-    target_hist[action_id] += 1
-
-
-def action_fraction_metrics(prefix, histogram):
-    total = sum(histogram.values())
-    metrics = {}
-    for action_id, count in histogram.items():
-        denominator = total if total > 0 else 1
-        metrics[f"{prefix}/action_{action_id}"] = count / denominator
-    return metrics
-
-
-def compute_sequence_sample_weights(
-    sequence_action_ids,
-    n_actions,
-    rarity_power=RARE_ACTION_SAMPLING_POWER,
-    max_weight=MAX_SEQUENCE_SAMPLE_WEIGHT,
-):
-    if not sequence_action_ids:
-        return None, None
-
-    action_hist = np.zeros(n_actions, dtype=np.float64)
-    for action_ids in sequence_action_ids:
-        np.add.at(action_hist, action_ids, 1)
-
-    total = action_hist.sum()
-    if total <= 0:
-        return None, None
-
-    action_freq = action_hist / total
-    base_freq = action_freq[action_freq > 0].max()
-    action_weights = np.ones(n_actions, dtype=np.float64)
-    nonzero_mask = action_freq > 0
-    action_weights[nonzero_mask] = np.clip(
-        (base_freq / action_freq[nonzero_mask]) ** rarity_power,
-        1.0,
-        max_weight,
+def resolve_dataset(dataset: str, revision: str | None) -> tuple[Path, dict]:
+    path = Path(dataset).expanduser()
+    if path.is_dir():
+        return path.resolve(), {"dataset": str(path.resolve()), "revision": None}
+    revision = revision or (DEFAULT_REVISION if dataset == DEFAULT_DATASET else "main")
+    sha = HfApi().dataset_info(dataset, revision=revision).sha
+    path = snapshot_download(
+        dataset,
+        repo_type="dataset",
+        revision=sha,
+        allow_patterns=["manifest.json", "frames/**", "transitions/**", "episodes/**"],
     )
-
-    sequence_weights = []
-    for action_ids in sequence_action_ids:
-        sequence_weights.append(float(action_weights[action_ids].max()))
-
-    return torch.as_tensor(sequence_weights, dtype=torch.double), action_weights
+    return Path(path), {"dataset": dataset, "revision": sha}
 
 
-def fixed_sample_indices(n_items, n_samples):
-    if n_items <= 0:
-        return np.array([], dtype=np.int64)
-    count = min(n_items, n_samples)
-    rng = np.random.default_rng(SEED)
-    return np.sort(rng.choice(n_items, size=count, replace=False))
+def table(root: Path, kind: str, split: str, columns: list[str]) -> pa.Table:
+    paths = sorted((root / kind / split).glob("*.parquet"))
+    if not paths:
+        raise ValueError(f"Missing {kind}/{split}/*.parquet in {root}")
+    return pa.concat_tables([pq.read_table(p, columns=columns) for p in paths])
 
 
-class RolloutDataset(Dataset):
-    def __init__(self, dataset_split):
-        self.dataset_split = dataset_split
+class Frames:
+    """Encoded images in Arrow, a compact ID lookup, and a bounded decoded-image cache."""
+
+    def __init__(self, root: Path, compact: bool = False):
+        self.compact = compact
+        data = table(root, "frames", "assets", ["frame_id", "image"])
+        ids = data["frame_id"].to_numpy()
+        self.order = np.argsort(ids)
+        self.ids = ids[self.order]
+        if not len(ids) or np.any(np.diff(self.ids) <= 0):
+            raise ValueError("Frame IDs must be nonempty and unique")
+        self.images = data["image"]
+        first = self.get(int(self.ids[0]))
+        self.shape = tuple(first.shape)  # C, H, W; no cropping, resizing or binarization.
+
+    @lru_cache(maxsize=256)
+    def get(self, frame_id: int) -> torch.Tensor:
+        position = int(np.searchsorted(self.ids, frame_id))
+        if position == len(self.ids) or self.ids[position] != frame_id:
+            raise ValueError(f"Unknown frame ID {frame_id}")
+        value = self.images[int(self.order[position])].as_py()
+        if not value["bytes"]:
+            raise ValueError("Expected an embedded image, not an external image path")
+        with Image.open(io.BytesIO(value["bytes"])) as image:
+            if image.mode != "RGB":
+                raise ValueError("Expected RGB images")
+            pixels = np.asarray(image).copy()
+        result = torch.from_numpy(pixels).permute(2, 0, 1)
+        if not self.compact:
+            result = result.float().div_(255)
+        if hasattr(self, "shape") and tuple(result.shape) != self.shape:
+            raise ValueError("All images must have the same dimensions")
+        return result
+
+    def check_ids(self, ids: np.ndarray) -> None:
+        positions = np.searchsorted(self.ids, ids)
+        if np.any(positions == len(self.ids)) or np.any(self.ids[positions] != ids):
+            raise ValueError("Trajectory references an unknown frame ID")
+
+
+@dataclass
+class Episode:
+    episode_id: int
+    frames: np.ndarray  # Initial frame followed by each transition's successor.
+    actions: np.ndarray  # Executed action leading from frames[t] to frames[t + 1].
+
+
+def read_episodes(root: Path, split: str, limit: int | None = None) -> list[Episode]:
+    metadata = table(root, "episodes", split, ["episode_id", "initial_frame_id", "length"])
+    meta = sorted(metadata.to_pylist(), key=lambda e: e["episode_id"])
+    if len({e["episode_id"] for e in meta}) != len(meta):
+        raise ValueError("Duplicate episode IDs")
+    data = table(
+        root,
+        "transitions",
+        split,
+        ["episode_id", "step", "source_frame_id", "successor_frame_id", "native_action_json"],
+    )
+    episode_ids = data["episode_id"].to_numpy()
+    steps = data["step"].to_numpy()
+    order = np.lexsort((steps, episode_ids))
+    episode_ids, steps = episode_ids[order], steps[order]
+    sources = data["source_frame_id"].to_numpy()[order]
+    successors = data["successor_frame_id"].to_numpy()[order]
+    raw_actions = data["native_action_json"].to_pylist()
+    action_values = []
+    for value in raw_actions:
+        value = json.loads(value)
+        if type(value) is not int:
+            raise ValueError("This baseline supports scalar integer executed actions only")
+        action_values.append(value)
+    actions = np.asarray(action_values, dtype=np.int64)[order]
+    if set(episode_ids.tolist()) - {e["episode_id"] for e in meta}:
+        raise ValueError("Transitions without episode metadata")
+    episodes = []
+    for item in meta[:limit]:
+        eid = item["episode_id"]
+        lo = int(np.searchsorted(episode_ids, eid, side="left"))
+        hi = int(np.searchsorted(episode_ids, eid, side="right"))
+        length = int(item["length"])
+        if hi - lo != length or not np.array_equal(steps[lo:hi], np.arange(length)):
+            raise ValueError(f"Episode {eid} has missing, duplicated or inconsistent steps")
+        if item["initial_frame_id"] is None:
+            if length:
+                raise ValueError(f"Episode {eid} has no initial frame")
+            continue  # An allocated but never started episode has no training target.
+        frame_ids = np.concatenate([[item["initial_frame_id"]], successors[lo:hi]])
+        if not np.array_equal(sources[lo:hi], frame_ids[:-1]):
+            raise ValueError(f"Episode {eid} has a broken frame chain")
+        episodes.append(Episode(eid, frame_ids, actions[lo:hi]))
+    if not episodes:
+        raise ValueError(f"No usable episodes in {split}")
+    return episodes
+
+
+def frame_stack(
+    history: list[torch.Tensor], length: int, shape: tuple, dtype=torch.float32
+) -> torch.Tensor:
+    """Oldest to newest, missing frames padded with zeros on the left."""
+    result = torch.zeros((length, *shape), dtype=dtype)
+    recent = history[-length:]
+    if recent:
+        result[-len(recent) :] = torch.stack(recent)
+    return result
+
+
+class Windows(Dataset):
+    def __init__(self, frames: Frames, episodes: list[Episode], history: int, actions: list[int]):
+        self.frames, self.episodes, self.history = frames, episodes, history
+        self.action_index = {value: i for i, value in enumerate(actions)}
+        self.start_action = len(actions)  # Explicit absence of a game action at reset.
+        self.ends = np.cumsum([len(e.frames) for e in episodes])
+        for episode in episodes:
+            frames.check_ids(episode.frames)
+            if set(episode.actions.tolist()) - self.action_index.keys():
+                raise ValueError("An episode uses an action absent from the training vocabulary")
 
     def __len__(self):
-        return len(self.dataset_split)
+        return int(self.ends[-1])
 
-    def __getitem__(self, idx):
-        row = self.dataset_split[int(idx)]
-        history_tensor = torch.as_tensor(row["history"], dtype=torch.float32)
-        action_tensor = torch.as_tensor(row["action_seq"], dtype=torch.float32)
-        target_tensor = torch.as_tensor(row["target_frames"], dtype=torch.float32).unsqueeze(1)
-        return history_tensor, action_tensor, target_tensor
-
-
-def frame_prediction_components(logits, target, current_frame):
-    current_frame = current_frame.detach()
-    positive_ratio = target.mean(dim=(1, 2, 3), keepdim=True)
-    foreground_weight = ((1.0 - positive_ratio) / positive_ratio.clamp_min(1e-6)).clamp(
-        1.0,
-        MAX_FOREGROUND_LOSS_WEIGHT,
-    )
-    change_mask = (target - current_frame).abs()
-    weights = 1.0 + (foreground_weight - 1.0) * target + FRAME_CHANGE_LOSS_WEIGHT * change_mask
-    probs = torch.sigmoid(logits)
-    binary = (probs >= 0.5).float()
-    predicted_change = (probs - current_frame).abs().clamp(1e-4, 1.0 - 1e-4)
-    change_weights = 1.0 + FRAME_CHANGE_MAP_LOSS_WEIGHT * change_mask
-    change_bce = F.binary_cross_entropy(predicted_change, change_mask, weight=change_weights)
-    change_intersection = (predicted_change * change_mask).sum(dim=(1, 2, 3))
-    change_union = predicted_change.sum(dim=(1, 2, 3)) + change_mask.sum(dim=(1, 2, 3))
-    change_dice = ((2.0 * change_intersection + 1e-6) / (change_union + 1e-6)).mean()
-    intersection = (binary * target).sum(dim=(1, 2, 3))
-    union = binary.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
-    dice = ((2.0 * intersection + 1e-6) / (union + 1e-6)).mean()
-    foreground_pred_ratio = probs.mean()
-    foreground_target_ratio = target.mean()
-    loss_bce = F.binary_cross_entropy_with_logits(logits, target, weight=weights)
-    loss_total = (
-        loss_bce
-        + FRAME_CHANGE_BCE_LOSS_WEIGHT * change_bce
-        + FRAME_CHANGE_DICE_LOSS_WEIGHT * (1.0 - change_dice)
-    )
-    return {
-        "loss_total": loss_total,
-        "loss_frame_bce": loss_bce,
-        "loss_change_bce": change_bce,
-        "loss_change_dice": 1.0 - change_dice,
-        "foreground_weight_mean": foreground_weight.mean(),
-        "change_weight_mean": change_mask.mean(),
-        "change_target_ratio": change_mask.mean(),
-        "change_pred_ratio": predicted_change.mean(),
-        "weight_mean": weights.mean(),
-        "dice": dice,
-        "change_dice": change_dice,
-        "foreground_pred_ratio": foreground_pred_ratio,
-        "foreground_target_ratio": foreground_target_ratio,
-        "foreground_ratio_error": (foreground_pred_ratio - foreground_target_ratio).abs(),
-    }
-
-
-def make_rollout_media_grid(history_frames, predicted_rollouts, target_rollouts):
-    rows = []
-    for history_frame, predicted_frames, target_frames in zip(
-        history_frames, predicted_rollouts, target_rollouts
-    ):
-        rows.append([history_frame, *predicted_frames])
-        rows.append([history_frame, *target_frames])
-    return make_image_grid(rows)
-
-
-def build_rollout_eval_examples(val_split, n_samples=4):
-    indices = fixed_sample_indices(len(val_split), n_samples)
-    examples = []
-    for index in indices:
-        row = val_split[int(index)]
-        examples.append(
-            (
-                np.asarray(row["history"], dtype=np.float32),
-                np.asarray(row["action_seq"], dtype=np.float32),
-                np.asarray(row["target_frames"], dtype=np.float32),
-            )
+    def __getitem__(self, index):
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        number = int(np.searchsorted(self.ends, index, side="right"))
+        position = index - (int(self.ends[number - 1]) if number else 0)
+        episode = self.episodes[number]
+        past = episode.frames[max(0, position - self.history) : position]
+        history = frame_stack(
+            [self.frames.get(int(i)) for i in past],
+            self.history,
+            self.frames.shape,
+            dtype=torch.uint8 if self.frames.compact else torch.float32,
         )
-    return examples
+        action = (
+            self.start_action
+            if position == 0
+            else self.action_index[int(episode.actions[position - 1])]
+        )
+        return history, action, self.frames.get(int(episode.frames[position]))
 
 
-def collect_split_action_data(dataset_split, n_actions):
-    histogram = action_histogram_dict(n_actions)
-    sequence_action_ids = []
-    for row in dataset_split:
-        action_ids = np.asarray(row["action_seq"], dtype=np.float32).argmax(axis=1)
-        sequence_action_ids.append(action_ids)
-        for action_id in action_ids:
-            histogram[int(action_id)] += 1
-    return histogram, sequence_action_ids
+class Autoencoder(nn.Module):
+    """Three strided convolutions and three transposed convolutions; direct RGB output."""
+
+    def __init__(self, history: int, actions: int, shape: tuple, width: int = 32):
+        super().__init__()
+        self.history, self.actions, self.shape, self.width = history, actions, tuple(shape), width
+        channels = history * shape[0] + actions + 1
+        self.encoder = nn.Sequential(
+            nn.Conv2d(channels, width, 4, 2, 1),
+            nn.ReLU(),
+            nn.Conv2d(width, width * 2, 4, 2, 1),
+            nn.ReLU(),
+            nn.Conv2d(width * 2, width * 4, 4, 2, 1),
+            nn.ReLU(),
+        )
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(width * 4, width * 2, 4, 2, 1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(width * 2, width, 4, 2, 1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(width, shape[0], 4, 2, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, history, action):
+        batch, _, _, height, width = history.shape
+        action = F.one_hot(action, self.actions + 1).to(history.dtype)
+        planes = action[:, :, None, None].expand(-1, -1, height, width)
+        x = torch.cat([history.flatten(1, 2), planes], dim=1)
+        # Pad only to make stride-8 geometry exact; restore the original full canvas.
+        x = F.pad(x, (0, (-width) % 8, 0, (-height) % 8))
+        return self.decoder(self.encoder(x))[:, :, :height, :width]
 
 
-def load_rollout_dataset(
-    dataset_id,
-    game_config,
-    history_length,
-    image_width,
-    image_height,
-    unroll_steps,
+def device_for(name: str) -> torch.device:
+    if name == "auto":
+        name = (
+            "cuda"
+            if torch.cuda.is_available()
+            else ("mps" if torch.backends.mps.is_available() else "cpu")
+        )
+    return torch.device(name)
+
+
+def load_model(checkpoint: Path, device: torch.device) -> tuple[Autoencoder, dict]:
+    saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    config = saved["config"]
+    if config.get("format_version") != 1:
+        raise ValueError("Unsupported checkpoint format; old gymemu models are incompatible")
+    model = Autoencoder(
+        config["history"], len(config["action_values"]), config["shape"], config["width"]
+    )
+    model.load_state_dict(saved["state_dict"], strict=True)
+    return model.to(device).eval(), config
+
+
+def save_model(path: Path, model: Autoencoder, config: dict) -> None:
+    temporary = path.with_suffix(".tmp")
+    torch.save(
+        {
+            "config": config,
+            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+        },
+        temporary,
+    )
+    temporary.replace(path)
+
+
+def run_epoch(
+    model,
+    loader,
+    device,
+    optimizer=None,
+    max_batches=None,
+    *,
+    precision="fp32",
+    label="",
+    checkpoint=None,
+    checkpoint_seconds=60,
 ):
-    print(f"\nLoading dataset: {dataset_id}")
-    dataset_dict = load_dataset_with_fallback(dataset_id)
-    if "train" not in dataset_dict or "validation" not in dataset_dict:
-        raise ValueError(
-            "train.py only accepts prepared rollout datasets with 'train' and 'validation' "
-            "splits. Build one with scripts/build_training_dataset.py."
-        )
-    if not is_prepared_rollout_dataset(dataset_dict["train"].column_names):
-        raise ValueError(
-            "train.py only accepts prepared rollout datasets built by "
-            "scripts/build_training_dataset.py."
-        )
-
-    print(f"Train split rows: {len(dataset_dict['train'])}")
-    print(f"Validation split rows: {len(dataset_dict['validation'])}")
-    train_split = dataset_dict["train"]
-    val_split = dataset_dict["validation"]
-    prepared_dims = prepared_rollout_dimensions(train_split)
-    if prepared_dims["history_length"] != history_length:
-        raise ValueError(
-            f"Prepared dataset history length is {prepared_dims['history_length']}, "
-            f"but training was configured for {history_length}."
-        )
-    if prepared_dims["unroll_steps"] != unroll_steps:
-        raise ValueError(
-            f"Prepared dataset unroll steps is {prepared_dims['unroll_steps']}, "
-            f"but training was configured for {unroll_steps}."
-        )
-    if prepared_dims["n_actions"] != game_config.n_actions:
-        raise ValueError(
-            f"Prepared dataset action size is {prepared_dims['n_actions']}, "
-            f"but game profile expects {game_config.n_actions}."
-        )
-    if (
-        prepared_dims["image_width"] != image_width
-        or prepared_dims["image_height"] != image_height
-    ):
-        print(
-            "Prepared dataset frame size differs from the requested preprocessing size: "
-            f"{prepared_dims['image_width']}x{prepared_dims['image_height']} vs "
-            f"{image_width}x{image_height}. Using the stored rollout tensors as-is."
-        )
-
-    train_action_hist, train_sequence_action_ids = collect_split_action_data(
-        train_split,
-        game_config.n_actions,
+    model.train(optimizer is not None)
+    total = torch.zeros(
+        (), device=device, dtype=torch.float64 if device.type != "mps" else torch.float32
     )
-    val_action_hist, _ = collect_split_action_data(val_split, game_config.n_actions)
-
-    print(f"Train rollout sequences: {len(train_split)}")
-    print(f"Validation rollout sequences: {len(val_split)}")
-    dataset_stats = {
-        "data/prepared_rollout_dataset": 1.0,
-        "data/train_sequences": len(train_split),
-        "data/val_sequences": len(val_split),
-    }
-    dataset_stats.update(action_fraction_metrics("data/train_action_fraction", train_action_hist))
-    dataset_stats.update(action_fraction_metrics("data/val_action_fraction", val_action_hist))
-    train_weights, action_weights = compute_sequence_sample_weights(
-        train_sequence_action_ids,
-        game_config.n_actions,
-    )
-    return train_split, val_split, dataset_stats, train_weights, action_weights
-
-
-def make_train_loader(train_dataset, train_weights, batch_size, rollout_samples_per_epoch):
-    sampler = None
-    if train_weights is not None and rollout_samples_per_epoch > 0:
-        num_samples = max(1, min(int(rollout_samples_per_epoch), len(train_dataset)))
-        sampler = WeightedRandomSampler(
-            train_weights,
-            num_samples=num_samples,
-            replacement=False,
-        )
-    loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=sampler is None,
-        sampler=sampler,
-        **dataloader_kwargs(device),
-    )
-    return loader
-
-
-def maybe_corrupt_seed_history(history_frames, args):
-    if not args.history_corruption:
-        return history_frames, torch.zeros(history_frames.size(0), device=history_frames.device)
-
-    strengths = sample_history_corruption_strengths(
-        history_frames.size(0),
-        max_strength=args.history_corruption_max_strength,
-        device=history_frames.device,
-    )
-    corrupted = apply_seed_history_corruption(
-        history_frames,
-        strengths,
-        max_strength=args.history_corruption_max_strength,
-        foreground_dropout_max=args.history_corruption_foreground_dropout_max,
-    )
-    return corrupted, strengths
-
-
-def robust_seed_history(history_frames, args, generator):
-    strengths = torch.full(
-        (history_frames.size(0),),
-        fill_value=args.history_corruption_max_strength,
-        device=history_frames.device,
-        dtype=history_frames.dtype,
-    )
-    return apply_seed_history_corruption(
-        history_frames,
-        strengths,
-        max_strength=args.history_corruption_max_strength,
-        foreground_dropout_max=args.history_corruption_foreground_dropout_max,
-        generator=generator,
-    )
-
-
-def selection_loss(clean_val_loss, robust_val_loss, robust_weight, robust_enabled):
-    if not robust_enabled:
-        return clean_val_loss
-    return ((1.0 - robust_weight) * clean_val_loss) + (robust_weight * robust_val_loss)
-
-
-def train_spatial_model(
-    args,
-    game_config,
-    train_split,
-    val_split,
-    train_weights,
-    action_weights,
-    tracker=None,
-):
-    dataset_name = args.dataset.replace("/", "__")
-    model = prepare_conv_module(
-        SpatialLatentWorldModel(
-            history_length=args.history_length,
-            n_actions=game_config.n_actions,
-            latent_channels=args.spatial_latent_channels,
-            refine_blocks=args.spatial_refine_blocks,
-        ),
-        device,
-    )
-    model = maybe_compile(model, args.model_compile, device)
-
-    if args.spatial_dynamics_path:
-        load_result = load_spatial_model_state_dict(
-            model,
-            torch.load(args.spatial_dynamics_path, map_location=device, weights_only=True),
-        )
-        print(f"Loaded spatial dynamics model from: {args.spatial_dynamics_path}")
-        for note in load_result["notes"]:
-            print(f"  -> {note}")
-        if load_result["missing_keys"]:
-            print(f"Missing keys after partial load: {len(load_result['missing_keys'])}")
-        if load_result["unexpected_keys"]:
-            print(f"Unexpected keys after partial load: {len(load_result['unexpected_keys'])}")
-
-    train_dataset = RolloutDataset(train_split)
-    val_dataset = RolloutDataset(val_split)
-    train_loader = make_train_loader(
-        train_dataset,
-        train_weights,
-        args.batch_size,
-        args.rollout_samples_per_epoch,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        **dataloader_kwargs(device),
-    )
-
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
-    eval_examples = build_rollout_eval_examples(val_split, n_samples=4)
-    best_val_loss = float("inf")
-    best_robust_val_loss = float("inf")
-    best_selection_score = float("inf")
-    best_model_path = None
-    best_epoch = None
-    epochs_without_improvement = 0
-    optimizer_step = 0
-
-    if action_weights is not None:
-        for action_id, weight in enumerate(action_weights):
-            print(f"Sampling weight action {action_id}: {weight:.3f}")
-
-    for epoch in range(args.epochs):
-        model.train()
-        train_metric_sums = {}
-        train_sample_count = 0
-        train_epoch_start = time.perf_counter()
-
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs} [Train]")
-        for batch_idx, (history_frames, action_seq, target_frames) in enumerate(pbar, start=1):
-            history_frames = move_batch_tensor(
-                history_frames, device, non_blocking=device.type == "cuda"
-            )
-            action_seq = action_seq.to(device, non_blocking=device.type == "cuda")
-            target_frames = move_batch_tensor(
-                target_frames, device, non_blocking=device.type == "cuda"
-            )
-            batch_size = history_frames.size(0)
-
-            optimizer.zero_grad(set_to_none=True)
-
-            rollout_history, corruption_strengths = maybe_corrupt_seed_history(history_frames, args)
-            n_steps = action_seq.size(1)
-            loss = torch.zeros((), device=device)
-            batch_metric_sums = {}
-            first_step_metrics = None
-            last_step_metrics = None
-
-            for step_idx in range(n_steps):
-                logits = model(rollout_history, action_seq[:, step_idx, :])
-                target_frame = target_frames[:, step_idx, :, :, :]
-                current_frame = (
-                    history_frames[:, -1:, :, :]
-                    if step_idx == 0
-                    else rollout_history[:, -1:, :, :]
-                )
-                step_metrics = frame_prediction_components(
-                    logits,
-                    target_frame,
-                    current_frame,
-                )
-                loss = loss + step_metrics["loss_total"]
-                add_weighted_metric_sums(batch_metric_sums, step_metrics, 1.0)
-                if step_idx == 0:
-                    first_step_metrics = step_metrics
-                if step_idx == n_steps - 1:
-                    last_step_metrics = step_metrics
-                _, _, next_input = feedback_from_logits(logits, args.feedback_mode)
-                rollout_history = torch.cat([rollout_history[:, 1:, :, :], next_input], dim=1)
-
-            loss = loss / n_steps
-            loss.backward()
-
-            grad_norm = compute_grad_norm(model.parameters())
-            if args.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-            optimizer.step()
-
-            optimizer_step += 1
-            train_sample_count += batch_size
-            batch_metrics = normalize_metric_sums(batch_metric_sums, n_steps)
-            batch_metrics["loss_total"] = metric_value(loss)
-            batch_metrics["loss_step_1"] = metric_value(first_step_metrics["loss_total"])
-            batch_metrics["loss_step_last"] = metric_value(last_step_metrics["loss_total"])
-            batch_metrics["loss_last_over_first"] = batch_metrics["loss_step_last"] / max(
-                batch_metrics["loss_step_1"], 1e-8
-            )
-            batch_metrics["dice_step_1"] = metric_value(first_step_metrics["dice"])
-            batch_metrics["dice_step_last"] = metric_value(last_step_metrics["dice"])
-            batch_metrics["history_corruption_strength"] = metric_value(corruption_strengths.mean())
-            add_weighted_metric_sums(train_metric_sums, batch_metrics, batch_size)
-
-            if batch_idx == 1 or batch_idx % 20 == 0:
-                pbar.set_postfix({"loss": f"{metric_value(loss):.6f}"})
-                if tracker is not None:
-                    tracker.log_batch(
-                        "spatial_dynamics",
-                        {
-                            "train/loss_total": batch_metrics["loss_total"],
-                            "train/loss_step_1": batch_metrics["loss_step_1"],
-                            "train/loss_step_last": batch_metrics["loss_step_last"],
-                            "train/loss_last_over_first": batch_metrics["loss_last_over_first"],
-                            "train/dice_step_1": batch_metrics["dice_step_1"],
-                            "train/dice_step_last": batch_metrics["dice_step_last"],
-                            "train/history_corruption_strength": batch_metrics[
-                                "history_corruption_strength"
-                            ],
-                            "train/change_dice": batch_metrics["change_dice"],
-                            "train/loss_frame_bce": batch_metrics["loss_frame_bce"],
-                            "train/loss_change_bce": batch_metrics["loss_change_bce"],
-                            "train/loss_change_dice": batch_metrics["loss_change_dice"],
-                            "train/foreground_ratio_error": batch_metrics[
-                                "foreground_ratio_error"
-                            ],
-                            "train/foreground_weight_mean": batch_metrics[
-                                "foreground_weight_mean"
-                            ],
-                            "train/change_weight_mean": batch_metrics["change_weight_mean"],
-                            "train/change_target_ratio": batch_metrics["change_target_ratio"],
-                            "train/change_pred_ratio": batch_metrics["change_pred_ratio"],
-                            "train/weight_mean": batch_metrics["weight_mean"],
-                            "train/grad_norm": grad_norm,
-                            "train/lr": optimizer.param_groups[0]["lr"],
-                        },
-                        optimizer_step,
-                    )
-
-        train_metrics = {
-            f"train/{key}": value
-            for key, value in normalize_metric_sums(train_metric_sums, train_sample_count).items()
-        }
-        train_epoch_time = time.perf_counter() - train_epoch_start
-        train_metrics["train/epoch_time_s"] = train_epoch_time
-        train_metrics["train/samples_per_s"] = (
-            train_sample_count / train_epoch_time if train_epoch_time > 0 else 0.0
-        )
-        avg_train_loss = train_metrics["train/loss_total"]
-
-        model.eval()
-        val_metric_sums = {}
-        val_sample_count = 0
-        val_epoch_start = time.perf_counter()
-
-        with torch.inference_mode():
-            for history_frames, action_seq, target_frames in tqdm(
-                val_loader, desc=f"Epoch {epoch + 1}/{args.epochs} [Val]", leave=False
-            ):
-                history_frames = move_batch_tensor(
-                    history_frames, device, non_blocking=device.type == "cuda"
-                )
-                action_seq = action_seq.to(device, non_blocking=device.type == "cuda")
-                target_frames = move_batch_tensor(
-                    target_frames, device, non_blocking=device.type == "cuda"
-                )
-                batch_size = history_frames.size(0)
-
-                rollout_history = history_frames
-                n_steps = action_seq.size(1)
-                loss = torch.zeros((), device=device)
-                batch_metric_sums = {}
-                first_step_metrics = None
-                last_step_metrics = None
-
-                for step_idx in range(n_steps):
-                    logits = model(rollout_history, action_seq[:, step_idx, :])
-                    target_frame = target_frames[:, step_idx, :, :, :]
-                    current_frame = (
-                        history_frames[:, -1:, :, :]
-                        if step_idx == 0
-                        else rollout_history[:, -1:, :, :]
-                    )
-                    step_metrics = frame_prediction_components(
-                        logits,
-                        target_frame,
-                        current_frame,
-                    )
-                    loss = loss + step_metrics["loss_total"]
-                    add_weighted_metric_sums(batch_metric_sums, step_metrics, 1.0)
-                    if step_idx == 0:
-                        first_step_metrics = step_metrics
-                    if step_idx == n_steps - 1:
-                        last_step_metrics = step_metrics
-                    _, _, next_input = feedback_from_logits(logits, args.feedback_mode)
-                    rollout_history = torch.cat([rollout_history[:, 1:, :, :], next_input], dim=1)
-
-                loss = loss / n_steps
-                batch_metrics = normalize_metric_sums(batch_metric_sums, n_steps)
-                batch_metrics["loss_total"] = metric_value(loss)
-                batch_metrics["loss_step_1"] = metric_value(first_step_metrics["loss_total"])
-                batch_metrics["loss_step_last"] = metric_value(last_step_metrics["loss_total"])
-                batch_metrics["loss_last_over_first"] = batch_metrics["loss_step_last"] / max(
-                    batch_metrics["loss_step_1"], 1e-8
-                )
-                batch_metrics["dice_step_1"] = metric_value(first_step_metrics["dice"])
-                batch_metrics["dice_step_last"] = metric_value(last_step_metrics["dice"])
-                add_weighted_metric_sums(val_metric_sums, batch_metrics, batch_size)
-                val_sample_count += batch_size
-
-        val_metrics = {
-            f"val/{key}": value
-            for key, value in normalize_metric_sums(val_metric_sums, val_sample_count).items()
-        }
-        val_epoch_time = time.perf_counter() - val_epoch_start
-        val_metrics["val/epoch_time_s"] = val_epoch_time
-        val_metrics["val/samples_per_s"] = (
-            val_sample_count / val_epoch_time if val_epoch_time > 0 else 0.0
-        )
-        avg_val_loss = val_metrics["val/loss_total"]
-        robust_validation_enabled = (
-            args.robust_history_validation
-            and args.history_corruption
-            and args.history_corruption_max_strength > 0
-        )
-        avg_robust_val_loss = 0.0
-
-        if robust_validation_enabled:
-            robust_val_metric_sums = {}
-            robust_val_sample_count = 0
-            robust_val_epoch_start = time.perf_counter()
-            robust_generator = torch.Generator(device="cpu")
-            robust_generator.manual_seed(SEED + epoch)
-
-            with torch.inference_mode():
-                for history_frames, action_seq, target_frames in tqdm(
-                    val_loader,
-                    desc=f"Epoch {epoch + 1}/{args.epochs} [Robust Val]",
-                    leave=False,
-                ):
-                    history_frames = move_batch_tensor(
-                        history_frames, device, non_blocking=device.type == "cuda"
-                    )
-                    action_seq = action_seq.to(device, non_blocking=device.type == "cuda")
-                    target_frames = move_batch_tensor(
-                        target_frames, device, non_blocking=device.type == "cuda"
-                    )
-                    batch_size = history_frames.size(0)
-
-                    rollout_history = robust_seed_history(history_frames, args, robust_generator)
-                    n_steps = action_seq.size(1)
-                    loss = torch.zeros((), device=device)
-                    batch_metric_sums = {}
-                    first_step_metrics = None
-                    last_step_metrics = None
-
-                    for step_idx in range(n_steps):
-                        logits = model(rollout_history, action_seq[:, step_idx, :])
-                        target_frame = target_frames[:, step_idx, :, :, :]
-                        current_frame = (
-                            history_frames[:, -1:, :, :]
-                            if step_idx == 0
-                            else rollout_history[:, -1:, :, :]
-                        )
-                        step_metrics = frame_prediction_components(
-                            logits,
-                            target_frame,
-                            current_frame,
-                        )
-                        loss = loss + step_metrics["loss_total"]
-                        add_weighted_metric_sums(batch_metric_sums, step_metrics, 1.0)
-                        if step_idx == 0:
-                            first_step_metrics = step_metrics
-                        if step_idx == n_steps - 1:
-                            last_step_metrics = step_metrics
-                        _, _, next_input = feedback_from_logits(logits, args.feedback_mode)
-                        rollout_history = torch.cat([rollout_history[:, 1:, :, :], next_input], dim=1)
-
-                    loss = loss / n_steps
-                    batch_metrics = normalize_metric_sums(batch_metric_sums, n_steps)
-                    batch_metrics["loss_total"] = metric_value(loss)
-                    batch_metrics["loss_step_1"] = metric_value(first_step_metrics["loss_total"])
-                    batch_metrics["loss_step_last"] = metric_value(last_step_metrics["loss_total"])
-                    batch_metrics["loss_last_over_first"] = batch_metrics["loss_step_last"] / max(
-                        batch_metrics["loss_step_1"], 1e-8
-                    )
-                    batch_metrics["dice_step_1"] = metric_value(first_step_metrics["dice"])
-                    batch_metrics["dice_step_last"] = metric_value(last_step_metrics["dice"])
-                    add_weighted_metric_sums(robust_val_metric_sums, batch_metrics, batch_size)
-                    robust_val_sample_count += batch_size
-
-            robust_val_metrics = {
-                f"robust_val/{key}": value
-                for key, value in normalize_metric_sums(
-                    robust_val_metric_sums, robust_val_sample_count
-                ).items()
-            }
-            robust_val_epoch_time = time.perf_counter() - robust_val_epoch_start
-            robust_val_metrics["robust_val/epoch_time_s"] = robust_val_epoch_time
-            robust_val_metrics["robust_val/samples_per_s"] = (
-                robust_val_sample_count / robust_val_epoch_time if robust_val_epoch_time > 0 else 0.0
-            )
-            avg_robust_val_loss = robust_val_metrics["robust_val/loss_total"]
-        else:
-            robust_val_metrics = {}
-
-        current_selection_score = selection_loss(
-            avg_val_loss,
-            avg_robust_val_loss,
-            args.robust_validation_weight,
-            robust_validation_enabled,
-        )
-
-        status_message = (
-            f"Epoch {epoch + 1}/{args.epochs} - Train Loss: {avg_train_loss:.6f}, "
-            f"Val Loss: {avg_val_loss:.6f}"
-        )
-        if robust_validation_enabled:
-            status_message += (
-                f", Robust Val Loss: {avg_robust_val_loss:.6f}, "
-                f"Selection Loss: {current_selection_score:.6f}"
-            )
-        print(status_message)
-
-        best_val_improved = False
-        if is_val_improved(
-            current_selection_score, best_selection_score, args.early_stopping_min_delta
-        ):
-            best_selection_score = current_selection_score
-            best_val_loss = avg_val_loss
-            best_robust_val_loss = avg_robust_val_loss
-            best_epoch = epoch + 1
-            epochs_without_improvement = 0
-            best_model_path = os.path.join(args.output_dir, f"{dataset_name}-spatial-dynamics.pt")
-            torch.save(normalized_spatial_model_state_dict(model.state_dict()), best_model_path)
-            if robust_validation_enabled:
-                print(
-                    "  -> Saved best model "
-                    f"(selection_loss: {best_selection_score:.6f}, "
-                    f"val_loss: {best_val_loss:.6f}, "
-                    f"robust_val_loss: {best_robust_val_loss:.6f})"
-                )
-            else:
-                print(f"  -> Saved best model (val_loss: {best_val_loss:.6f})")
-            best_val_improved = True
-        elif args.early_stopping_patience > 0:
-            epochs_without_improvement += 1
+    samples, batches = 0, 0
+    started = last_checkpoint = time.monotonic()
+    count = min(len(loader), max_batches) if max_batches else len(loader)
+    iterator = islice(loader, count)
+    for history, action, target in iterator:
+        history = history.to(device, non_blocking=True).float()
+        target = target.to(device, non_blocking=True).float()
+        # Workers transfer exact uint8 pixels; normalization happens on the device.
+        if loader.dataset.frames.compact:
+            history.div_(255)
+            target.div_(255)
+        action = action.to(device, non_blocking=True)
+        with torch.set_grad_enabled(optimizer is not None):
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
+                prediction = model(history, action)
+                loss = F.mse_loss(prediction, target)
+            if optimizer is not None:
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+        total += loss.detach().to(total.dtype) * len(target)
+        samples += len(target)
+        batches += 1
+        elapsed = time.monotonic() - started
+        if batches % 100 == 0 or batches == count:
+            mse = total.item() / samples
+            if not math.isfinite(mse):
+                raise ValueError("Non-finite pixel MSE")
             print(
-                "  -> No validation improvement "
-                f"({epochs_without_improvement}/{args.early_stopping_patience})"
+                f"{label} {'train' if optimizer else 'eval'} batches={batches}/{count} "
+                f"mse={mse:.6f} samples/s={samples / elapsed:.1f} "
+                f"eta_seconds={elapsed / batches * (count - batches):.0f}",
+                flush=True,
             )
-            if epochs_without_improvement >= args.early_stopping_patience:
-                print(
-                    "  -> Early stopping triggered for spatial dynamics "
-                    f"after epoch {epoch + 1}"
-                )
-                empty_device_cache()
-                break
-
-        epoch_metrics = {}
-        epoch_metrics.update(train_metrics)
-        epoch_metrics.update(val_metrics)
-        epoch_metrics.update(robust_val_metrics)
-        epoch_metrics["health/generalization_gap_ratio"] = (
-            avg_val_loss / avg_train_loss if avg_train_loss > 0 else 0.0
-        )
-        epoch_metrics["health/selection_loss"] = current_selection_score
-        epoch_metrics["health/best_val_improved"] = float(best_val_improved)
-        epoch_metrics["health/epochs_without_improvement"] = epochs_without_improvement
-        if tracker is not None:
-            tracker.log_epoch("spatial_dynamics", epoch_metrics, epoch)
-
-        if tracker is not None and eval_examples and (best_val_improved or (epoch + 1) % 5 == 0):
-            predicted_rollouts = []
-            target_rollouts = []
-            history_last_frames = []
-            with torch.inference_mode():
-                for history_frames, action_seq, target_frames in eval_examples:
-                    history_tensor = (
-                        torch.from_numpy(history_frames).float().unsqueeze(0).to(device)
-                    )
-                    action_tensor = torch.from_numpy(action_seq).float().unsqueeze(0).to(device)
-                    rollout_history = history_tensor
-                    rollout_predictions = []
-                    for step_idx in range(action_tensor.size(1)):
-                        logits = model(rollout_history, action_tensor[:, step_idx, :])
-                        probs, _, next_input = feedback_from_logits(logits, args.feedback_mode)
-                        rollout_predictions.append(probs[0, 0].detach().cpu().numpy())
-                        rollout_history = torch.cat([rollout_history[:, 1:, :, :], next_input], dim=1)
-                    predicted_rollouts.append(rollout_predictions)
-                    target_rollouts.append([frame for frame in target_frames])
-                    history_last_frames.append(history_frames[-1])
-
-            grid = make_rollout_media_grid(
-                history_last_frames,
-                predicted_rollouts,
-                target_rollouts,
-            )
-            tracker.log_media(
-                "spatial_dynamics",
-                {
-                    "media/rollout_strip": tracker.image(
-                        grid,
-                        caption=f"Epoch {epoch + 1} spatial dynamics rollouts",
-                    )
-                },
-                epoch,
-            )
-
-        empty_device_cache()
-
+        if checkpoint and time.monotonic() - last_checkpoint >= checkpoint_seconds:
+            # Synchronizing here also catches an invalid loss before publishing weights.
+            if not math.isfinite(total.item()):
+                raise ValueError("Non-finite pixel MSE")
+            checkpoint(batches, samples)
+            last_checkpoint = time.monotonic()
+    if not samples:
+        raise ValueError("An epoch must contain at least one sample")
     return {
-        "best_model_path": best_model_path,
-        "best_val_loss": best_val_loss,
-        "best_robust_val_loss": best_robust_val_loss,
-        "best_selection_loss": best_selection_score,
-        "best_epoch": best_epoch,
+        "mse": total.item() / samples,
+        "samples": samples,
+        "batches": batches,
+        "seconds": time.monotonic() - started,
     }
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train the spatial latent world model")
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default=DEFAULT_PREPARED_TRAIN_DATASET,
-        help="Prepared Hugging Face dataset ID built by scripts/build_training_dataset.py",
-    )
-    parser.add_argument(
-        "--game",
-        type=str,
-        default=BREAKOUT_CONFIG.name,
-        help="Game profile for preprocessing and controls",
-    )
-    parser.add_argument(
-        "--history-length",
-        type=int,
-        default=None,
-        help="Number of recent frames fed into the world model",
-    )
-    parser.add_argument(
-        "--image-size",
-        type=int,
-        default=None,
-        help="Optional square image size override applied to both width and height",
-    )
-    parser.add_argument(
-        "--image-width",
-        type=int,
-        default=IMAGE_WIDTH,
-        help="Preprocessed frame width",
-    )
-    parser.add_argument(
-        "--image-height",
-        type=int,
-        default=IMAGE_HEIGHT,
-        help="Preprocessed frame height",
-    )
-    parser.add_argument("--epochs", type=int, default=TRAIN_N_EPOCHS)
-    parser.add_argument("--batch-size", type=int, default=TRAIN_BATCH_SIZE)
-    parser.add_argument("--learning-rate", type=float, default=TRAIN_LEARNING_RATE)
-    parser.add_argument("--weight-decay", type=float, default=TRAIN_WEIGHT_DECAY)
-    parser.add_argument("--max-grad-norm", type=float, default=TRAIN_MAX_GRAD_NORM)
-    parser.add_argument(
-        "--early-stopping-patience",
-        type=int,
-        default=EARLY_STOPPING_PATIENCE,
-    )
-    parser.add_argument(
-        "--early-stopping-min-delta",
-        type=float,
-        default=EARLY_STOPPING_MIN_DELTA,
-    )
-    parser.add_argument("--unroll-steps", type=int, default=UNROLL_STEPS)
-    parser.add_argument(
-        "--rollout-samples-per-epoch",
-        type=int,
-        default=ROLLOUT_SAMPLES_PER_EPOCH,
-        help="Number of weighted rollout windows to sample per training epoch",
-    )
-    parser.add_argument(
-        "--feedback-mode",
-        choices=("soft", "hard", "ste"),
-        default=FEEDBACK_MODE,
-        help="How predicted frames are fed back into history during training",
-    )
-    parser.add_argument(
-        "--history-corruption",
-        action=argparse.BooleanOptionalAction,
-        default=HISTORY_CORRUPTION_DEFAULT,
-        help="Corrupt the seed history during training with mild noise and foreground dropout",
-    )
-    parser.add_argument(
-        "--history-corruption-max-strength",
-        type=float,
-        default=HISTORY_CORRUPTION_MAX_STRENGTH,
-        help="Maximum per-sequence Gaussian noise scale for seed-history corruption",
-    )
-    parser.add_argument(
-        "--history-corruption-foreground-dropout-max",
-        type=float,
-        default=HISTORY_CORRUPTION_FOREGROUND_DROPOUT_MAX,
-        help="Maximum per-foreground-pixel dropout probability for seed-history corruption",
-    )
-    parser.add_argument(
-        "--robust-history-validation",
-        action=argparse.BooleanOptionalAction,
-        default=ROBUST_HISTORY_VALIDATION_DEFAULT,
-        help="Evaluate corrupted seed histories during validation and use them for model selection",
-    )
-    parser.add_argument(
-        "--robust-validation-weight",
-        type=float,
-        default=ROBUST_VALIDATION_WEIGHT,
-        help="Weight of robust validation loss when selecting the best checkpoint",
-    )
-    parser.add_argument(
-        "--spatial-latent-channels",
-        type=int,
-        default=SPATIAL_LATENT_CHANNELS,
-        help="Channel count of the spatial latent map used by the world model",
-    )
-    parser.add_argument(
-        "--spatial-refine-blocks",
-        type=int,
-        default=SPATIAL_REFINE_BLOCKS,
-        help="Number of action-conditioned residual blocks in the spatial latent model",
-    )
-    parser.add_argument(
-        "--spatial-dynamics-path",
-        default=None,
-        help="Optional path to a pre-trained spatial dynamics checkpoint to resume from",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="./models",
-        help="Directory to save checkpoints",
-    )
-    parser.add_argument(
-        "--model-compile",
-        action=argparse.BooleanOptionalAction,
-        default=MODEL_COMPILE_DEFAULT,
-        help="Enable torch.compile when running on CUDA",
-    )
-    return parser.parse_args()
+def positive(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be positive")
+    return number
 
 
-def main():
-    load_dotenv()
-
-    args = parse_args()
-    args.model_family = "spatial"
-    args.history_length = infer_history_length(args.dataset, args.history_length)
-    if args.image_size is not None:
-        args.image_width = args.image_size
-        args.image_height = args.image_size
-
-    if args.history_length < 1:
-        raise ValueError("history-length must be at least 1")
-    if args.unroll_steps < 1:
-        raise ValueError("unroll-steps must be at least 1")
-
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    game_config = infer_game_config(dataset_id=args.dataset, game=args.game)
-    print(f"Game profile: {game_config.name}")
-    print(f"Dataset: {args.dataset}")
-    print(f"Frame size: {args.image_width}x{args.image_height}")
-    print(f"History length: {args.history_length}")
-    print(f"Unroll steps: {args.unroll_steps}")
-    print(f"Feedback mode: {args.feedback_mode}")
-    print(f"History corruption: {args.history_corruption}")
-    print(f"History corruption max strength: {args.history_corruption_max_strength}")
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dataset", default=DEFAULT_DATASET, help="Hub ID or local snapshot folder"
+    )
+    parser.add_argument("--revision", help="Hub revision; the default dataset uses a pinned commit")
+    parser.add_argument("--output", type=Path, default=Path("runs/baseline"))
+    parser.add_argument("--history", type=positive, default=DEFAULT_HISTORY)
+    parser.add_argument("--width", type=positive, default=32)
+    parser.add_argument("--epochs", type=positive, default=10)
+    parser.add_argument("--batch-size", type=positive, default=32)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
+    parser.add_argument("--threads", type=positive, help="Optional PyTorch CPU thread limit")
+    parser.add_argument("--seed", type=int, default=47)
+    parser.add_argument("--workers", type=int, default=0, help="Parallel image-loader processes")
+    parser.add_argument("--precision", choices=["fp32", "bf16"], default="fp32")
+    parser.add_argument(
+        "--checkpoint-seconds",
+        type=positive,
+        default=60,
+        help="Interval for atomic latest.pt inference snapshots",
+    )
+    parser.add_argument("--train-split", default="train")
+    parser.add_argument("--eval-split", default="heldout")
+    parser.add_argument(
+        "--limit-episodes", type=positive, help="First N episodes per split for smokes"
+    )
+    parser.add_argument("--train-batches", type=positive, help="Optional per-epoch smoke limit")
+    parser.add_argument("--eval-batches", type=positive, help="Optional evaluation smoke limit")
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
+        parser.error("--learning-rate must be finite and positive")
+    if args.train_split == args.eval_split:
+        parser.error("Training and evaluation splits must differ")
+    if args.output.exists() and any(args.output.iterdir()):
+        parser.error("Output directory must be empty; choose a new run directory")
+    if args.workers < 0:
+        parser.error("--workers must be nonnegative")
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if args.threads:
+        torch.set_num_threads(args.threads)
+    device = device_for(args.device)
+    if args.precision == "bf16" and (device.type != "cuda" or not torch.cuda.is_bf16_supported()):
+        parser.error("--precision bf16 requires a CUDA GPU with bfloat16 support")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+    print("Loading the Parquet snapshot directly from the Hub or disk (no Viewer API).", flush=True)
+    root, provenance = resolve_dataset(args.dataset, args.revision)
+    frames = Frames(root, compact=True)
+    train_episodes = read_episodes(root, args.train_split, args.limit_episodes)
+    eval_episodes = read_episodes(root, args.eval_split, args.limit_episodes)
+    if {e.episode_id for e in train_episodes} & {e.episode_id for e in eval_episodes}:
+        raise ValueError("Training and evaluation episode IDs overlap")
+    actions = sorted({int(a) for e in train_episodes for a in e.actions})
+    if not actions:
+        raise ValueError("Training requires at least one executed action")
+    training = Windows(frames, train_episodes, args.history, actions)
+    evaluation = Windows(frames, eval_episodes, args.history, actions)
+    config = {
+        "format_version": 1,
+        "history": args.history,
+        "shape": list(frames.shape),
+        "action_values": actions,
+        "width": args.width,
+        "dataset": provenance,
+        "padding": "left_zero",
+        "bootstrap": "empty_history_and_start_action",
+        "objective": "next_frame_rgb_mse",
+        "train_split": args.train_split,
+        "eval_split": args.eval_split,
+        "seed": args.seed,
+        "limit_episodes": args.limit_episodes,
+        "train_batches": args.train_batches,
+        "eval_batches": args.eval_batches,
+        "learning_rate": args.learning_rate,
+        "batch_size": args.batch_size,
+        "epochs": args.epochs,
+        "workers": args.workers,
+        "precision": args.precision,
+        "checkpoint_seconds": args.checkpoint_seconds,
+        "device": str(device),
+    }
+    if (root / "manifest.json").exists():
+        config["dataset_manifest"] = json.loads((root / "manifest.json").read_text())
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+    model = Autoencoder(args.history, len(actions), frames.shape, args.width).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    loader_options = {
+        "batch_size": args.batch_size,
+        "num_workers": args.workers,
+        "pin_memory": device.type == "cuda",
+    }
+    if args.workers:
+        # Spawn avoids forking initialized CUDA/thread pools. Workers persist across epochs.
+        loader_options.update(
+            multiprocessing_context="spawn", persistent_workers=True, prefetch_factor=2
+        )
+    train_loader = DataLoader(training, shuffle=True, **loader_options)
+    eval_loader = DataLoader(evaluation, shuffle=False, **loader_options)
     print(
-        "History corruption foreground dropout max: "
-        f"{args.history_corruption_foreground_dropout_max}"
+        json.dumps(
+            {
+                "device": str(device),
+                "history": args.history,
+                "parameters": sum(p.numel() for p in model.parameters()),
+                "training_examples": len(training),
+                "evaluation_examples": len(evaluation),
+                "actions": actions,
+            }
+        ),
+        flush=True,
     )
-    print(f"Robust history validation: {args.robust_history_validation}")
-    print(f"Robust validation weight: {args.robust_validation_weight}")
-    print(f"Spatial latent channels: {args.spatial_latent_channels}")
-    print(f"Spatial refine blocks: {args.spatial_refine_blocks}")
-    print(f"Spatial dynamics resume path: {args.spatial_dynamics_path}")
+    best = float("inf")
+    for epoch in range(1, args.epochs + 1):
 
-    train_split, val_split, dataset_stats, train_weights, action_weights = load_rollout_dataset(
-        args.dataset,
-        game_config,
-        history_length=args.history_length,
-        image_width=args.image_width,
-        image_height=args.image_height,
-        unroll_steps=args.unroll_steps,
-    )
+        def snapshot(batches, samples):
+            save_model(
+                args.output / "latest.pt",
+                model,
+                {
+                    **config,
+                    "epoch": epoch,
+                    "epoch_complete": False,
+                    "train_batches_completed": batches,
+                    "train_samples_completed": samples,
+                },
+            )
 
-    tracker = TrainingTracker()
-    tracker.init_run(args, dataset_stats)
-    tracker.log_run_metrics(dataset_stats)
-
-    result = train_spatial_model(
-        args,
-        game_config,
-        train_split,
-        val_split,
-        train_weights,
-        action_weights,
-        tracker=tracker,
-    )
-
-    summary = {
-        "spatial_dynamics/best_val_loss": result["best_val_loss"],
-        "spatial_dynamics/best_robust_val_loss": result["best_robust_val_loss"],
-        "spatial_dynamics/best_selection_loss": result["best_selection_loss"],
-        "spatial_dynamics/best_epoch": result["best_epoch"],
-        "spatial_dynamics/best_model_path": result["best_model_path"],
-    }
-    tracker.finish(summary)
-
-    print("\nTraining complete.")
-    print(f"Best model path: {result['best_model_path']}")
-    print(f"Best validation loss: {result['best_val_loss']:.6f}")
-    print(f"Best epoch: {result['best_epoch']}")
+        train = run_epoch(
+            model,
+            train_loader,
+            device,
+            optimizer,
+            args.train_batches,
+            precision=args.precision,
+            label=f"epoch={epoch}/{args.epochs}",
+            checkpoint=snapshot,
+            checkpoint_seconds=args.checkpoint_seconds,
+        )
+        snapshot(train["batches"], train["samples"])
+        validation = run_epoch(
+            model,
+            eval_loader,
+            device,
+            max_batches=args.eval_batches,
+            precision=args.precision,
+            label=f"epoch={epoch}/{args.epochs}",
+        )
+        record = {"epoch": epoch, "train": train, "validation": validation}
+        print(json.dumps(record), flush=True)
+        with (args.output / "metrics.jsonl").open("a") as stream:
+            stream.write(json.dumps(record) + "\n")
+        save_model(
+            args.output / "last.pt", model, {**config, "epoch": epoch, "epoch_complete": True}
+        )
+        if validation["mse"] < best:
+            best = validation["mse"]
+            save_model(
+                args.output / "best.pt", model, {**config, "epoch": epoch, "epoch_complete": True}
+            )
+    print(f"Checkpoint: {args.output.resolve() / 'best.pt'}", flush=True)
 
 
 if __name__ == "__main__":
