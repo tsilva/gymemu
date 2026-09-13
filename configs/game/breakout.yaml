@@ -1,0 +1,14 @@
+name: breakout
+dataset: tsilva/gradlab-breakout-trajectories
+revision: b8091d248295eb5135011dd9b943c75f4a7d50be
+train_split: train
+eval_split: heldout
+key_actions:
+  left: 2
+  right: 1
+  space: 0
+start_scene: null
+start:
+  split: heldout
+  episode_id: 5
+  frame_position: 23

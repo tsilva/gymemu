@@ -1,7 +1,7 @@
 [project]
 name = "gymemu"
 version = "0.1.0"
-description = "Train and play a plain convolutional next-frame emulator from trajectory datasets"
+description = "Train, compare, and play configurable neural emulator pipelines from trajectory datasets"
 requires-python = ">=3.11,<3.14"
 license = "MIT"
 dependencies = [
@@ -11,6 +11,7 @@ dependencies = [
     "pyarrow>=19,<24",
     "huggingface-hub>=0.34,<2",
     "pygame>=2.6,<3",
+    "hydra-core>=1.3.2,<1.4",
 ]
 
 [dependency-groups]

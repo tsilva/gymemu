@@ -1,0 +1,3 @@
+kind: frame_codec
+width: 32
+latent_channels: 32

@@ -10,7 +10,10 @@ import numpy as np
 import torch
 from PIL import Image
 
-from train import device_for, frame_stack, load_model, positive
+from gymemu.checkpoints import load_model
+from gymemu.data import frame_stack
+from gymemu.runtime import device_for, positive
+from gymemu.scenes import load_scene
 
 
 class Player:
@@ -61,19 +64,6 @@ class Player:
         return self.frame.permute(1, 2, 0).mul(255).round().byte().numpy()
 
 
-def load_scene(path: Path, config: dict) -> list[torch.Tensor]:
-    """Load chronological RGB history from a portable, non-pickled NumPy archive."""
-    with np.load(path, allow_pickle=False) as archive:
-        frames = archive["frames"]
-    if frames.dtype != np.uint8 or frames.ndim != 4:
-        raise ValueError("Scene frames must be uint8 [history, channels, height, width]")
-    if tuple(frames.shape[1:]) != tuple(config["shape"]):
-        raise ValueError("Scene dimensions differ from the model")
-    if not 1 <= len(frames) <= config["history"]:
-        raise ValueError("Scene must contain between one frame and the model history length")
-    return list(torch.from_numpy(frames.copy()).float().div_(255).unbind(0))
-
-
 def handle_event(player, event, keymap):
     import pygame
 
@@ -90,32 +80,61 @@ def handle_event(player, event, keymap):
     return True
 
 
+def default_bindings(config):
+    if "key_actions" not in config:
+        return ["left=2", "right=1", "space=0"]  # Legacy Breakout checkpoints.
+    bindings = config["key_actions"]
+    if bindings:
+        return [f"{key}={value}" for key, value in bindings.items()]
+    keys = "1234567890abcdefghijklmnopqrstuvwxyz"
+    keys = [key for key in keys if key != "r"]
+    if len(config["action_values"]) > len(keys):
+        raise ValueError("Too many actions for automatic bindings; supply --key-action")
+    return [f"{key}={value}" for key, value in zip(keys, config["action_values"])]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     parser.add_argument("--scale", type=positive, default=3)
-    parser.add_argument(
+    startup = parser.add_mutually_exclusive_group()
+    startup.add_argument(
         "--start-scene",
         type=Path,
-        help="Start from recorded RGB history in an NPZ scene; R restores it",
+        help="Recorded history; defaults to start-scene.npz beside the checkpoint",
+    )
+    startup.add_argument(
+        "--empty-start",
+        action="store_true",
+        help="Test learned initialization from an empty history instead of a recorded scene",
     )
     parser.add_argument(
         "--key-action",
         action="append",
         metavar="KEY=VALUE",
-        help="Replace Breakout defaults, e.g. --key-action left=2",
+        help="Override checkpoint key bindings, e.g. --key-action left=2",
     )
     parser.add_argument("--headless-actions", help="Comma-separated action values for a smoke")
     parser.add_argument("--output", type=Path, default=Path("logs/play.png"))
     args = parser.parse_args(argv)
+    scene_path = (
+        None
+        if args.empty_start
+        else (args.start_scene or args.checkpoint.parent / "start-scene.npz")
+    )
+    if scene_path is not None and not scene_path.is_file():
+        parser.error(
+            f"Recorded starting scene not found: {scene_path}. Place start-scene.npz beside "
+            "the checkpoint, use --start-scene PATH, or use --empty-start to test initialization."
+        )
     device = device_for(args.device)
     model, config = load_model(args.checkpoint, device)
-    initial_history = load_scene(args.start_scene, config) if args.start_scene else None
+    initial_history = load_scene(scene_path, config) if scene_path else None
     player = Player(model, config, device, initial_history)
-    if args.start_scene:
+    if scene_path:
         print(
-            f"Recorded start: {args.start_scene.resolve()} ({len(initial_history)} frames). "
+            f"Recorded start: {scene_path.resolve()} ({len(initial_history)} frames). "
             "Each action key press now predicts one transition.",
             flush=True,
         )
@@ -136,7 +155,8 @@ def main(argv=None):
     pygame.init()
     try:
         pygame.key.set_repeat()  # A held key does not create inference steps.
-        bindings = args.key_action or ["left=2", "right=1", "space=0"]
+        bindings = args.key_action or default_bindings(config)
+        print("Key bindings: " + ", ".join(bindings), flush=True)
         keymap = {}
         for binding in bindings:
             key, value = binding.rsplit("=", 1)
@@ -150,11 +170,7 @@ def main(argv=None):
         _, height, width = config["shape"]
         size = (width * args.scale, height * args.scale)
         screen = pygame.display.set_mode((size[0], size[1] + 40))
-        title = (
-            "gymemu — recorded scene"
-            if args.start_scene
-            else "gymemu — action-stepped CNN emulator"
-        )
+        title = "gymemu — recorded scene" if scene_path else "gymemu — action-stepped CNN emulator"
         pygame.display.set_caption(title)
         font = pygame.font.Font(None, 22)
         clock = pygame.time.Clock()

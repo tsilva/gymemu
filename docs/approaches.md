@@ -1,0 +1,90 @@
+# Emulator approaches
+
+An approach is a complete way to train and run an emulator. It can own one model or
+several models, and it declares an ordered list of training stages. The player only
+needs its next-frame prediction interface.
+
+## Included approaches
+
+| Config | Models | Training stages |
+| --- | --- | --- |
+| `approach=direct` | Original action-conditioned RGB CNN | Predict the next frame with uniform pixel MSE |
+| `approach=latent` | Frame codec and separate latent CNN | Reconstruct recorded frames, freeze the codec, then predict successor latents |
+
+The direct model preserves the original architecture, RGB input, action encoding,
+stride padding, and sigmoid output. `model=direct_small` inherits `direct_cnn` and
+changes only its width. Width overrides also work without creating another YAML file.
+
+The latent approach is an experimental example of multiple models and stages, not a
+claim of better emulation. Its codec compresses individual RGB frames spatially by
+eight using three convolutions, then reconstructs them with three transposed
+convolutions. A separate CNN takes the encoded history and current action and predicts
+the next latent map. The codec decodes that map back to the original RGB dimensions.
+
+Representation fitting uses only training-window targets, including episode starts.
+The second stage freezes the codec's weights and keeps it in evaluation mode. It fits
+latent MSE against encoded recorded successors. Bootstrap windows still contain zero
+RGB history and the reserved `START` action. Zero-padded RGB frames pass through the
+codec like other inputs; zero RGB does not imply a zero latent vector.
+
+Every approach is evaluated on the same float32 next-frame RGB MSE with recorded
+histories. Reconstruction MSE and latent MSE appear as stage `loss` values and must
+not be compared directly to each other. The runner selects the representation stage's
+best checkpoint by its validation reconstruction loss, and the final stage's best
+checkpoint by RGB MSE. The next stage starts from the previous stage's selected weights.
+
+## Add a model
+
+1. Implement a `torch.nn.Module` in `gymemu/models/`. Match the constructor and forward
+   contract expected by its slot. The direct predictor takes `history`, `actions`, and
+   `shape`; its forward takes RGB histories and action indices and returns one RGB frame.
+2. Add a stable name to `MODELS` in `gymemu/models/__init__.py`. Add a model YAML with
+   that `kind` and its constructor options. Runtime dimensions come from the dataset.
+3. Select the model through Hydra, for example `model=my_predictor`, and test training,
+   checkpoint round trips, original image geometry, bootstrap inputs, and playback.
+
+Codec slots require `encode(frames)`, `decode(latents, shape)`, and `latent_channels`.
+Dynamics slots accept `history`, `actions`, and `latent_channels` at construction and
+return a latent map from a latent history and action index. A model with a different
+contract belongs in a matching approach, rather than adding conditionals to playback.
+
+## Add a pipeline
+
+Implement an `Approach` in `gymemu/approaches.py`, or import it there from its own
+module, and register a stable name in `APPROACHES`.
+
+The interface consists of:
+
+- `forward(history, action)`: normalized RGB `[B, C, H, W]` from RGB history
+  `[B, history, C, H, W]` and integer action indices `[B]`. The reserved final index
+  means `START`, not a game action.
+- `loss(history, action, target)`: a scalar training loss for the active stage.
+- `prepare_stage(objective)`: set trainable weights and modes, then return the
+  parameters the runner should optimize. Override `train()` when frozen models need
+  to remain in evaluation mode after the runner toggles training.
+- `validate_stages(stages)`: reject incompatible objectives or ordering. The base
+  implementation checks declared objectives and requires a predictive final stage.
+
+Add an approach config with `kind`, named `models`, and `stages`. Every stage has a
+unique `name`, an `objective`, `epochs`, and `learning_rate`. Register all models as
+submodules so `state_dict()` includes everything needed by inference. A stage uses Adam;
+new optimizer families, sequence datasets, or non-frame objectives may require extending
+this interface. Those are not implemented through arbitrary YAML targets.
+
+Config construction and checkpoint reconstruction share the explicit registries.
+Checkpoint files contain weights and plain metadata, loaded with `weights_only=True`.
+They never import a `_target_` supplied by the checkpoint. Preserve registered names and
+constructor compatibility, or introduce a new checkpoint version when those change.
+
+## Experiment discipline
+
+Hydra can sweep approaches, widths, history lengths, seeds, and individual stage settings.
+A two-stage run with ten epochs per stage does twice as many training passes as a direct
+run with ten epochs. Compare training budgets as well as MSE. `summary.json` records
+optimizer steps, samples seen, parameter counts, and elapsed stage time; it does not
+include dataset loading time.
+
+Use held-out data for model selection and retain a separate test partition for final
+claims. Evaluation uses recorded histories; interactive playback feeds generated frames
+back into the model and can accumulate errors. Inspect rollouts before calling a model
+playable. See [history.md](history.md) for the limits of finite frame stacks.

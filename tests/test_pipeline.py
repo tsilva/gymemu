@@ -1,11 +1,8 @@
-import io
-
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import torch
-from PIL import Image
 
 from play import Player, handle_event, load_scene
 from train import (
@@ -23,39 +20,6 @@ def write(root, kind, split, rows):
     path = root / kind / split / "00000.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(rows), path)
-
-
-@pytest.fixture
-def snapshot(tmp_path):
-    root = tmp_path / "dataset"
-    frames = []
-    for frame_id in [30, 10, 70, 20, 40, 60, 50]:  # IDs deliberately differ from row offsets.
-        buffer = io.BytesIO()
-        Image.fromarray(np.full((21, 17, 3), frame_id, dtype=np.uint8)).save(
-            buffer, format="WEBP", lossless=True
-        )
-        frames.append({"frame_id": frame_id, "image": {"bytes": buffer.getvalue(), "path": None}})
-    write(root, "frames", "assets", frames)
-    for split, episodes in [
-        ("train", [(1, [10, 20, 30], [2, 0]), (3, [70, 10], [0])]),
-        ("heldout", [(2, [40, 50, 60], [0, 2])]),
-    ]:
-        metadata, steps = [], []
-        for eid, ids, actions in episodes:
-            metadata.append({"episode_id": eid, "initial_frame_id": ids[0], "length": len(actions)})
-            for step, action in enumerate(actions):
-                steps.append(
-                    {
-                        "episode_id": eid,
-                        "step": step,
-                        "source_frame_id": ids[step],
-                        "successor_frame_id": ids[step + 1],
-                        "native_action_json": str(action),
-                    }
-                )
-        write(root, "episodes", split, metadata)
-        write(root, "transitions", split, list(reversed(steps)))
-    return root
 
 
 def test_windows_keep_empty_start_actions_and_boundaries(snapshot):
@@ -216,7 +180,8 @@ def test_training_split_overlap_rejected(snapshot, tmp_path):
         main(["--dataset", str(snapshot), "--output", str(tmp_path / "bad"), "--device", "cpu"])
 
 
-def test_pygame_loop_waits_for_actions(monkeypatch, tmp_path):
+@pytest.mark.parametrize("startup", ["default", "explicit", "empty"])
+def test_pygame_loop_waits_for_actions(monkeypatch, tmp_path, startup):
     monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
     monkeypatch.setenv("SDL_AUDIODRIVER", "dummy")
     import pygame
@@ -241,8 +206,25 @@ def test_pygame_loop_waits_for_actions(monkeypatch, tmp_path):
     monkeypatch.setattr(pygame.event, "get", lambda: next(batches))
     calls_per_refresh = []
     monkeypatch.setattr(pygame.display, "flip", lambda: calls_per_refresh.append(len(spy.calls)))
-    play.main([str(tmp_path / "unused.pt"), "--device", "cpu", "--scale", "1"])
+    argv = [str(tmp_path / "unused.pt"), "--device", "cpu", "--scale", "1"]
+    if startup == "empty":
+        argv += ["--empty-start"]
+    else:
+        scene = tmp_path / ("start-scene.npz" if startup == "default" else "alternate.npz")
+        np.savez_compressed(scene, frames=np.full((2, 3, 21, 17), 50, np.uint8))
+        if startup == "explicit":
+            argv += ["--start-scene", str(scene)]
+    other_directory = tmp_path / "another-cwd"
+    other_directory.mkdir()
+    monkeypatch.chdir(other_directory)  # Default scene is relative to the checkpoint, not CWD.
+    play.main(argv)
     assert calls_per_refresh == [0, 1, 1, 2, 2]
+    first_history, first_action = spy.calls[0]
+    if startup == "empty":
+        assert first_action.item() == 3 and not first_history.any()
+    else:
+        assert first_action.item() == 0  # First Space press executes the game action.
+        assert torch.equal(first_history[0, -2:], torch.full((2, 3, 21, 17), 50 / 255))
 
 
 def test_compact_windows_preserve_every_pixel_action_and_bootstrap(snapshot):
@@ -294,3 +276,12 @@ def test_recorded_scene_rejects_invalid_arrays(tmp_path, shape, dtype):
     np.savez_compressed(path, frames=np.zeros(shape, dtype=dtype))
     with pytest.raises(ValueError, match="Scene"):
         load_scene(path, {"shape": [3, 21, 17], "history": 4})
+
+
+def test_missing_default_scene_does_not_fall_back_to_empty_start(tmp_path, capsys):
+    import play
+
+    with pytest.raises(SystemExit) as error:
+        play.main([str(tmp_path / "checkpoint.pt")])
+    assert error.value.code == 2
+    assert "Recorded starting scene not found" in capsys.readouterr().err

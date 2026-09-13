@@ -1,106 +1,167 @@
 # Training guide
 
-See the [README](../README.md) for setup and player controls.
+See the [README](../README.md) for setup, playback, and comparison commands.
 
-## Training and checkpoints
+## Hierarchical configuration
 
-```bash
-uv run --frozen python train.py --output runs/breakout-001
+[Hydra](https://hydra.cc/docs/intro/) composes YAML defaults and command-line overrides.
+`configs/config.yaml` selects the defaults, and `experiment` presets can override any
+layer. `hydra.job.chdir` is false, so relative dataset and scene paths remain relative
+to the directory where you launch the command.
+
+| Group | Controls |
+| --- | --- |
+| `game` | Dataset, revision, splits, bindings, and recorded scene |
+| `model` | Direct predictor or latent codec architecture and dimensions |
+| `approach` | Named models and ordered stages with objectives, epochs, and learning rates |
+| `trainer` | Batch size, runtime device, precision, workers, and smoke limits |
+| `experiment` | Reusable overrides across groups, such as smoke or CUDA settings |
+
+Top-level `history`, `seed`, `name`, and `output` apply to the whole experiment.
+The latent approach selects the frame codec model group automatically. A command-line
+`model=...` selection overrides that choice and must satisfy the codec interface.
+Configs do not download data until training begins. Use `--cfg job --resolve` to inspect
+a composition, or `--info defaults-tree` to inspect inheritance.
+
+For example, a custom experiment can inherit CUDA settings:
+
+```yaml
+# configs/experiment/my_run.yaml
+# @package _global_
+defaults:
+  - cuda
+  - _self_
+history: 4
+trainer:
+  epochs: 3
+  batch_size: 32
 ```
 
-The default dataset is
-[`tsilva/gradlab-breakout-trajectories`](https://huggingface.co/datasets/tsilva/gradlab-breakout-trajectories),
-pinned to commit `b8091d248295eb5135011dd9b943c75f4a7d50be`. It has 1,440,267 training
-transitions and 359,075 held-out transitions. Downloading the Parquet files directly
-does not depend on Hugging Face's Dataset Viewer jobs being healthy.
-
-Defaults: 8 history frames, 32 base channels, batch size 32, Adam at 0.001, 10 epochs,
-and CUDA, MPS, or CPU selected in that order. `--device` overrides device selection.
-For an RTX 4090 with enough CPU/RAM for six loader workers, start with:
+Select it with `experiment=my_run`. Model configs can inherit another model in the
+same way; `configs/model/direct_small.yaml` is a working example.
+Hydra also supports external config search directories through `--config-dir`.
 
 ```bash
-uv run --frozen python train.py --output runs/cuda-001 --device cuda \
-  --precision bf16 --workers 6 --threads 2 --batch-size 64 --epochs 1
+uv run python train.py model.width=16 trainer.learning_rate=0.0003
+uv run python train.py --multirun model.width=16,32 history=4,8 seed=47,48
 ```
 
-This runs one full training epoch and the full held-out split. Batch size 64 gives
-22,513 optimizer updates over 1,440,781 examples, including episode starts. Learning
-rate remains 0.001. Use `--epochs 10` for the original ten-pass budget.
+Multiruns execute sequentially with Hydra's default local launcher. Use
+`hydra.sweep.dir=runs/my-sweep` to select their parent directory. Do not set `output`
+during a sweep: a fixed directory would collide, and the runner rejects it. Each job
+gets its own numbered directory, config, metrics, and checkpoints. Existing run
+artifacts are never overwritten.
 
-CUDA loading uses pinned memory and nonblocking transfers. Images stay as exact
-`uint8` pixels through loading and transfer, then normalize on the GPU. `--workers`
-starts persistent image-decoding processes; `--threads` controls the main process's
-PyTorch CPU threads, not the worker count or GPU parallelism. Worker processes use
-one PyTorch thread each. CUDA convolution autotuning is enabled.
+The old `--dataset`, `--output`, and other argparse training flags remain supported
+for the direct baseline. Use the Hydra `key=value` interface for new experiments;
+do not mix the two syntaxes. The Python interface is `compose_config(overrides)` from
+`gymemu.config` followed by `train(cfg)` from `gymemu.engine`, with an explicit output.
 
-`--precision bf16` uses [PyTorch autocast](https://docs.pytorch.org/docs/2.10/amp.html)
-for convolution computation with float32 MSE and float32 model/optimizer weights.
-It requires a CUDA GPU supporting bfloat16. It changes numerical precision, not the
-model or objective; bitwise agreement with float32 training is not expected.
-The default remains float32 for CPU/MPS compatibility. Checkpoints play locally
-in float32 without CUDA.
-An existing nonempty output directory is rejected so experiments are not overwritten.
+## Defaults and precision
 
-The model has three stride-2 convolutions and three transposed convolutions, ReLUs,
-and a sigmoid RGB output. The action is one-hot encoded and broadcast as input channels.
-The objective is ordinary mean squared error over every RGB pixel in `[0, 1]`.
-Training uses real frame histories and one next-frame target. There are no skip/warp
-connections, residual frame predictions, auxiliary labels, weighted losses, recurrent
-state, diffusion, or multi-step training objectives.
+The direct baseline uses 8 history frames, width 32, batch size 32, Adam at 0.001, and
+10 epochs. The latent example uses 10 epochs for each of its two stages. Stage epochs
+and learning rates inherit trainer values unless explicitly overridden.
 
-Images retain their original dimensions and colors. This dataset already has its top
-17 HUD rows masked. The network pads the bottom/right to a multiple of eight internally
-and crops that padding from its output; there is no dataset resizing or binarization.
+Device selection tries CUDA, MPS, then CPU. `experiment=cuda` sets CUDA, bfloat16,
+six loader workers, two main-process CPU threads, batch size 64, and one epoch per stage.
+Tune these settings for available resources; they are not benchmark guarantees.
 
-Outputs:
+CUDA loading uses pinned memory and nonblocking transfers. Workers keep image pixels
+as exact uint8 values; normalization happens on the device. Nonzero workers use spawn
+and persistent workers. `trainer.threads` limits main-process PyTorch CPU threads.
+Training bfloat16 requires CUDA support. Validation and checkpoint playback use float32,
+so reported RGB MSE has the same precision across approaches.
 
-- `config.json`: model, data revision, training settings, and capture contract.
-- `metrics.jsonl`: epoch train/evaluation pixel MSE, sample counts, batch counts, and time.
-- `best.pt`: weights from the lowest evaluation-MSE epoch.
-- `last.pt`: weights from the last completed training and evaluation epoch.
-- `latest.pt`: inference snapshot every `--checkpoint-seconds` seconds, default 60,
-  plus the end of each training pass. Its metadata records the current epoch and
-  completed training batches/samples; it has not necessarily completed evaluation.
+`experiment=smoke` bounds epochs, episodes, and batches and uses a small model on CPU.
+It still fetches the snapshot and reads the episode tables. For a truly small local
+smoke, provide a small compatible dataset with `game=custom`.
 
-Progress lines show the current epoch, completed/total batches, cumulative MSE,
-examples per second, and estimated seconds remaining in that train/evaluation pass.
-Checkpoint files are replaced atomically, so a reader sees a complete previous or
-new snapshot. An abrupt stop can lose work since the latest snapshot. These files
-allow playback but do not resume optimizer progress.
+## Run artifacts
 
-These checkpoints contain weights and plain configuration, loaded with
-`torch.load(weights_only=True)`. They are inference checkpoints; optimizer-state resume
-is not implemented. They are incompatible with previous gymemu experiments.
+| Artifact | Contents |
+| --- | --- |
+| `resolved.yaml` | Fully resolved configuration, including the absolute output path |
+| `.hydra/` | Hydra composition and override metadata for Hydra-launched runs |
+| `config.json` | Inference contract, architecture, action vocabulary, and dataset provenance |
+| `metrics.jsonl` | Stage, epoch, training loss, validation loss, RGB MSE, sample counts, and time |
+| `summary.json` | Completed-run RGB score, evaluation identity, parameter count, and training budget |
+| `start-scene.npz` | Recorded RGB history for immediate interactive playback |
+| `stages/<name>/best.pt` | Selected checkpoint for this stage, including all models |
+| `stages/<name>/last.pt` | Last completed epoch in this stage |
+| `stages/<name>/latest.pt` | Periodic stage snapshot, which may precede evaluation |
+| `best.pt`, `last.pt`, `latest.pt` | Corresponding checkpoints from the final predictive stage |
 
-For a bounded installation smoke:
+`trainer.checkpoint_seconds` defaults to 60. Checkpoint replacement is atomic. An
+interrupted run can lose work after the latest snapshot and does not get a completed
+summary. All checkpoints contain model weights and configuration, not optimizer state.
+See [approaches.md](approaches.md) for stage selection and version compatibility.
 
-```bash
-uv run --frozen python train.py --output runs/smoke --device cpu --threads 2 \
-  --epochs 1 --batch-size 4 --limit-episodes 2 --train-batches 8 --eval-batches 2
-```
-
-The smoke verifies the pipeline. Its tiny training budget does not produce a playable model.
+`compare.py` only includes runs with completed summaries. It sorts within groups with
+identical dataset identity, evaluated target sequence, RGB geometry, and metric.
+Local datasets are content-hashed once per run; Hub datasets use immutable revisions.
+Changing evaluation limits can produce a different comparison group. Changes in history
+length or model architecture do not, provided the evaluated targets stay the same.
+Comparison CSV includes parameters, steps, samples seen, and stage wall time. Match
+budgets and seeds when drawing conclusions; lower MSE alone does not show better rollouts.
 
 ## Dataset contract
 
-`--dataset` accepts a Hub dataset ID or a local snapshot directory. Other Hub IDs resolve
-the requested `--revision` (or `main`) to an immutable commit before download. The present
-adapter supports the following layout and scalar integer actions; arbitrary Hub schemas
-are not automatically inferred.
+`game.dataset` accepts a Hub ID or local snapshot directory. Hub revisions resolve to
+immutable commits before download. Breakout defaults to
+`tsilva/gradlab-breakout-trajectories` at
+`b8091d248295eb5135011dd9b943c75f4a7d50be`.
 
 | Location | Required columns |
 | --- | --- |
-| `frames/assets/*.parquet` | `frame_id`, embedded HF `image` (`bytes`, `path`) |
+| `frames/assets/*.parquet` | `frame_id`, embedded HF `image` with `bytes` and `path` |
 | `transitions/<split>/*.parquet` | `episode_id`, `step`, `source_frame_id`, `successor_frame_id`, `native_action_json` |
 | `episodes/<split>/*.parquet` | `episode_id`, `initial_frame_id`, `length` |
 
-Use `--train-split` and `--eval-split` to select episode partitions. IDs must be unique
-within their table, and training/evaluation episode IDs must be disjoint. The loader
-sorts transitions by episode and step, checks lengths and frame continuity, joins by
-frame ID, and rejects unseen evaluation actions. Shared image bytes across splits are
-storage deduplication; held-out transitions remain excluded from optimization.
+Images must be RGB with consistent dimensions. Actions must decode to scalar integers;
+the vocabulary is inferred from training episodes and evaluation cannot introduce new
+actions. Frame IDs are joined by value, never interpreted as offsets. Episodes must have
+unique IDs, contiguous steps, consistent lengths, and complete frame chains. Training and
+evaluation episode IDs must be disjoint even when smoke limits are enabled.
 
-Only encoded images, numerical trajectory arrays, and a bounded decoded-frame cache
-are kept in memory. Windows are assembled on demand. No expanded 1.6-million-frame RGB
-tensor or prebuilt history-window dataset is created.
+Every episode supplies a bootstrap example with zero history and a reserved `START`
+category meaning no game action. Later examples use preceding recorded frames in
+chronological order with zeros on the left. Histories never cross episode boundaries.
+Only encoded images, trajectory arrays, and a bounded decoded-frame cache stay in memory;
+windows are assembled on demand.
 
+A generic game config can inherit the custom contract:
+
+```yaml
+# configs/game/my_game.yaml
+defaults:
+  - custom
+  - _self_
+name: my-game
+dataset: owner/recorded-trajectories
+revision: null
+key_actions:
+  left: 10
+  right: 20
+  space: 30
+start:
+  split: train
+  episode_id: null
+  frame_position: 0
+```
+
+Replace the dataset and actions with real values. `episode_id: null` selects the first
+episode in the chosen split; `frame_position` is the chronological frame index, where
+zero is the episode's initial frame. The runner takes up to `history` frames ending at
+that position. It validates the selection rather than silently choosing another scene.
+
+The Breakout config selects held-out episode 5, frame position 23, preserving the
+previous full-brick-wall scene with the paddle and ball visible. This history is only
+exported for playback and never enters optimization. Custom games default to the first
+training episode's initial frame; choose a later position if startup animation is blank.
+`game.start_scene=/path/to/scene.npz` overrides dataset-based scene selection.
+
+Scene files are non-pickled NPZ archives with uint8 `frames` shaped
+`[history, channels, height, width]`, oldest to newest, containing one to `history`
+frames of the checkpoint's RGB geometry. Reset restores this scene. Subsequent frames
+come entirely from the model.

@@ -1,0 +1,4 @@
+defaults:
+  - direct_cnn
+  - _self_
+width: 16

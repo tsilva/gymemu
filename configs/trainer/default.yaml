@@ -1,0 +1,11 @@
+epochs: 10
+batch_size: 32
+learning_rate: 0.001
+device: auto
+threads: null
+workers: 0
+precision: fp32
+checkpoint_seconds: 60
+limit_episodes: null
+train_batches: null
+eval_batches: null

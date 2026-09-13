@@ -1,0 +1,21 @@
+defaults:
+  - game: breakout
+  - model: direct_cnn
+  - approach: direct
+  - trainer: default
+  - _self_
+  - experiment: null
+
+name: ${game.name}-${approach.kind}
+history: 8
+seed: 47
+output: null
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: runs/${name}/${now:%Y-%m-%d_%H-%M-%S-%f}
+  sweep:
+    dir: runs/sweeps/${name}/${now:%Y-%m-%d_%H-%M-%S-%f}
+    subdir: ${hydra.job.num}
