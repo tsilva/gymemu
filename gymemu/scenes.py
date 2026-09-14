@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from gymemu.data import validate_states
+
 START_STATES = Path(__file__).resolve().parents[1] / "start_states"
 
 
@@ -61,6 +63,7 @@ def save_start_state(source, name, description, config, directory=START_STATES):
         actions = (
             archive["actions"].copy() if "actions" in archive.files else np.empty(0, dtype=np.int64)
         )
+        states = archive["states"].copy() if "states" in archive.files else None
         info = json.loads(str(archive["metadata"])) if "metadata" in archive.files else {}
     info.update(
         snapshot_version=1,
@@ -72,7 +75,8 @@ def save_start_state(source, name, description, config, directory=START_STATES):
     )
     path = named_scene_path(name, config, directory)
     buffer = io.BytesIO()
-    np.savez_compressed(buffer, frames=frames, actions=actions, metadata=json.dumps(info))
+    extra = {"states": states} if states is not None else {}
+    np.savez_compressed(buffer, frames=frames, actions=actions, metadata=json.dumps(info), **extra)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("xb") as stream:  # Existing debug states are never silently replaced.
         stream.write(buffer.getvalue())
@@ -82,15 +86,18 @@ def save_start_state(source, name, description, config, directory=START_STATES):
 class SceneHistory(list):
     """List-compatible RGB history with the executed native actions between its frames."""
 
-    def __init__(self, frames, actions):
+    def __init__(self, frames, actions, states=None):
         super().__init__(frames)
         self.actions = actions
+        self.states = states
 
 
 def load_scene(path: Path, config: dict) -> SceneHistory:
     with np.load(path, allow_pickle=False) as archive:
         frames = archive["frames"]
         actions = archive["actions"] if "actions" in archive.files else None
+        states = archive["states"] if "states" in archive.files else None
+        info = json.loads(str(archive["metadata"])) if "metadata" in archive.files else {}
     if frames.dtype != np.uint8 or frames.ndim != 4:
         raise ValueError("Scene frames must be uint8 [history, channels, height, width]")
     if tuple(frames.shape[1:]) != tuple(config["shape"]):
@@ -108,8 +115,15 @@ def load_scene(path: Path, config: dict) -> SceneHistory:
         raise ValueError("Scene action history does not match its frame history")
     if any(int(action) not in config["action_values"] for action in actions):
         raise ValueError("Scene contains an unknown executed action")
+    fields = config.get("state_fields", [])
+    if fields:
+        if info.get("state_fields") != list(fields):
+            raise ValueError("Scene lacks matching state_fields metadata")
+        validate_states(states, len(frames), fields)
     return SceneHistory(
-        torch.from_numpy(frames.copy()).float().div_(255).unbind(0), actions.tolist()
+        torch.from_numpy(frames.copy()).float().div_(255).unbind(0),
+        actions.tolist(),
+        torch.from_numpy(states.copy()).float() if fields else None,
     )
 
 
@@ -146,4 +160,11 @@ def write_scene(output, game, metadata, frames, splits):
     # Native actions linking each pair of recorded history frames; no future action.
     actions = episode.actions[position + 1 - len(ids) : position]
     info["action_order"] = "between_frames_oldest_to_newest"
-    np.savez_compressed(output, frames=pixels, actions=actions, metadata=json.dumps(info))
+    extra = {}
+    if metadata.get("state_fields"):
+        state_history = episode.states[position + 1 - len(ids) : position + 1]
+        validate_states(state_history, len(ids), metadata["state_fields"])
+        extra["states"] = state_history
+        info["state_fields"] = metadata["state_fields"]
+        info["state_order"] = "frame_aligned_oldest_to_newest_with_availability"
+    np.savez_compressed(output, frames=pixels, actions=actions, metadata=json.dumps(info), **extra)

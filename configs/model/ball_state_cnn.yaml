@@ -1,0 +1,3 @@
+kind: ball_state_cnn
+width: 32
+action_history: ${history}

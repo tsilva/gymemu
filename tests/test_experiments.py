@@ -21,6 +21,8 @@ REPO = Path(__file__).resolve().parents[1]
 def config_for(snapshot, output, approach="direct"):
     cfg = compose_config(["game=custom", f"approach={approach}", "experiment=smoke"])
     cfg.game.dataset = str(snapshot)
+    cfg.wandb.mode = "disabled"
+    cfg.r2.enabled = False
     cfg.output = str(output)
     return cfg
 
@@ -135,6 +137,8 @@ def test_hydra_multirun_from_another_directory(snapshot, tmp_path):
         f'game.dataset="{snapshot}"',
         "experiment=smoke",
         "approach=direct,latent",
+        "wandb.mode=disabled",
+        "r2.enabled=false",
         f'hydra.sweep.dir="{destination}"',
     ]
     result = subprocess.run(

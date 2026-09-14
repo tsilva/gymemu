@@ -40,6 +40,8 @@ def test_successful_breakout_recipe_and_overrides():
 def test_run_recipe_replays_weights_and_tracks_source(snapshot, tmp_path, kind):
     cfg = compose_config([f"recipe={kind}", "game=custom", "experiment=smoke"])
     cfg.game.dataset = str(snapshot)
+    cfg.wandb.mode = "disabled"
+    cfg.r2.enabled = False
     cfg.output = str(tmp_path / "first")
     first = train(cfg)
     replay = compose_config([f"output={tmp_path / 'second'}"], recipe=first / "recipe.yaml")
@@ -85,6 +87,8 @@ def test_recipe_freezes_environment_values_and_supports_external_cli(
     cfg.name = "GYMEMU_RECIPE_TEST_SEED"
     cfg.trainer.threads = "${oc.decode:${oc.env:${name}}}"
     cfg.game.dataset = str(snapshot)
+    cfg.wandb.mode = "disabled"
+    cfg.r2.enabled = False
     cfg.output = str(tmp_path / "old-output")
     filename = tmp_path / "external configs" / "saved.yaml"
     filename.parent.mkdir()
@@ -132,6 +136,8 @@ def test_hub_revision_pinned_in_run_recipe(snapshot, tmp_path, monkeypatch):
     )
     cfg = compose_config(["game=custom", "experiment=smoke"])
     cfg.game.dataset, cfg.game.revision = "example/game", "main"
+    cfg.wandb.mode = "disabled"
+    cfg.r2.enabled = False
     cfg.output = str(tmp_path / "run")
     output = train(cfg)
     assert compose_config(recipe=output / "recipe.yaml").game.revision == "a" * 40
@@ -161,6 +167,8 @@ def test_replay_rejects_changed_dataset(snapshot, tmp_path):
 
     cfg = compose_config(["game=custom", "experiment=smoke"])
     cfg.game.dataset = str(snapshot)
+    cfg.wandb.mode = "disabled"
+    cfg.r2.enabled = False
     cfg.output = str(tmp_path / "first")
     output = train(cfg)
     shard = next((snapshot / "frames/assets").glob("*.parquet"))

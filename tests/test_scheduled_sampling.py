@@ -208,6 +208,8 @@ def test_training_replay_checkpoint_and_player(snapshot, tmp_path, cached, recip
     if recipe.endswith("_fast"):
         cfg.approach.options.selective_threshold = 1.0
     cfg.game.dataset = str(snapshot)
+    cfg.wandb.mode = "disabled"
+    cfg.r2.enabled = False
     cfg.output = str(tmp_path / "run")
     if cached:
         cfg.trainer.loader = "cached"

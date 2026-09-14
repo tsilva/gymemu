@@ -10,6 +10,7 @@ needs its next-frame prediction interface.
 | --- | --- | --- |
 | `approach=direct` | Original action-conditioned RGB CNN | Predict the next frame with uniform pixel MSE |
 | `approach=direct_actions` | RGB CNN with chronological action-history planes | Predict the next frame with uniform pixel MSE |
+| `approach=ball_state` | Shared CNN with RGB and normalized ball-coordinate heads | RGB MSE plus masked coordinate MSE |
 | `approach=scheduled_actions` | Same action-history RGB CNN | Uniform RGB MSE with progressively sampled generated context |
 | `approach=latent` | Frame codec and separate latent CNN | Reconstruct recorded frames, freeze the codec, then predict successor latents |
 
@@ -93,6 +94,24 @@ mark steps before the episode begins, distinct from a valid all-START bootstrap.
 The approach must mask those nonexistent steps and preserve zero padding. Held-out
 evaluation and inference retain the ordinary single-target input contract. Both
 loaders implement these shapes without knowing the approach name.
+
+An approach can declare `state_fields` to request the Gradlab scalar-label adapter.
+The loader then appends `state_history` and `state_target` to each RGB/action/target
+batch. Their shapes are `[B, input_history, D+1]` and `[B, D+1]`, where `D` is the
+number of fields and the final column is availability. These tensors remain
+normalized float32; only RGB uint8 tensors are divided by 255. `loss` and `evaluate`
+receive these extra arguments. `evaluate` must still return a scalar stage loss
+and an RGB prediction for the shared comparison metric.
+
+For inference, state-aware approaches implement
+`predict_step(history, action, state_history) -> (rgb, next_state)`, with next state
+shaped `[B, D+1]`. The player maintains and resets both histories through this
+declared contract, without dispatching on approach names. State fields are checked
+against the reconstructed model at checkpoint load. Scenes must preserve the field
+order and one state row per frame. The built-in `ball_state` approach predicts x/y
+and returns availability one for generated states. The current Gradlab adapter
+requires finite scalar normalized labels and masks only the unlabeled initial frame;
+other encodings or missing successor labels need an explicit adapter change.
 
 `scheduled_actions` builds replacements in order with detached predictions and samples
 whole frames independently per example and step. Its probability buffer is excluded

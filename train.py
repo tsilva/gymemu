@@ -42,6 +42,10 @@ def main(argv=None):
         "--limit-episodes",
         "--train-batches",
         "--eval-batches",
+        "--env-id",
+        "--wandb-mode",
+        "--r2",
+        "--no-r2",
     }
     if any(arg.split("=", 1)[0] in legacy_flags for arg in arguments):
         return legacy_main(arguments)

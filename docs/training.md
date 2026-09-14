@@ -2,6 +2,13 @@
 
 See the [README](../README.md) for setup, playback, and comparison commands.
 
+For joint RGB and ball-coordinate prediction, run
+`uv run python train.py recipe=breakout_ball`. This uses the action-history recipe's
+data and training budget, with frame-aligned normalized x/y inputs and successor
+coordinate targets. The loss adds masked coordinate MSE with weight `0.01`; tune it
+using `approach.options.coordinate_loss_weight`. The comparison metric stays RGB
+MSE. See [alignment, initialization, and playback details](recipes.md#ball-coordinate-experiment).
+
 ## Hierarchical configuration
 
 [Hydra](https://hydra.cc/docs/intro/) composes YAML defaults and command-line overrides.
@@ -11,7 +18,7 @@ to the directory where you launch the command.
 
 | Group | Controls |
 | --- | --- |
-| `game` | Dataset, revision, splits, bindings, and recorded scene |
+| `game` | Canonical environment ID, dataset, revision, splits, bindings, and recorded scene |
 | `model` | Direct predictor or latent codec architecture and dimensions |
 | `approach` | Named models and ordered stages with objectives, epochs, and learning rates |
 | `trainer` | Batch size, runtime device, precision, workers, and smoke limits |
@@ -100,6 +107,137 @@ these execution choices. Floating-point rounding and random-number streams can d
 from the reference; compare rollout quality after training. See
 [performance measurements](performance.md#scheduled-feedback-optimization).
 
+## Weights & Biases
+
+W&B tracking defaults to `wandb.mode=online`. Set `wandb.mode=disabled` to turn it off.
+The disabled path
+does not initialize or import the SDK, require credentials, or create W&B files.
+Authenticate once, then train any approach or recipe with the Hydra interface:
+
+```bash
+uv run wandb login
+uv run python train.py recipe=breakout_cnn
+
+# Select an existing W&B team and label related runs
+uv run python train.py wandb.entity=my-team wandb.group=history-study
+
+# Save W&B logs locally without credentials or an upload
+uv run python train.py experiment=smoke wandb.mode=offline r2.enabled=false output=runs/tracked-smoke
+```
+
+Each experiment creates one W&B run across all training stages. Hydra multiruns
+create a separate run for each job. `wandb.name` defaults to the experiment name;
+`wandb.tags=[baseline,history8]` adds labels. Project names are derived from
+`game.env_id`, the environment's canonical ID, with a `gymemu-` prefix. Both Breakout
+dataset configs use `Breakout-Atari2600-v0`, producing
+`gymemu-Breakout-Atari2600-v0`. Custom games must supply `game.env_id` when tracking
+is enabled. The short `game.name` and dataset repository name do not determine the
+project. W&B-forbidden characters `/`, `\`, `#`, `?`, `%`, and `:` become hyphens;
+case and version suffixes are preserved.
+
+Legacy argparse commands also default to online tracking. Use `--wandb-mode disabled`
+or `--wandb-mode offline` to override it and `--env-id MyGame-v0` for a custom dataset.
+Standalone recipes retain their saved mode; recipes created before tracking support
+remain disabled unless a `wandb` configuration is added.
+
+After each completed epoch, the run logs:
+
+- `stages/<name>/train/*` and `stages/<name>/validation/*`: losses, samples, batches,
+  elapsed seconds, throughput, and validation MSE, kept separate for each stage.
+- `stages/<name>/epoch`, `stages/<name>/learning_rate`, and
+  `stages/<name>/curriculum/*`, including scheduled feedback probability when present.
+- `optimizer_steps` and `train_samples_seen`, accumulated across all stages.
+- `evaluation/next_frame_rgb_mse` from the final predictive stage, with its minimum
+  tracked for comparison. Representation-stage reconstruction scores do not enter
+  this metric.
+
+Charts use cumulative optimizer steps, so the axis continues when stage epochs restart.
+Validation retains the shared float32 held-out evaluation path. The run configuration
+includes resolved settings, pinned dataset identity, evaluation identity, parameter
+count, and recipe hash. The W&B summary mirrors `summary.json`, including `best_mse`
+and training budget. Logging happens once per epoch and adds no per-batch device
+synchronization. W&B also collects its standard system metrics.
+
+W&B files live in `<output>/wandb/`. To upload an offline run later, use
+`uv run wandb sync <output>/wandb/offline-run-...` with its actual directory name.
+Local metrics and checkpoints are still saved. Model and dataset artifacts are not
+uploaded to W&B; checkpoint storage in R2 is configured separately below.
+Configure W&B credentials through `wandb login` or
+`WANDB_API_KEY`, never in a recipe. Enabled tracking errors are surfaced; a training
+exception or interruption finishes the W&B run with a nonzero exit code.
+See the [W&B SDK reference](https://docs.wandb.ai/models/ref/python/functions/init)
+for authentication and run settings.
+
+## R2 checkpoint storage
+
+Training uploads run artifacts to the `gymemu-models` R2 bucket by default,
+independently of the W&B mode. This is a separate bucket from Gradlab's model storage.
+`r2.enabled=false` disables all R2 access. Old standalone recipes without an `r2`
+section retain local-only storage.
+
+Provision the bucket once in the same Cloudflare account you use for Gradlab:
+
+1. In **R2 object storage**, create a bucket named `gymemu-models`. Keep it private.
+2. Create an R2 API token with **Object Read & Write** permission scoped to that bucket.
+3. Export its account endpoint, access key ID, and secret access key in the training
+   process as `GYMEMU_MODELS_R2_ENDPOINT_URL`, `GYMEMU_MODELS_R2_ACCESS_KEY_ID`, and
+   `GYMEMU_MODELS_R2_SECRET_ACCESS_KEY`.
+
+See Cloudflare's [bucket creation](https://developers.cloudflare.com/r2/buckets/create-buckets/)
+and [R2 token instructions](https://developers.cloudflare.com/r2/api/tokens/).
+The trainer checks access to the existing bucket before loading data. It does not
+create buckets or use Gradlab's credentials. Credentials stay outside Hydra configs,
+checkpoints, source archives, and W&B. Store them in your secret manager or process
+environment. The [.env.example](../.env.example) file lists the required names;
+environment files are not loaded automatically.
+
+```bash
+# With W&B authentication and the three R2 variables already configured
+uv run python train.py output=runs/breakout-stored
+
+# Choose another dedicated bucket or object prefix
+uv run python train.py r2.bucket=gymemu-models r2.prefix=experiments
+
+# Local-only smoke with no W&B or R2 credentials
+uv run python train.py experiment=smoke wandb.mode=disabled r2.enabled=false
+
+# Retry publication using an existing run's saved R2 destination
+uv run python upload_checkpoints.py runs/breakout-stored
+```
+
+Legacy argparse commands accept `--no-r2` to disable uploads and `--env-id` for a
+custom environment's canonical ID. Use Hydra for bucket and prefix overrides.
+
+Each run uploads under `runs/<canonical-env-id>/<unique-run-id>/` by default.
+Environment characters outside letters, digits, dots, underscores, and hyphens become
+hyphens in object prefixes. The upload receipt preserves the original environment ID.
+The files include root and stage `best.pt`, `last.pt`, and `latest.pt`, the recorded
+`start-scene.npz`, resolved config, recipe, source archive, reproduction receipt,
+metrics, and completed-run summary. Dataset shards and W&B files are excluded.
+
+Files are stored at `objects/<sha256>` within the run prefix. Identical aliases share
+one object. After every file's upload succeeds and its remote size and SHA-256 metadata
+match, `manifest.json` maps local relative paths to their immutable object keys,
+hashes, and sizes. Previous successful manifests remain in `manifests/`, so later
+checkpoint saves do not erase earlier published versions. Downloads should use the
+manifest's paths and verify the recorded hashes; restore `start-scene.npz` beside the
+root checkpoint before running the existing player.
+
+Uploads run synchronously after periodic checkpoints and completed epochs. Network
+transfer can extend save time. SDK requests have bounded retries and timeouts;
+transient upload failures are reported and retried at the next save. A failed upload
+leaves the previous remote manifest intact. The local `r2.json` receipt records the
+destination and pending status. The retry command reuses that run prefix and uploads
+the currently available local artifacts. A superseded local checkpoint that never
+uploaded successfully is not retained separately.
+
+At completion, the trainer requires a successful final upload before marking the W&B
+run successful. A final upload failure raises an error while preserving the local
+training results for retry. `summary.json` and the W&B summary include
+`r2_manifest_uri` and `r2_run_id`. A later retry updates R2 and its local receipt; it
+does not reopen or backfill a finished W&B run. These are inference checkpoints, with
+the same playback and optimizer-resume limits as local files.
+
 ## Run artifacts
 
 | Artifact | Contents |
@@ -112,6 +250,8 @@ from the reference; compare rollout quality after training. See
 | `config.json` | Inference contract, architecture, action vocabulary, and dataset provenance |
 | `metrics.jsonl` | Stage, epoch, curriculum, training loss, validation loss, RGB MSE, sample counts, and time |
 | `summary.json` | Completed-run RGB score, evaluation identity, parameter count, and training budget |
+| `wandb/` | Local W&B run files when online or offline tracking is enabled |
+| `r2.json` | R2 run identity, destination, acknowledged objects, and upload status |
 | `start-scene.npz` | Recorded RGB history and the executed actions between frames for playback |
 | `stages/<name>/best.pt` | Selected checkpoint for this stage, including all models |
 | `stages/<name>/last.pt` | Last completed epoch in this stage |
@@ -175,6 +315,7 @@ defaults:
   - custom
   - _self_
 name: my-game
+env_id: MyGame-v0
 dataset: owner/recorded-trajectories
 revision: null
 key_actions:

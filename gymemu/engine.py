@@ -26,6 +26,8 @@ from gymemu.optimizers import build_optimizer, validate_optimizer
 from gymemu.recipes import save_reproduction
 from gymemu.runtime import device_for
 from gymemu.scenes import write_scene
+from gymemu.storage import CheckpointStore, validate_storage
+from gymemu.tracking import track_run, validate_tracking
 
 
 def _positive(value, name):
@@ -34,6 +36,8 @@ def _positive(value, name):
 
 
 def validate(config):
+    validate_tracking(config)
+    validate_storage(config)
     _positive(config["history"], "history")
     validate_optimizer(config["optimizer"])
     trainer = config["trainer"]
@@ -96,14 +100,14 @@ def device_batches(loader, count, device, prefetch=False):
         yield batch
 
 
-def batch_loss(model, history, action, target, compact, training):
+def batch_loss(model, history, action, target, compact, training, *auxiliary):
     history, target = history.float(), target.float()
     if compact:
         history = history / 255
         target = target / 255
     if training:
-        return model.loss(history, action, target), target.new_zeros(())
-    loss, prediction = model.evaluate(history, action, target)
+        return model.loss(history, action, target, *auxiliary), target.new_zeros(())
+    loss, prediction = model.evaluate(history, action, target, *auxiliary)
     return loss, F.mse_loss(prediction.float(), target)
 
 
@@ -128,7 +132,7 @@ def run_epoch(
     total_mse = torch.zeros_like(total_loss)
     started = last_checkpoint = time.monotonic()
     count = min(len(loader), max_batches) if max_batches else len(loader)
-    for history, action, target in device_batches(loader, count, device, prefetch):
+    for history, action, target, *auxiliary in device_batches(loader, count, device, prefetch):
         with torch.set_grad_enabled(optimizer is not None):
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
                 loss, mse = loss_function(
@@ -138,6 +142,7 @@ def run_epoch(
                     target,
                     loader.dataset.frames.compact,
                     optimizer is not None,
+                    *auxiliary,
                 )
             if sync_batches == 1 and not torch.isfinite(loss):
                 raise ValueError("Non-finite training or validation loss")
@@ -243,6 +248,7 @@ def train(cfg):
     config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
     validate(config)
     output = _output_directory(config)
+    storage = CheckpointStore(config, output)
     trainer, game, spec = config["trainer"], config["game"], config["approach"]
     random.seed(config["seed"])
     np.random.seed(config["seed"])
@@ -282,7 +288,14 @@ def train(cfg):
     model = build_approach(spec, config["history"], len(actions), frames.shape).to(device)
     model.validate_stages(spec["stages"])
     model.configure_training(compile=trainer["compile"])
-    input_options = {"action_history": model.action_history}
+    if model.state_fields:
+        # The approach declares its input contract; the data adapter owns label alignment.
+        splits = {
+            split: read_episodes(root, split, state_fields=model.state_fields) for split in splits
+        }
+        train_episodes = splits[game["train_split"]][: trainer["limit_episodes"]]
+        eval_episodes = splits[game["eval_split"]][: trainer["limit_episodes"]]
+    input_options = {"action_history": model.action_history, "state_fields": model.state_fields}
     training = Windows(
         frames,
         train_episodes,
@@ -307,6 +320,7 @@ def train(cfg):
         "shape": list(frames.shape),
         "action_values": actions,
         "action_history": model.action_history,
+        "state_fields": list(model.state_fields),
         "action_padding": "start_token",
         "action_order": "oldest_to_current",
         "approach": spec,
@@ -358,111 +372,132 @@ def train(cfg):
             }
         )
     )
-    best_rgb = None
-    total_train_samples = total_updates = 0
-    started = time.monotonic()
-    for stage_index, stage in enumerate(spec["stages"]):
-        final = stage_index == len(spec["stages"]) - 1
-        stage_dir = output / "stages" / stage["name"]
-        stage_dir.mkdir(parents=True)
-        optimizer = build_optimizer(
-            model.prepare_stage(stage["objective"]), config["optimizer"], stage["learning_rate"]
-        )
-        best = float("inf")
-        for epoch in range(1, stage["epochs"] + 1):
-            curriculum = model.begin_epoch(epoch)
-            progress = {
-                **metadata,
-                "stage": stage["name"],
-                "epoch": epoch,
-                "curriculum": curriculum,
-            }
-
-            def snapshot(batches, samples):
-                info = {
-                    **progress,
-                    "epoch_complete": False,
-                    "train_batches_completed": batches,
-                    "train_samples_completed": samples,
+    with track_run(
+        config,
+        output,
+        evaluation=evaluation_contract,
+        parameters=parameters,
+        training_examples=len(training),
+        recipe_sha256=recipe_sha256,
+    ) as tracker:
+        storage.sync()
+        best_rgb = None
+        total_train_samples = total_updates = 0
+        started = time.monotonic()
+        for stage_index, stage in enumerate(spec["stages"]):
+            final = stage_index == len(spec["stages"]) - 1
+            stage_dir = output / "stages" / stage["name"]
+            stage_dir.mkdir(parents=True)
+            optimizer = build_optimizer(
+                model.prepare_stage(stage["objective"]), config["optimizer"], stage["learning_rate"]
+            )
+            best = float("inf")
+            for epoch in range(1, stage["epochs"] + 1):
+                curriculum = model.begin_epoch(epoch)
+                progress = {
+                    **metadata,
+                    "stage": stage["name"],
+                    "epoch": epoch,
+                    "curriculum": curriculum,
                 }
-                save_model(stage_dir / "latest.pt", model, info)
-                if final:
-                    save_model(output / "latest.pt", model, info)
 
-            result = run_epoch(
-                model,
-                train_loader,
-                device,
-                optimizer,
-                trainer["train_batches"],
-                loss_function=loss_function,
-                prefetch=trainer["prefetch"],
-                sync_batches=trainer["sync_batches"],
-                precision=trainer["precision"],
-                label=f"{stage['name']} epoch={epoch}",
-                checkpoint=snapshot,
-                checkpoint_seconds=trainer["checkpoint_seconds"],
-            )
-            total_train_samples += result["samples"]
-            total_updates += result["batches"]
-            snapshot(result["batches"], result["samples"])
-            validation = run_epoch(
-                model,
-                eval_loader,
-                device,
-                max_batches=trainer["eval_batches"],
-                loss_function=loss_function,
-                prefetch=trainer["prefetch"],
-                sync_batches=trainer["sync_batches"],
-                precision="fp32",
-                label=f"{stage['name']} epoch={epoch}",
-            )
-            record = {
-                "stage": stage["name"],
-                "objective": stage["objective"],
-                "epoch": epoch,
-                "curriculum": curriculum,
-                "train": result,
-                "validation": validation,
-            }
-            with (output / "metrics.jsonl").open("a") as stream:
-                stream.write(json.dumps(record) + "\n")
-            complete = {**progress, "epoch_complete": True, "validation": validation}
-            save_model(stage_dir / "last.pt", model, complete)
-            if final:
-                save_model(output / "last.pt", model, complete)
-            metric = validation["mse"] if final else validation["loss"]
-            if metric < best:
-                best = metric
-                save_model(stage_dir / "best.pt", model, complete)
+                def snapshot(batches, samples):
+                    info = {
+                        **progress,
+                        "epoch_complete": False,
+                        "train_batches_completed": batches,
+                        "train_samples_completed": samples,
+                    }
+                    save_model(stage_dir / "latest.pt", model, info)
+                    if final:
+                        save_model(output / "latest.pt", model, info)
+                    storage.sync()
+
+                result = run_epoch(
+                    model,
+                    train_loader,
+                    device,
+                    optimizer,
+                    trainer["train_batches"],
+                    loss_function=loss_function,
+                    prefetch=trainer["prefetch"],
+                    sync_batches=trainer["sync_batches"],
+                    precision=trainer["precision"],
+                    label=f"{stage['name']} epoch={epoch}",
+                    checkpoint=snapshot,
+                    checkpoint_seconds=trainer["checkpoint_seconds"],
+                )
+                total_train_samples += result["samples"]
+                total_updates += result["batches"]
+                snapshot(result["batches"], result["samples"])
+                validation = run_epoch(
+                    model,
+                    eval_loader,
+                    device,
+                    max_batches=trainer["eval_batches"],
+                    loss_function=loss_function,
+                    prefetch=trainer["prefetch"],
+                    sync_batches=trainer["sync_batches"],
+                    precision="fp32",
+                    label=f"{stage['name']} epoch={epoch}",
+                )
+                record = {
+                    "stage": stage["name"],
+                    "objective": stage["objective"],
+                    "epoch": epoch,
+                    "curriculum": curriculum,
+                    "train": result,
+                    "validation": validation,
+                }
+                with (output / "metrics.jsonl").open("a") as stream:
+                    stream.write(json.dumps(record) + "\n")
+                tracker.log_epoch(
+                    record,
+                    optimizer_steps=total_updates,
+                    train_samples_seen=total_train_samples,
+                    learning_rate=optimizer.param_groups[0]["lr"],
+                    final=final,
+                )
+                complete = {**progress, "epoch_complete": True, "validation": validation}
+                save_model(stage_dir / "last.pt", model, complete)
                 if final:
-                    best_rgb = metric
-                    save_model(output / "best.pt", model, complete)
-        # The next stage starts from the previous stage's best validated weights.
-        restored, _ = load_model(stage_dir / "best.pt", device)
-        model.load_state_dict(restored.state_dict())
-    summary = {
-        "status": "complete",
-        "recipe_sha256": recipe_sha256,
-        "optimizer": config["optimizer"],
-        "history": config["history"],
-        "action_history": model.action_history,
-        "seconds": time.monotonic() - started,
-        "optimizer_steps": total_updates,
-        "train_samples_seen": total_train_samples,
-        "name": config["name"],
-        "approach": spec["kind"],
-        "seed": config["seed"],
-        "parameters": parameters,
-        "best_mse": best_rgb,
-        "evaluation": evaluation_contract,
-        "training": {
-            "stages": spec["stages"],
-            "samples": len(training),
-            "batch_size": trainer["batch_size"],
-            "train_batches": trainer["train_batches"],
-        },
-    }
-    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+                    save_model(output / "last.pt", model, complete)
+                metric = validation["mse"] if final else validation["loss"]
+                if metric < best:
+                    best = metric
+                    save_model(stage_dir / "best.pt", model, complete)
+                    if final:
+                        best_rgb = metric
+                        save_model(output / "best.pt", model, complete)
+                storage.sync()
+            # The next stage starts from the previous stage's best validated weights.
+            restored, _ = load_model(stage_dir / "best.pt", device)
+            model.load_state_dict(restored.state_dict())
+        summary = {
+            **storage.summary(),
+            "status": "complete",
+            "recipe_sha256": recipe_sha256,
+            "optimizer": config["optimizer"],
+            "history": config["history"],
+            "action_history": model.action_history,
+            "seconds": time.monotonic() - started,
+            "optimizer_steps": total_updates,
+            "train_samples_seen": total_train_samples,
+            "name": config["name"],
+            "approach": spec["kind"],
+            "seed": config["seed"],
+            "parameters": parameters,
+            "best_mse": best_rgb,
+            "evaluation": evaluation_contract,
+            "training": {
+                "stages": spec["stages"],
+                "samples": len(training),
+                "batch_size": trainer["batch_size"],
+                "train_batches": trainer["train_batches"],
+            },
+        }
+        (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        storage.sync(final=True)
+        tracker.complete(summary)
     print(f"Checkpoint: {output / 'best.pt'}", flush=True)
     return output
