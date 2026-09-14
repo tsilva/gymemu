@@ -75,9 +75,13 @@ class Player:
         action = action if self.action_history == 1 else action.unsqueeze(0)
         inputs = stack.unsqueeze(0).to(self.device)
         if self.state_fields:
-            states = frame_stack(
-                list(self.state_history), self.config["history"], (len(self.state_fields) + 1,)
-            ).unsqueeze(0).to(self.device)
+            states = (
+                frame_stack(
+                    list(self.state_history), self.config["history"], (len(self.state_fields) + 1,)
+                )
+                .unsqueeze(0)
+                .to(self.device)
+            )
             prediction, state = self.model.predict_step(inputs, action, states)
             result = prediction[0].cpu()
             self.state_history.append(state[0].cpu())

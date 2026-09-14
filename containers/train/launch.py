@@ -1,5 +1,6 @@
 """Common command interface for Docker, Runpod and dstack."""
 
+import argparse
 import os
 import sys
 from datetime import datetime, timezone
@@ -15,7 +16,10 @@ def run(arguments):
     from gymemu.config import compose_config
     from gymemu.data import Frames, resolve_dataset
 
-    cfg = compose_config(arguments)
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--recipe")
+    selected, overrides = parser.parse_known_args(arguments)
+    cfg = compose_config(overrides, recipe=selected.recipe)
     if cfg.trainer.device == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError(

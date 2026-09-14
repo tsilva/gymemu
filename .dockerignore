@@ -1,4 +1,5 @@
 **
+!.dockerignore
 !pyproject.toml
 !uv.lock
 !.python-version

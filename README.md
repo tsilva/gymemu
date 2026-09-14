@@ -113,6 +113,9 @@ for provenance and how to save more states with `save_start_state.py`.
 
 ## Saved recipes
 
+For Docker image publishing, Beast-3 scheduling, and Runpod setup, see
+[container training](containers/train/README.md).
+
 The successful ten-epoch Breakout CNN run is saved as `recipe=breakout_cnn`.
 `recipe=breakout_actions` adds seven previous executed actions alongside the current
 action and eight RGB frames, using the same dataset, training budget, and MSE objective.

@@ -42,9 +42,7 @@ class Tracker:
         for split in ("train", "validation"):
             result = record[split]
             metrics.update({f"{prefix}/{split}/{key}": value for key, value in result.items()})
-            metrics[f"{prefix}/{split}/samples_per_second"] = (
-                result["samples"] / result["seconds"]
-            )
+            metrics[f"{prefix}/{split}/samples_per_second"] = result["samples"] / result["seconds"]
         metrics.update(
             {f"{prefix}/curriculum/{key}": value for key, value in record["curriculum"].items()}
         )

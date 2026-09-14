@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates g++ git libglib2.0-0 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/root/.cache/uv \
     UV_PROJECT_ENVIRONMENT=/opt/gymemu/.venv \
     PATH="/opt/gymemu/.venv/bin:$PATH" \
     PYTHONPATH=/opt/gymemu \
@@ -17,9 +18,9 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 UV_LINK_MODE=copy \
     GYMEMU_WORKSPACE=/workspace
 WORKDIR /opt/gymemu
 COPY pyproject.toml uv.lock .python-version ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project --no-cache
 FROM dependencies AS runtime
+COPY .dockerignore ./
 COPY *.py ./
 COPY gymemu ./gymemu
 COPY configs ./configs
@@ -31,7 +32,7 @@ COPY --chmod=755 containers/train/entrypoint.sh /usr/local/bin/gymemu-container
 ARG VCS_REF=uncommitted
 ENV GYMEMU_IMAGE_SOURCE_SHA=${VCS_REF}
 LABEL org.opencontainers.image.title="Gymemu training runtime" \
-    org.opencontainers.image.source="https://github.com/tsilva/gym-emu" \
+    org.opencontainers.image.source="https://github.com/tsilva/gymemu" \
     org.opencontainers.image.revision=${VCS_REF}
 WORKDIR /workspace
 ENTRYPOINT ["gymemu-container"]

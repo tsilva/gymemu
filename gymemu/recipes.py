@@ -6,6 +6,7 @@ import copy
 import hashlib
 import importlib.metadata
 import json
+import os
 import platform
 import re
 import subprocess
@@ -90,6 +91,10 @@ def save_reproduction(output, config, cfg, device, dataset_identity):
     files.update((ROOT / "configs").rglob("*.yaml"))
     files.update((ROOT / "start_states").rglob("*.npz"))
     files.update(ROOT / name for name in ("pyproject.toml", "uv.lock", ".python-version"))
+    files.update((ROOT / "containers/train").glob("*.py"))
+    files.update((ROOT / "containers/train").glob("*.sh"))
+    files.update((ROOT / "containers/train").glob("Dockerfile"))
+    files.add(ROOT / ".dockerignore")
     files = sorted(path for path in files if path.is_file())
     source_hashes = {}
     with tarfile.open(output / "source.tar.gz", "w:gz") as archive:
@@ -113,6 +118,10 @@ def save_reproduction(output, config, cfg, device, dataset_identity):
         "source_files": source_hashes,
         "git_commit": git("rev-parse", "HEAD"),
         "git_status": git("status", "--porcelain", "--untracked-files=normal"),
+        "container": {
+            "source_commit": os.environ.get("GYMEMU_IMAGE_SOURCE_SHA"),
+            "image_ref": os.environ.get("GYMEMU_IMAGE_REF"),
+        },
         "dataset": dataset_identity,
         "python": platform.python_version(),
         "platform": platform.platform(),

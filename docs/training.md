@@ -1,5 +1,8 @@
 # Training guide
 
+For the locked Docker image, Beast-3 scheduling, Runpod, and bounded GPU checks,
+see [container training](../containers/train/README.md).
+
 See the [README](../README.md) for setup, playback, and comparison commands.
 
 For joint RGB and ball-coordinate prediction, run
