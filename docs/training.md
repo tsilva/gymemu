@@ -26,12 +26,35 @@ only after verifying the replacement on a GPU.
 
 See the [README](../README.md) for setup, playback, and comparison commands.
 
+For a ball-region RGB loss with recorded histories, run:
+
+```bash
+uv run python train.py recipe=breakout_ball_region
+```
+
+This inherits the `breakout_actions` data, model, cache, and training budget. Each
+example requires one predictor forward pass; there are no generated training
+prefixes or coordinate inputs. The loss is whole-frame RGB MSE plus `0.3` times
+the mean error in a padded ball region detected from the recorded target. Tune
+`approach.options.ball_region_weight` and `approach.options.padding`. Training and
+validation log `rgb_mse`, `ball_region_mse`, and `ball_detection_coverage`; the region
+metric includes zero for samples without a unique detection. Final checkpoint
+selection and comparison still use ordinary held-out float32 RGB MSE. Playback
+still feeds back predicted frames. See the [experiment guide](recipes.md#ball-region-loss-experiment)
+for matched controls, throughput interpretation, and missed-detection limitations.
+
 For joint RGB and ball-coordinate prediction, run
 `uv run python train.py recipe=breakout_ball`. This uses the action-history recipe's
 data and training budget, with frame-aligned normalized x/y inputs and successor
 coordinate targets. The loss adds masked coordinate MSE with weight `0.01`; tune it
 using `approach.options.coordinate_loss_weight`. The comparison metric stays RGB
 MSE. See [alignment, initialization, and playback details](recipes.md#ball-coordinate-experiment).
+
+Ball-position checkpoints trained on CUDA also play on Apple Silicon with
+`play.py <checkpoint> --device mps`. The coordinate head handles non-divisible
+adaptive-pooling bins on MPS using equivalent regional means. Existing checkpoint
+weights load directly; no retraining or conversion is needed. CPU and CUDA retain
+PyTorch's native pooling operation.
 
 ## Hierarchical configuration
 

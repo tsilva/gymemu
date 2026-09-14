@@ -127,6 +127,7 @@ def run_epoch(
     sync_batches=1,
 ):
     model.train(optimizer is not None)
+    model.reset_epoch_metrics()
     samples = batches = 0
     total_loss = torch.zeros((), device=device, dtype=torch.float64)
     total_mse = torch.zeros_like(total_loss)
@@ -179,6 +180,10 @@ def run_epoch(
     }
     if optimizer is None:
         result["mse"] = total_mse.item() / samples
+    diagnostics = model.epoch_metrics()
+    if result.keys() & diagnostics.keys():
+        raise ValueError("Approach diagnostics must not replace shared epoch metrics")
+    result.update(diagnostics)
     return result
 
 

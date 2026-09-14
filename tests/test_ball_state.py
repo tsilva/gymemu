@@ -106,6 +106,22 @@ def approach():
     return model
 
 
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="Requires Apple MPS")
+@pytest.mark.parametrize("height,width", [(27, 20), (20, 27), (3, 3), (28, 20)])
+def test_coordinate_pool_mps_matches_cpu_values_and_gradients(height, width):
+    torch.manual_seed(19)
+    pool = approach().predictor.coordinates[0]
+    source = torch.randn(2, 16, height, width, requires_grad=True)
+    apple = source.detach().to("mps").requires_grad_()
+    expected = torch.nn.functional.adaptive_avg_pool2d(source, (4, 4))
+    actual = pool(apple)
+    torch.testing.assert_close(actual.cpu(), expected, atol=1e-6, rtol=1e-5)
+    weights = torch.randn_like(expected)
+    (expected * weights).sum().backward()
+    (actual * weights.to("mps")).sum().backward()
+    torch.testing.assert_close(apple.grad.cpu(), source.grad, atol=1e-6, rtol=1e-5)
+
+
 def test_joint_loss_conditions_rgb_and_shares_gradients():
     torch.set_num_threads(2)
     torch.manual_seed(13)

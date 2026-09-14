@@ -338,6 +338,74 @@ establish that result. Compare generated rollouts and ball visibility against
 `breakout_actions`, alongside the unchanged RGB metric. Training and evaluation use
 recorded histories, so both RGB and coordinate errors can accumulate in playback.
 
+## Ball-region loss experiment
+
+`recipe=breakout_ball_region` is a loss-only ablation of `breakout_actions`. It keeps
+the same action-history CNN, eight recorded RGB frames, executed action history,
+dataset revision, seed, optimizer, cache, and ten-epoch budget. It has one next-frame
+training stage, without generated training history or coordinate labels/inputs.
+
+```bash
+# Inspect the complete settings without starting training.
+uv run python train.py recipe=breakout_ball_region --cfg job --resolve
+
+# Train on the CUDA host with the existing Breakout cache.
+uv run python train.py recipe=breakout_ball_region output=runs/breakout-ball-region
+
+# Matched control; use the same hardware and data availability.
+uv run python train.py recipe=breakout_actions output=runs/breakout-actions-control
+
+# Shorter screening run, with the same epoch limit on the control.
+uv run python train.py recipe=breakout_ball_region trainer.epochs=2
+
+# Tune the auxiliary weight or margin independently.
+uv run python train.py recipe=breakout_ball_region approach.options.ball_region_weight=0.1
+uv run python train.py recipe=breakout_ball_region approach.options.padding=2
+```
+
+For each recorded target, the detector searches all RGB colors for a unique solid
+2×4-pixel component, excluding black and rejecting same-color contact along its
+four sides. This includes the gray ball above the brick wall. It then adds four
+pixels of padding on every side, giving an interior ball a 10×12 region. The
+dimensions live in `game.ball_sprite`; padding and weight live in `approach.options`.
+Other image geometries or games need an explicitly validated detector configuration.
+
+```text
+per_sample_loss = mean_RGB_squared_error_over_frame
+                + 0.3 * mean_RGB_squared_error_inside_ball_region
+loss = mean(per_sample_loss)
+```
+
+Both terms use original float32 RGB targets. The region is a loss mask, not a
+brightness change to inputs or targets. Its mean is normalized separately per
+sample using the clipped region's actual area. An absent or ambiguous detection
+contributes zero to the extra term and retains full-frame supervision. Weight zero
+is also available as a numerical loss control; it still computes detection metrics.
+
+Training and validation record `rgb_mse`, `ball_region_mse`, and
+`ball_detection_coverage` in `metrics.jsonl` and W&B. The region metric averages
+over all samples, including zeros on abstentions, so `loss = rgb_mse + weight *
+ball_region_mse`. Always read it alongside coverage: a lower value caused by fewer
+detected targets is not an improvement. These are target-detection statistics, not
+measurements of predicted-ball visibility. Best-checkpoint selection remains the
+shared float32 held-out RGB MSE; inspect `last.pt` as well when studying ball quality.
+
+Recorded histories are the first experiment because they require a single predictor
+forward pass per sample and isolate the changed objective. The region detector adds
+work, so no speedup factor is assumed. Compare samples/second after compilation
+warmup and compare quality at matched optimizer steps as well as elapsed time.
+Scheduled sampling can later test whether generated-context training adds rollout
+robustness once the loss shows useful one-step behavior.
+
+The initial detector matched all six curated scene endpoints and identified a unique
+sprite in 45 of their 48 history frames. Those examples do not establish dataset-wide
+recall or precision. Sprite contacts, occlusion, and other same-sized components can
+cause abstentions or false positives. Check coverage and inspect collision examples
+before attributing a quality change to ball supervision. Training uses only training
+targets; held-out examples are used for evaluation. Playback remains autoregressive:
+compare ball visibility and collisions from the same named starts, since recorded-
+history MSE alone does not establish stable or playable rollouts.
+
 ## Code, environment, and limits
 
 A recipe alone cannot recreate code or numerical libraries that have changed.

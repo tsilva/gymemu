@@ -10,6 +10,7 @@ needs its next-frame prediction interface.
 | --- | --- | --- |
 | `approach=direct` | Original action-conditioned RGB CNN | Predict the next frame with uniform pixel MSE |
 | `approach=direct_actions` | RGB CNN with chronological action-history planes | Predict the next frame with uniform pixel MSE |
+| `approach=ball_region` | Same action-history RGB CNN | RGB MSE plus a separately normalized target-ball region loss; recorded histories |
 | `approach=ball_state` | Shared CNN with RGB and normalized ball-coordinate heads | RGB MSE plus masked coordinate MSE |
 | `approach=scheduled_actions` | Same action-history RGB CNN | Uniform RGB MSE with progressively sampled generated context |
 | `approach=latent` | Frame codec and separate latent CNN | Reconstruct recorded frames, freeze the codec, then predict successor latents |
@@ -23,6 +24,17 @@ but widens the first convolution to accept one-hot planes for each action slot.
 `model.action_history` includes the current action and defaults to the RGB history
 length. The [action-history recipe](recipes.md#action-history-experiment) describes
 the comparison and tuning controls.
+
+`ball_region` changes only the objective of `direct_actions`. Its target-only
+detector finds a unique solid nonblack rectangle with no same-color pixel touching
+its four-connected boundary. Sprite dimensions come from `game.ball_sprite`; the
+Breakout config specifies height 4 and width 2. Detection uses batched tensor
+operations and does not run during inference. No detection or multiple candidates
+produce an empty auxiliary mask. Padding clips at image boundaries, and each
+region is normalized by its actual pixel count. Missing detections contribute
+zero to the region term before averaging over the full batch. The detector assumes
+exact recorded RGB, not resized, noisy, or generated frames. It cannot reliably
+label merged or occluded sprites. These are explicit experiment limitations.
 
 The latent approach is an experimental example of multiple models and stages, not a
 claim of better emulation. Its codec compresses individual RGB frames spatially by
@@ -84,6 +96,11 @@ The interface consists of:
 - `configure_training(compile=False)`: optionally prepare compiled execution helpers.
   The runner calls this once after constructing the model. Keep helpers out of the
   registered module tree so inference checkpoint tensor names stay unchanged.
+- `reset_epoch_metrics()` and `epoch_metrics()`: optionally reset and return scalar
+  diagnostics for each training/validation pass. Accumulate sample-weighted totals
+  on device and synchronize when reporting, rather than once per batch. Diagnostics
+  must not replace the runner's loss, comparison MSE, sample counts, or timing. Use
+  nonpersistent buffers so counters do not become inference checkpoint weights.
 
 An approach can declare `training_rollout_steps=K` to request extended training
 prefixes. Training then receives RGB `[B, history+K, C, H, W]` and action tokens
