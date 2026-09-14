@@ -412,7 +412,14 @@ oldest to newest, with no action toward a future frame. An action-history model 
 at least the last `min(action_history - 1, frame_count - 1)` recorded actions. Legacy
 frame-only scenes remain valid for models that use only the current action.
 Reset restores both frames and actions. Subsequent frames come entirely from the model,
-and each prediction uses the previous actions actually pressed plus the fresh key press.
+and each prediction uses the previous executed actions plus the current action.
+The player starts in single-step mode. Tab toggles continuous playback, capped at
+30 predictions per second for the 60 Hz Atari simulation with frameskip 2. Held
+keys repeat on each tick; the most recently pressed held action key wins. With no
+held keys, playback uses action 0, or the first checkpoint action if 0 is absent.
+Slow inference lowers the effective rate without catch-up steps. R, C, or losing
+window focus pauses continuous playback and clears held keys. In empty-start mode,
+the first tick initializes the frame without executing a game action.
 
 ## Named debug start states
 
@@ -422,6 +429,14 @@ the checkpoint's game. `--start-state`, `--start-scene`, and `--empty-start` are
 exclusive; omitting all three preserves the checkpoint's normal recorded start.
 The repository's library is found regardless of the current working directory.
 Use `--state-dir /path/to/library` to select a different library.
+
+Press R to reset the current state, or C to reset to the next named snapshot.
+No flag is needed. The cycle begins with your selected start, then visits the
+other compatible states in alphabetical order and wraps around. `--state-dir`
+selects the library; the window title shows the current state. Each reset restores
+RGB, action, and any auxiliary state histories without inference. Incompatible
+library snapshots are skipped with a message. With no other compatible states,
+C resets the current state too.
 
 For later Breakout situations, use `half-cleared` for 50 remaining bricks,
 `almost-cleared` for eight remaining bricks, or `above-bricks` for a ball that has
