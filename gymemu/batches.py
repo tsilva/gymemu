@@ -48,6 +48,7 @@ class CachedBatchLoader:
         history_np, targets_np, actions_np = history.numpy(), targets.numpy(), actions.numpy()
         frame_ids = []
         destinations = []
+        states = []
         for row, index in enumerate(indices):
             if index < 0 or index >= len(data):
                 raise IndexError(index)
@@ -63,6 +64,8 @@ class CachedBatchLoader:
             frame_ids.append(episode.frames[position])
             destinations.append(targets_np[row])
             actions_np[row] = data.action_at(episode, position)
+            if data.state_fields:
+                states.append(data.state_at(episode, position))
         # Resolve actual IDs in one vectorized lookup; IDs are never array offsets.
         positions = frames.order[np.searchsorted(frames.ids, frame_ids)]
         images = frames.images._open()["image"]
@@ -70,7 +73,12 @@ class CachedBatchLoader:
         for position, destination in zip(positions, destinations):
             raw = pa.decompress(images[int(position)].as_buffer(), size, codec="lz4")
             destination[:] = np.frombuffer(raw, dtype=np.uint8).reshape(frames.shape)
-        return history, actions, targets
+        extra = ()
+        if states:
+            extra = tuple(torch.stack(items) for items in zip(*states, strict=True))
+            if self.pin_memory:
+                extra = tuple(value.pin_memory() for value in extra)
+        return history, actions, targets, *extra
 
     def __iter__(self):
         batches = iter(BatchSampler(self.sampler, self.batch_size, drop_last=False))

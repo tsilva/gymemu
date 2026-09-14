@@ -39,11 +39,20 @@ def main(argv=None):
     )
     parser.add_argument("--train-batches", type=positive, help="Optional per-epoch smoke limit")
     parser.add_argument("--eval-batches", type=positive, help="Optional evaluation smoke limit")
+    parser.add_argument("--env-id", help="Canonical environment ID for W&B project naming")
+    parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"])
+    parser.add_argument("--r2", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args(argv)
     cfg = compose_config([] if args.dataset == DEFAULT_DATASET else ["game=custom"])
     cfg.output = str(args.output)
     cfg.game.dataset = args.dataset
     cfg.game.revision = args.revision
+    if args.env_id is not None:
+        cfg.game.env_id = args.env_id
+    if args.wandb_mode is not None:
+        cfg.wandb.mode = args.wandb_mode
+    if args.r2 is not None:
+        cfg.r2.enabled = args.r2
     if args.dataset != DEFAULT_DATASET:
         cfg.game.name = "custom"
         cfg.game.key_actions = {}

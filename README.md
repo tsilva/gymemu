@@ -17,6 +17,11 @@ The default approach is the original direct RGB CNN. An experimental latent appr
 first trains a frame autoencoder, freezes it, then trains a separate latent predictor.
 Both use the same dataset adapter, player, and held-out RGB evaluation metric.
 
+`recipe=breakout_ball` adds frame-aligned `ball_x_normalized` and
+`ball_y_normalized` history and predicts the next coordinates alongside RGB. Its
+coordinate loss trains the shared encoder, and predicted coordinates condition the
+image decoder. See [the ball-coordinate recipe](docs/recipes.md#ball-coordinate-experiment).
+
 ## Install
 
 Install [uv](https://docs.astral.sh/uv/), then run:
@@ -28,6 +33,10 @@ uv sync --frozen
 ```
 
 The locked environment uses Python 3.13. Python 3.11 through 3.13 is supported.
+
+Training uses W&B and R2 by default. Run `uv run wandb login` and configure the
+[R2 credentials](docs/training.md#r2-checkpoint-storage) before starting a run.
+For local-only training, pass `wandb.mode=disabled r2.enabled=false`.
 
 ## Train and play
 
@@ -48,6 +57,25 @@ Use a new output directory for each run. Omit `output` for a timestamped directo
 under `runs/`. Training downloads the pinned
 [Breakout dataset](https://huggingface.co/datasets/tsilva/gradlab-breakout-trajectories)
 and writes a recorded `start-scene.npz` beside the checkpoints.
+
+Training logs to Weights & Biases by default. Authenticate once before training:
+
+```bash
+uv run wandb login
+uv run python train.py output=runs/breakout-tracked
+```
+
+Projects use `gymemu-<canonical-env-id>`, so Breakout logs to
+`gymemu-Breakout-Atari2600-v0`. Each run records stage losses, held-out RGB MSE,
+throughput, learning rates, curriculum values, configuration, and the final summary.
+Use `wandb.mode=offline` to collect logs locally or `wandb.mode=disabled` to turn tracking off.
+See [tracking options](docs/training.md#weights--biases) for teams and custom environments.
+
+Checkpoints also upload to the separate `gymemu-models` R2 bucket, together with the
+recorded start scene, metrics, and reproduction files. Each run has a unique prefix;
+immutable objects and manifests retain successfully uploaded checkpoint versions.
+Use `r2.enabled=false` to keep artifacts local. Retry interrupted uploads with
+`uv run python upload_checkpoints.py runs/my-run`.
 
 The player opens that scene immediately. Every fresh action key press predicts one
 next frame. Holding a key does not advance the model; R restores the scene and Escape
@@ -181,7 +209,7 @@ uv run pytest
 uv run ruff check .
 
 # Bounded training; still downloads the dataset snapshot
-uv run python train.py experiment=smoke output=runs/smoke
+uv run python train.py experiment=smoke wandb.mode=disabled r2.enabled=false output=runs/smoke
 uv run python play.py runs/smoke/best.pt --device cpu --headless-actions 0,1,2 --output logs/smoke.png
 ```
 

@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 
 from gymemu.checkpoints import load_model
-from gymemu.data import frame_stack, pad_actions
+from gymemu.data import frame_stack, pad_actions, validate_states
 from gymemu.runtime import device_for, positive
 from gymemu.scenes import (
     START_STATES,
@@ -35,6 +35,13 @@ class Player:
         if initial_actions is None:
             initial_actions = getattr(initial_history, "actions", None)
         self.initial_history = [frame.clone() for frame in (initial_history or [])]
+        self.state_fields = tuple(config.get("state_fields", ()))
+        self.initial_states = []
+        if self.state_fields and self.initial_history:
+            states = getattr(initial_history, "states", None)
+            validate_states(states, len(self.initial_history), self.state_fields)
+            self.initial_states = [state.clone() for state in states]
+        self.state_history = deque(maxlen=config["history"])
         required = min(self.action_history - 1, max(0, len(self.initial_history) - 1))
         initial_actions = [] if initial_actions is None else list(initial_actions)
         if not required <= len(initial_actions) <= max(0, len(self.initial_history) - 1):
@@ -66,7 +73,16 @@ class Player:
         )
         action = torch.tensor(context, dtype=torch.long, device=self.device)
         action = action if self.action_history == 1 else action.unsqueeze(0)
-        result = self.model(stack.unsqueeze(0).to(self.device), action)[0].cpu()
+        inputs = stack.unsqueeze(0).to(self.device)
+        if self.state_fields:
+            states = frame_stack(
+                list(self.state_history), self.config["history"], (len(self.state_fields) + 1,)
+            ).unsqueeze(0).to(self.device)
+            prediction, state = self.model.predict_step(inputs, action, states)
+            result = prediction[0].cpu()
+            self.state_history.append(state[0].cpu())
+        else:
+            result = self.model(inputs, action)[0].cpu()
         self.history.append(result)
         if action_index != len(self.actions):
             self.past_actions.append(action_index)
@@ -74,6 +90,8 @@ class Player:
 
     def reset(self):
         self.history.clear()
+        self.state_history.clear()
+        self.state_history.extend(state.clone() for state in self.initial_states)
         self.past_actions.clear()
         self.past_actions.extend(self.initial_actions)
         self.history.extend(frame.clone() for frame in self.initial_history)

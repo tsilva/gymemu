@@ -92,6 +92,8 @@ def test_game_metadata_and_input_contract_checked(tmp_path):
 def test_cli_export_import_list_and_play(snapshot, tmp_path, capsys):
     cfg = compose_config(["recipe=breakout_actions", "game=custom", "experiment=smoke"])
     cfg.game.dataset = str(snapshot)
+    cfg.wandb.mode = "disabled"
+    cfg.r2.enabled = False
     cfg.output = str(tmp_path / "run")
     output = train(cfg)
     checkpoint, library = str(output / "best.pt"), str(tmp_path / "library")

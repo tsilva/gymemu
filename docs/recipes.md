@@ -285,6 +285,59 @@ only stages that inherit `${trainer.epochs}` change with `trainer.epochs`.
 The Python equivalent is `compose_config(overrides, recipe=path)` followed by `train`.
 Existing legacy flags and ordinary Hydra commands remain supported.
 
+## Ball-coordinate experiment
+
+`recipe=breakout_ball` inherits `breakout_actions`' pinned dataset, eight-frame
+history, executed-action history, optimizer, and ten-epoch training budget. It uses
+a new `ball_state_cnn` model and the `ball_state` approach.
+
+```bash
+uv run python train.py recipe=breakout_ball output=runs/breakout-ball
+uv run python play.py runs/breakout-ball/best.pt
+```
+
+This retains the parent recipe's CUDA, bfloat16, compilation, and existing frame-cache
+path. For a bounded CPU smoke without that cache:
+
+```bash
+uv run python train.py recipe=breakout_ball experiment=smoke wandb.mode=disabled r2.enabled=false
+```
+
+Each RGB history frame has an aligned row containing `ball_x_normalized`,
+`ball_y_normalized`, and a label-availability flag. Both output heads share the
+convolutional encoder; predicted coordinates also condition the RGB decoder.
+
+```text
+loss = next_frame_rgb_mse + coordinate_loss_weight * masked_coordinate_mse
+```
+
+The coordinate term averages squared x/y error, masks unavailable targets, and then
+averages over the full batch. The default weight is `0.01`, an initial tuning choice
+without a completed quality comparison. Override it with
+`approach.options.coordinate_loss_weight=0.001`, for example. Validation `loss`
+includes both terms; validation `mse` and best-checkpoint selection remain float32
+RGB MSE on the same held-out targets as the other approaches.
+
+The Gradlab adapter reads scalar normalized labels from transition `record_json`.
+They belong to the successor frame. Coordinates follow episode/step order, so
+reused image IDs do not merge distinct trajectory states. RGB and coordinate
+histories use the same oldest-to-newest window and left zero padding. Initial-frame
+labels are absent in this dataset: that row has zero coordinates and availability
+zero, and its coordinate loss is masked. It never borrows the first successor's
+labels. Missing or invalid successor labels are errors. Values use the provider's
+recorded normalization directly, with no division by image width or height.
+
+The saved `start-scene.npz` includes aligned recorded coordinates. Each subsequent
+action feeds back predicted RGB and coordinates; reset restores both histories.
+`--empty-start` starts both histories at zero; the initial coordinate output has no
+direct reset-label supervision. Existing named RGB/action snapshots lack coordinates
+and are rejected. Save a new named state from a coordinate-aware run's scene instead.
+
+The intended benefit is better visual ball tracking, but a joint loss does not
+establish that result. Compare generated rollouts and ball visibility against
+`breakout_actions`, alongside the unchanged RGB metric. Training and evaluation use
+recorded histories, so both RGB and coordinate errors can accumulate in playback.
+
 ## Code, environment, and limits
 
 A recipe alone cannot recreate code or numerical libraries that have changed.

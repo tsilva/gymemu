@@ -144,6 +144,9 @@ def test_training_cli_and_player_load(snapshot, tmp_path, workers):
         [
             "--dataset",
             str(snapshot),
+            "--no-r2",
+            "--wandb-mode",
+            "disabled",
             "--output",
             str(output),
             "--epochs",
@@ -177,7 +180,10 @@ def test_training_split_overlap_rejected(snapshot, tmp_path):
         rows = pq.read_table(snapshot / kind / "train/00000.parquet").to_pylist()
         write(snapshot, kind, "heldout", rows)
     with pytest.raises(ValueError, match="episode IDs overlap"):
-        main(["--dataset", str(snapshot), "--output", str(tmp_path / "bad"), "--device", "cpu"])
+        main([
+            "--dataset", str(snapshot), "--output", str(tmp_path / "bad"),
+            "--device", "cpu", "--wandb-mode", "disabled", "--no-r2",
+        ])
 
 
 @pytest.mark.parametrize("startup", ["default", "explicit", "empty"])

@@ -185,6 +185,8 @@ def test_scene_rejects_missing_unknown_or_future_actions(tmp_path):
 def test_recipe_training_checkpoint_and_playback(snapshot, tmp_path, loader):
     cfg = compose_config(["recipe=breakout_actions", "game=custom", "experiment=smoke"])
     cfg.game.dataset = str(snapshot)
+    cfg.wandb.mode = "disabled"
+    cfg.r2.enabled = False
     cfg.game.start.frame_position = 1
     cfg.output = str(tmp_path / "run")
     if loader == "cached":

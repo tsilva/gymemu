@@ -99,9 +99,35 @@ class Episode:
     episode_id: int
     frames: np.ndarray  # Initial frame followed by each transition's successor.
     actions: np.ndarray  # Executed action leading from frames[t] to frames[t + 1].
+    states: np.ndarray | None = None  # Frame-aligned normalized values plus availability.
 
 
-def read_episodes(root: Path, split: str, limit: int | None = None) -> list[Episode]:
+def recorded_state(record, fields):
+    """Read scalar labels from Gradlab's JSON tree without executing serialized objects."""
+    try:
+        tree = json.loads(json.loads(record)["structure"])
+        if tree[0] != "dict":
+            raise ValueError("Expected record dictionary")
+        labels = dict(tree[1])["labels"]
+        if labels[0] != "dict":
+            raise ValueError("Expected label dictionary")
+        labels = dict(labels[1])
+        values = []
+        for field in fields:
+            tag, value = labels[field]
+            if tag != "scalar" or type(value) not in (int, float):
+                raise ValueError(f"Expected numeric scalar {field}")
+            if not np.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"Expected normalized {field} in [0, 1]")
+            values.append(value)
+        return [*values, 1.0]
+    except (KeyError, TypeError, ValueError, IndexError) as error:
+        raise ValueError(f"Missing or invalid normalized state labels {fields}: {error}") from error
+
+
+def read_episodes(
+    root: Path, split: str, limit: int | None = None, *, state_fields=()
+) -> list[Episode]:
     metadata = table(root, "episodes", split, ["episode_id", "initial_frame_id", "length"])
     meta = sorted(metadata.to_pylist(), key=lambda e: e["episode_id"])
     if len({e["episode_id"] for e in meta}) != len(meta):
@@ -110,7 +136,8 @@ def read_episodes(root: Path, split: str, limit: int | None = None) -> list[Epis
         root,
         "transitions",
         split,
-        ["episode_id", "step", "source_frame_id", "successor_frame_id", "native_action_json"],
+        ["episode_id", "step", "source_frame_id", "successor_frame_id", "native_action_json"]
+        + (["record_json"] if state_fields else []),
     )
     episode_ids = data["episode_id"].to_numpy()
     steps = data["step"].to_numpy()
@@ -126,6 +153,12 @@ def read_episodes(root: Path, split: str, limit: int | None = None) -> list[Epis
             raise ValueError("This baseline supports scalar integer executed actions only")
         action_values.append(value)
     actions = np.asarray(action_values, dtype=np.int64)[order]
+    states = None
+    if state_fields:
+        states = np.asarray(
+            [recorded_state(value.as_py(), state_fields) for value in data["record_json"]],
+            dtype=np.float32,
+        ).reshape(-1, len(state_fields) + 1)[order]
     if set(episode_ids.tolist()) - {e["episode_id"] for e in meta}:
         raise ValueError("Transitions without episode metadata")
     episodes = []
@@ -143,7 +176,14 @@ def read_episodes(root: Path, split: str, limit: int | None = None) -> list[Epis
         frame_ids = np.concatenate([[item["initial_frame_id"]], successors[lo:hi]])
         if not np.array_equal(sources[lo:hi], frame_ids[:-1]):
             raise ValueError(f"Episode {eid} has a broken frame chain")
-        episodes.append(Episode(eid, frame_ids, actions[lo:hi]))
+        # record_json labels describe the successor, never the source. Episode metadata
+        # has no reset labels, so the initial frame carries zeros with availability=0.
+        aligned_states = None
+        if states is not None:
+            aligned_states = np.concatenate(
+                [np.zeros((1, len(state_fields) + 1), dtype=np.float32), states[lo:hi]]
+            )
+        episodes.append(Episode(eid, frame_ids, actions[lo:hi], aligned_states))
     if not episodes:
         raise ValueError(f"No usable episodes in {split}")
     return episodes
@@ -178,10 +218,12 @@ class Windows(Dataset):
         *,
         action_history: int = 1,
         rollout_steps: int = 0,
+        state_fields=(),
     ):
         if type(action_history) is not int or not 1 <= action_history <= history:
             raise ValueError("action_history must be between 1 and the RGB history length")
         self.action_history = action_history
+        self.state_fields = tuple(state_fields)
         if type(rollout_steps) is not int or rollout_steps < 0:
             raise ValueError("rollout_steps must be a nonnegative integer")
         self.rollout_steps = rollout_steps
@@ -196,6 +238,8 @@ class Windows(Dataset):
         self.start_action = len(actions)  # Explicit absence of a game action at reset.
         self.ends = np.cumsum([len(e.frames) for e in episodes])
         for episode in episodes:
+            if self.state_fields:
+                validate_states(episode.states, len(episode.frames), self.state_fields)
             frames.check_ids(episode.frames)
             if set(episode.actions.tolist()) - self.action_index.keys():
                 raise ValueError("An episode uses an action absent from the training vocabulary")
@@ -239,4 +283,31 @@ class Windows(Dataset):
         action = self.action_at(episode, position)
         if self.action_shape:
             action = torch.tensor(action, dtype=torch.long)
-        return history, action, self.frames.get(int(episode.frames[position]))
+        return (
+            history,
+            action,
+            self.frames.get(int(episode.frames[position])),
+            *self.state_at(episode, position),
+        )
+
+    def state_at(self, episode, position):
+        if not self.state_fields:
+            return ()
+        past = episode.states[max(0, position - self.input_history) : position]
+        history = frame_stack(
+            list(torch.from_numpy(past)), self.input_history, (len(self.state_fields) + 1,)
+        )
+        return history, torch.from_numpy(episode.states[position])
+
+
+def validate_states(states, length, fields):
+    """One availability flag follows the normalized coordinates in each frame row."""
+    if states is None or tuple(states.shape) != (length, len(fields) + 1):
+        raise ValueError("State history must align with every frame and declared state field")
+    values = np.asarray(states)
+    if not np.isfinite(values).all() or np.any((values < 0) | (values > 1)):
+        raise ValueError("State values must be finite and normalized to [0, 1]")
+    if np.any((values[:, -1] != 0) & (values[:, -1] != 1)):
+        raise ValueError("State availability must be 0 or 1")
+    if np.any(values[values[:, -1] == 0, :-1] != 0):
+        raise ValueError("Unavailable state coordinates must be zero")

@@ -11,6 +11,7 @@ from gymemu.models import build_model
 
 class Approach(nn.Module):
     action_history = 1
+    state_fields = ()
     training_rollout_steps = 0
     objectives = ()
     predictive_objectives = ()
@@ -73,6 +74,44 @@ class ActionHistoryApproach(DirectApproach):
         if not hasattr(self.predictor, "action_history"):
             raise ValueError("direct_actions requires a predictor declaring action_history")
         self.action_history = self.predictor.action_history
+
+
+class BallStateApproach(ActionHistoryApproach):
+    state_fields = ("ball_x_normalized", "ball_y_normalized")
+    objectives = predictive_objectives = ("next_frame_and_ball",)
+
+    def __init__(self, spec, history, actions, shape, *, coordinate_loss_weight=0.01):
+        super().__init__(spec, history, actions, shape)
+        if (
+            type(coordinate_loss_weight) not in (int, float)
+            or not math.isfinite(coordinate_loss_weight)
+            or coordinate_loss_weight <= 0
+        ):
+            raise ValueError("coordinate_loss_weight must be finite and positive")
+        self.coordinate_loss_weight = coordinate_loss_weight
+
+    def forward(self, history, action, state_history):
+        return self.predictor(history, action, state_history)
+
+    def predict_step(self, history, action, state_history):
+        rgb, coordinates = self(history, action, state_history)
+        return rgb, torch.cat((coordinates, torch.ones_like(coordinates[:, :1])), dim=1)
+
+    def joint_loss(self, prediction, coordinates, target, state_target):
+        error = (coordinates.float() - state_target[:, :-1].float()).square().mean(dim=1)
+        available = state_target[:, -1].float()
+        # Average over the full batch so aggregation stays independent of batch boundaries.
+        state_mse = (error * available).mean()
+        rgb_mse = F.mse_loss(prediction.float(), target.float())
+        return rgb_mse + self.coordinate_loss_weight * state_mse
+
+    def loss(self, history, action, target, state_history, state_target):
+        prediction, coordinates = self(history, action, state_history)
+        return self.joint_loss(prediction, coordinates, target, state_target)
+
+    def evaluate(self, history, action, target, state_history, state_target):
+        prediction, coordinates = self(history, action, state_history)
+        return self.joint_loss(prediction, coordinates, target, state_target), prediction
 
 
 class ScheduledSamplingApproach(ActionHistoryApproach):
@@ -285,6 +324,7 @@ class LatentApproach(Approach):
 APPROACHES = {
     "direct": DirectApproach,
     "direct_actions": ActionHistoryApproach,
+    "ball_state": BallStateApproach,
     "latent": LatentApproach,
     "scheduled_actions": ScheduledSamplingApproach,
 }

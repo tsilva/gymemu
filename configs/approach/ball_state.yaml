@@ -1,0 +1,12 @@
+defaults:
+  - override /model@_global_.model: ball_state_cnn
+kind: ball_state
+models:
+  predictor: ${model}
+options:
+  coordinate_loss_weight: 0.01
+stages:
+  - name: prediction
+    objective: next_frame_and_ball
+    epochs: ${trainer.epochs}
+    learning_rate: ${trainer.learning_rate}

@@ -15,6 +15,18 @@ output: null
 # Saved run recipes fill this to detect changed dataset content on replay.
 expected_dataset: null
 
+wandb:
+  mode: online
+  entity: null
+  name: ${name}
+  group: null
+  tags: []
+
+r2:
+  enabled: true
+  bucket: gymemu-models
+  prefix: runs
+
 hydra:
   job:
     chdir: false

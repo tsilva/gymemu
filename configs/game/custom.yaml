@@ -1,5 +1,7 @@
 # RGB trajectories with scalar integer actions in the documented Parquet schema.
 name: custom
+# Required when W&B logging is enabled; use the environment's canonical ID.
+env_id: null
 dataset: ???
 revision: null
 train_split: train
