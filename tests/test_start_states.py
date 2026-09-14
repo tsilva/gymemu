@@ -150,6 +150,22 @@ def test_cli_export_import_list_and_play(snapshot, tmp_path, capsys):
         ]
     )
     assert load_named_scene("copy", config, library).actions == loaded.actions
+    play_main(
+        [
+            checkpoint,
+            "--start-state",
+            "heldout-end",
+            "--state-dir",
+            library,
+            "--device",
+            "cpu",
+            "--headless-actions",
+            "0,2",
+            "--output",
+            str(target),
+        ]
+    )
+    assert "Reset cycle: heldout-end -> copy" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         play_main(
             [checkpoint, "--start-state", "missing", "--state-dir", library, "--device", "cpu"]
@@ -183,3 +199,65 @@ def test_curated_ball_up_snapshot_has_upward_motion_and_complete_actions():
         ys.append(y.mean())
     assert np.all(np.diff(ys) < 0) and ys[-1] == 149.5
     assert info["episode_id"] == 5 and info["frame_position"] == 45
+
+
+def test_reset_cycles_complete_context_without_inference():
+    import pygame
+
+    from gymemu.scenes import SceneHistory
+    from play import handle_event
+
+    config = {**contract(), "state_fields": ["x"]}
+    starts = [
+        (
+            "first",
+            SceneHistory(
+                [torch.full((3, 21, 17), 0.2)] * 2, [2], torch.tensor([[0.1, 1.0], [0.2, 1.0]])
+            ),
+        ),
+        (
+            "second",
+            SceneHistory(
+                [torch.full((3, 21, 17), 0.7)] * 3,
+                [0, 2],
+                torch.tensor([[0.5, 1.0], [0.6, 1.0], [0.7, 1.0]]),
+            ),
+        ),
+        ("empty", None),
+    ]
+    player = Player(None, config, torch.device("cpu"), start_states=starts)
+    assert player.start_name == "first"
+    repeated = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_c, repeat=True)
+    handle_event(player, repeated, {})
+    assert player.start_name == "first"
+    for name, history in [*starts[1:], starts[0]]:
+        player.history.clear()
+        player.past_actions.clear()
+        player.state_history.clear()
+        player.steps = 10
+        handle_event(player, pygame.event.Event(pygame.KEYDOWN, key=pygame.K_c), {})
+        assert player.start_name == name and player.steps == 0
+        if history is None:
+            assert player.frame is None
+            assert not player.history and not player.past_actions and not player.state_history
+        else:
+            assert torch.equal(player.frame, history[-1])
+            assert list(player.past_actions) == [
+                config["action_values"].index(a) for a in history.actions
+            ]
+            assert torch.equal(torch.stack(list(player.state_history)), history.states)
+            handle_event(player, pygame.event.Event(pygame.KEYDOWN, key=pygame.K_r), {})
+            assert player.start_name == name
+            assert torch.equal(player.frame, history[-1])
+            player.frame.zero_()
+            assert history[-1].any()  # Playback must not mutate the stored snapshot.
+
+
+def test_cycle_validates_later_scenes_before_playback():
+    with pytest.raises(ValueError, match="dimensions"):
+        Player(
+            None,
+            contract(),
+            torch.device("cpu"),
+            start_states=[("empty", None), ("bad", [torch.zeros(3, 2, 2)])],
+        )

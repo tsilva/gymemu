@@ -80,9 +80,12 @@ immutable objects and manifests retain successfully uploaded checkpoint versions
 Use `r2.enabled=false` to keep artifacts local. Retry interrupted uploads with
 `uv run python upload_checkpoints.py runs/my-run`.
 
-The player opens that scene immediately. Every fresh action key press predicts one
-next frame. Holding a key does not advance the model; R restores the scene and Escape
-quits. Breakout uses Left, Right, and Space. Other games use checkpoint key bindings,
+The player opens that scene immediately in step mode. Every fresh action key press
+predicts one next frame. Press Tab to toggle continuous play at 30 predictions per
+second, matching 60 Hz Atari with frameskip 2. Hold an action key to repeat it;
+releasing all keys uses action 0, or the first checkpoint action if 0 is absent.
+The most recently pressed held key wins. Slow inference reduces playback speed
+without catch-up steps. R restores the scene and pauses; Escape quits. Breakout uses Left, Right, and Space. Other games use checkpoint key bindings,
 or numbered keys for their action vocabulary. The player prints its bindings.
 
 Use `--start-scene path/to/scene.npz` to select another scene, `--key-action left=10`
@@ -96,6 +99,14 @@ For repeatable debugging, select a named frame/action snapshot:
 uv run python play.py runs/breakout-direct/best.pt --list-start-states
 uv run python play.py runs/breakout-direct/best.pt --start-state ball-up
 ```
+
+Press R to reset the current state, or C to reset to the next named snapshot.
+No flag is needed. The cycle begins with your selected start, then visits the
+other compatible states in alphabetical order and wraps around. `--state-dir`
+selects the library; the window title shows the current state. Each reset restores
+RGB, action, and any auxiliary state histories without inference. Incompatible
+library snapshots are skipped with a message. With no other compatible states,
+C resets the current state too.
 
 Available Breakout starts are shown below. Each image is the last recorded frame of
 its eight-frame snapshot. Use the name with `--start-state`.

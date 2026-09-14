@@ -1,4 +1,4 @@
-"""Play a learned emulator. One fresh action key press produces one predicted frame."""
+"""Play a learned emulator. Tab toggles single-step and continuous playback."""
 
 from __future__ import annotations
 
@@ -21,9 +21,21 @@ from gymemu.scenes import (
     named_scene_path,
 )
 
+# Each learned transition covers two frames of the 60 Hz Atari simulation.
+PLAYBACK_FPS = 60 // 2
+
 
 class Player:
-    def __init__(self, model, config, device, initial_history=None, initial_actions=None):
+    def __init__(
+        self,
+        model,
+        config,
+        device,
+        initial_history=None,
+        initial_actions=None,
+        *,
+        start_states=None,
+    ):
         self.model, self.config, self.device = model, config, device
         self.actions = config["action_values"]
         self.action_history = config.get("action_history", 1)
@@ -32,6 +44,26 @@ class Player:
             or not 1 <= self.action_history <= config["history"]
         ):
             raise ValueError("Action history must be between 1 and the RGB history length")
+        self.start_states = list(start_states or [])
+        self.start_index = 0
+        self.history = deque(maxlen=config["history"])
+        self.state_history = deque(maxlen=config["history"])
+        self.past_actions = deque(maxlen=self.action_history - 1)
+        # Validate all scenes before playback, including auxiliary state and actions.
+        for _, history in self.start_states:
+            self._set_initial_history(history)
+        if self.start_states:
+            initial_history = self.start_states[0][1]
+            initial_actions = None
+        self._set_initial_history(initial_history, initial_actions)
+        self.reset(cycle=False)
+
+    @property
+    def start_name(self):
+        return self.start_states[self.start_index][0] if self.start_states else None
+
+    def _set_initial_history(self, initial_history, initial_actions=None):
+        config = self.config
         if initial_actions is None:
             initial_actions = getattr(initial_history, "actions", None)
         self.initial_history = [frame.clone() for frame in (initial_history or [])]
@@ -41,7 +73,6 @@ class Player:
             states = getattr(initial_history, "states", None)
             validate_states(states, len(self.initial_history), self.state_fields)
             self.initial_states = [state.clone() for state in states]
-        self.state_history = deque(maxlen=config["history"])
         required = min(self.action_history - 1, max(0, len(self.initial_history) - 1))
         initial_actions = [] if initial_actions is None else list(initial_actions)
         if not required <= len(initial_actions) <= max(0, len(self.initial_history) - 1):
@@ -53,7 +84,6 @@ class Player:
             if self.action_history > 1
             else []
         )
-        self.past_actions = deque(maxlen=self.action_history - 1)
         if len(self.initial_history) > config["history"]:
             raise ValueError("Starting history is longer than the model history")
         for frame in self.initial_history:
@@ -61,9 +91,6 @@ class Player:
                 raise ValueError("Starting frame dimensions differ from the model")
             if not torch.isfinite(frame).all() or frame.min() < 0 or frame.max() > 1:
                 raise ValueError("Starting frames must contain finite pixels in [0, 1]")
-        self.history = deque(maxlen=config["history"])
-        self.steps = 0
-        self.reset()
 
     @torch.inference_mode()
     def _predict(self, action_index):
@@ -92,7 +119,12 @@ class Player:
             self.past_actions.append(action_index)
         return result
 
-    def reset(self):
+    def reset(self, *, cycle=False):
+        self.continuous = False
+        self.held_keys = []
+        if cycle and self.start_states:
+            self.start_index = (self.start_index + 1) % len(self.start_states)
+            self._set_initial_history(self.start_states[self.start_index][1])
         self.history.clear()
         self.state_history.clear()
         self.state_history.extend(state.clone() for state in self.initial_states)
@@ -118,20 +150,41 @@ class Player:
             return np.zeros((height, width, channels), dtype=np.uint8)
         return self.frame.permute(1, 2, 0).mul(255).round().byte().numpy()
 
+    def tick(self, keymap):
+        """Execute at most one transition per paced playback tick."""
+        if self.continuous:
+            action = keymap[self.held_keys[-1]] if self.held_keys else (
+                0 if 0 in self.actions else self.actions[0]
+            )
+            self.advance(action)
+
 
 def handle_event(player, event, keymap):
     import pygame
 
     if event.type == pygame.QUIT:
         return False
+    if event.type == pygame.WINDOWFOCUSLOST:
+        player.continuous = False
+        player.held_keys.clear()
+    if event.type == pygame.KEYUP and event.key in player.held_keys:
+        player.held_keys.remove(event.key)
     if event.type != pygame.KEYDOWN or getattr(event, "repeat", False):
         return True
     if event.key == pygame.K_ESCAPE:
         return False
     if event.key == pygame.K_r:
         player.reset()
+    elif event.key == pygame.K_c:
+        player.reset(cycle=True)
+    elif event.key == pygame.K_TAB:
+        player.continuous = not player.continuous
     elif event.key in keymap:
-        player.advance(keymap[event.key])
+        if event.key in player.held_keys:
+            player.held_keys.remove(event.key)
+        player.held_keys.append(event.key)
+        if not player.continuous:
+            player.advance(keymap[event.key])
     return True
 
 
@@ -142,7 +195,7 @@ def default_bindings(config):
     if bindings:
         return [f"{key}={value}" for key, value in bindings.items()]
     keys = "1234567890abcdefghijklmnopqrstuvwxyz"
-    keys = [key for key in keys if key != "r"]
+    keys = [key for key in keys if key not in "rc"]
     if len(config["action_values"]) > len(keys):
         raise ValueError("Too many actions for automatic bindings; supply --key-action")
     return [f"{key}={value}" for key, value in zip(keys, config["action_values"])]
@@ -215,7 +268,28 @@ def main(argv=None):
         if args.start_state
         else (load_scene(scene_path, config) if scene_path else None)
     )
-    player = Player(model, config, device, initial_history)
+    start_states = [
+        (args.start_state or ("recorded scene" if scene_path else "empty start"), initial_history)
+    ]
+    try:
+        available_states = list_start_states(config, args.state_dir)
+    except (ValueError, OSError) as error:
+        print(f"Named start states unavailable: {error}", flush=True)
+        available_states = []
+    for state in available_states:
+        if state["name"] == args.start_state:
+            continue
+        path = named_scene_path(state["name"], config, args.state_dir)
+        if scene_path and path.resolve() == scene_path.resolve():
+            continue
+        try:
+            history = load_named_scene(state["name"], config, args.state_dir)
+        except (ValueError, OSError) as error:
+            print(f"Skipping start state {state['name']}: {error}", flush=True)
+            continue
+        start_states.append((state["name"], history))
+    print("Reset cycle: " + " -> ".join(name for name, _ in start_states), flush=True)
+    player = Player(model, config, device, initial_history, start_states=start_states)
     if scene_path:
         print(
             f"Recorded start: {scene_path.resolve()} ({len(initial_history)} frames). "
@@ -238,7 +312,7 @@ def main(argv=None):
 
     pygame.init()
     try:
-        pygame.key.set_repeat()  # A held key does not create inference steps.
+        pygame.key.set_repeat()  # Playback ticks handle held keys in continuous mode.
         bindings = args.key_action or default_bindings(config)
         print("Key bindings: " + ", ".join(bindings), flush=True)
         keymap = {}
@@ -248,9 +322,15 @@ def main(argv=None):
             if value not in player.actions:
                 parser.error(f"Action {value} absent from this checkpoint; set --key-action")
             code = pygame.key.key_code(key)
-            if code in (pygame.K_r, pygame.K_ESCAPE):
-                parser.error("R and Escape are reserved for reset and quit")
+            if code in (pygame.K_r, pygame.K_c, pygame.K_TAB, pygame.K_ESCAPE):
+                parser.error("R, C, Tab, and Escape are reserved player controls")
             keymap[code] = value
+        print(
+            f"Tab toggles continuous play at {PLAYBACK_FPS} FPS (60 Hz / frameskip 2). "
+            "Hold an action key; release for action "
+            f"{0 if 0 in player.actions else player.actions[0]}. R/C reset and pause.",
+            flush=True,
+        )
         _, height, width = config["shape"]
         size = (width * args.scale, height * args.scale)
         screen = pygame.display.set_mode((size[0], size[1] + 40))
@@ -270,17 +350,18 @@ def main(argv=None):
                 if not handle_event(player, event, keymap):
                     running = False
                     break
+            if running:
+                player.tick(keymap)
+            if player.start_name:
+                pygame.display.set_caption(f"gymemu — {player.start_name}")
             screen.fill((20, 20, 20))
             surface = pygame.surfarray.make_surface(np.swapaxes(player.pixels(), 0, 1))
             screen.blit(pygame.transform.scale(surface, size), (0, 40))
-            label = (
-                "Press an action key to generate the initial frame"
-                if player.frame is None
-                else f"Step {player.steps} | press action key | R reset | Esc quit"
-            )
+            mode = f"Play {PLAYBACK_FPS} FPS" if player.continuous else "Step mode"
+            label = f"{mode} | {player.steps} | Tab toggle | R reset | C next | Esc quit"
             screen.blit(font.render(label, True, (240, 240, 240)), (8, 12))
             pygame.display.flip()
-            clock.tick(60)  # Refresh the window only; no inference outside action events.
+            clock.tick(PLAYBACK_FPS)  # One prediction per tick; slow inference never catches up.
     finally:
         pygame.quit()
 
