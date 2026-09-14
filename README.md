@@ -71,7 +71,7 @@ throughput, learning rates, curriculum values, configuration, and the final summ
 Use `wandb.mode=offline` to collect logs locally or `wandb.mode=disabled` to turn tracking off.
 See [tracking options](docs/training.md#weights--biases) for teams and custom environments.
 
-Checkpoints also upload to the separate `gymemu-models` R2 bucket, together with the
+Checkpoints also upload to the separate `gymemu` R2 bucket, together with the
 recorded start scene, metrics, and reproduction files. Each run has a unique prefix;
 immutable objects and manifests retain successfully uploaded checkpoint versions.
 Use `r2.enabled=false` to keep artifacts local. Retry interrupted uploads with
@@ -94,10 +94,22 @@ uv run python play.py runs/breakout-direct/best.pt --list-start-states
 uv run python play.py runs/breakout-direct/best.pt --start-state ball-up
 ```
 
-Breakout includes `ball-up`, `near-bricks`, and `paddle-approach`. R restores the selected
-snapshot. These starts are shared across compatible checkpoints so you can compare the
-same situation. See [the snapshot library](start_states/README.md) for provenance and
-how to save more states with `save_start_state.py`.
+Available Breakout starts are shown below. Each image is the last recorded frame of
+its eight-frame snapshot. Use the name with `--start-state`.
+
+| `ball-up` | `near-bricks` | `paddle-approach` |
+| :---: | :---: | :---: |
+| ![Ball moving up toward the bricks](start_states/breakout/ball-up.png) | ![Ball moving up near the brick wall](start_states/breakout/near-bricks.png) | ![Ball descending toward the paddle](start_states/breakout/paddle-approach.png) |
+| Moving up after a paddle bounce | Approaching the brick wall | Descending toward paddle contact |
+
+| `half-cleared` | `almost-cleared` | `above-bricks` |
+| :---: | :---: | :---: |
+| ![Partly cleared wall with 50 bricks remaining](start_states/breakout/half-cleared.png) | ![Almost cleared wall with eight bricks remaining](start_states/breakout/almost-cleared.png) | ![Ball above the wall after tunneling through its left side](start_states/breakout/above-bricks.png) |
+| 50 bricks remain | Eight bricks remain | Ball above the wall; 86 bricks remain |
+
+R restores the selected snapshot. These starts are shared across compatible
+checkpoints so you can compare the same situation. See [the snapshot library](start_states/README.md)
+for provenance and how to save more states with `save_start_state.py`.
 
 ## Saved recipes
 

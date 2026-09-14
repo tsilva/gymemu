@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from gymemu.credentials import CREDENTIAL_PREFIX, r2_credentials
+
 ARTIFACTS = (
     "best.pt",
     "last.pt",
@@ -21,7 +23,6 @@ ARTIFACTS = (
     "metrics.jsonl",
     "summary.json",
 )
-CREDENTIAL_PREFIX = "GYMEMU_MODELS_R2"
 
 
 def validate_storage(config):
@@ -48,8 +49,7 @@ def validate_storage(config):
 
 def r2_client():
     """Read credentials at runtime, never from saved Hydra/W&B configuration."""
-    names = ("ENDPOINT_URL", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY")
-    values = {name: os.environ.get(f"{CREDENTIAL_PREFIX}_{name}", "").strip() for name in names}
+    values = r2_credentials()
     missing = [f"{CREDENTIAL_PREFIX}_{name}" for name, value in values.items() if not value]
     if missing:
         raise ValueError("R2 uploads require environment variables: " + ", ".join(missing))

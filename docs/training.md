@@ -170,14 +170,14 @@ for authentication and run settings.
 
 ## R2 checkpoint storage
 
-Training uploads run artifacts to the `gymemu-models` R2 bucket by default,
+Training uploads run artifacts to the `gymemu` R2 bucket by default,
 independently of the W&B mode. This is a separate bucket from Gradlab's model storage.
 `r2.enabled=false` disables all R2 access. Old standalone recipes without an `r2`
 section retain local-only storage.
 
 Provision the bucket once in the same Cloudflare account you use for Gradlab:
 
-1. In **R2 object storage**, create a bucket named `gymemu-models`. Keep it private.
+1. In **R2 object storage**, create a bucket named `gymemu`. Keep it private.
 2. Create an R2 API token with **Object Read & Write** permission scoped to that bucket.
 3. Export its account endpoint, access key ID, and secret access key in the training
    process as `GYMEMU_MODELS_R2_ENDPOINT_URL`, `GYMEMU_MODELS_R2_ACCESS_KEY_ID`, and
@@ -191,12 +191,30 @@ checkpoints, source archives, and W&B. Store them in your secret manager or proc
 environment. The [.env.example](../.env.example) file lists the required names;
 environment files are not loaded automatically.
 
+On macOS, Gymemu can instead read a local `~/.config/gymemu/r2.toml` profile containing
+the account endpoint and references to credentials stored in Keychain. The profile
+contains no secret values and is not part of the repository or run artifacts:
+
+```toml
+endpoint_url = "https://ACCOUNT_ID.r2.cloudflarestorage.com"
+
+[keychain]
+account = "ACCOUNT_ID/gymemu"
+access_key_id = "eu.tsilva.gymemu.r2.access-key-id"
+secret_access_key = "eu.tsilva.gymemu.r2.secret-access-key"
+```
+
+`GYMEMU_R2_CONFIG` selects another profile path. If any of the three R2 environment
+variables is set, all three must be supplied; the client never mixes environment
+values with Keychain credentials. On remote training hosts, inject the three variables
+through the host's secret manager or process environment.
+
 ```bash
 # With W&B authentication and the three R2 variables already configured
 uv run python train.py output=runs/breakout-stored
 
 # Choose another dedicated bucket or object prefix
-uv run python train.py r2.bucket=gymemu-models r2.prefix=experiments
+uv run python train.py r2.bucket=gymemu r2.prefix=experiments
 
 # Local-only smoke with no W&B or R2 credentials
 uv run python train.py experiment=smoke wandb.mode=disabled r2.enabled=false
@@ -357,6 +375,10 @@ the checkpoint's game. `--start-state`, `--start-scene`, and `--empty-start` are
 exclusive; omitting all three preserves the checkpoint's normal recorded start.
 The repository's library is found regardless of the current working directory.
 Use `--state-dir /path/to/library` to select a different library.
+
+For later Breakout situations, use `half-cleared` for 50 remaining bricks,
+`almost-cleared` for eight remaining bricks, or `above-bricks` for a ball that has
+emerged through the left side of the wall and is moving above it.
 
 Each named snapshot stores exact uint8 RGB frames, the native actions between them,
 and a name, description, and available source provenance. R restores both histories.
