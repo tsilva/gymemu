@@ -7,6 +7,30 @@ from torch.nn import functional as F
 from gymemu.models.action_history import ActionHistoryAutoencoder
 
 
+class CoordinatePool(nn.AdaptiveAvgPool2d):
+    """Preserve adaptive pooling bins on MPS for non-divisible spatial sizes."""
+
+    def __init__(self):
+        super().__init__((4, 4))
+
+    def forward(self, value):
+        height, width = value.shape[-2:]
+        if value.device.type != "mps" or (height % 4 == 0 and width % 4 == 0):
+            return super().forward(value)
+        # Adaptive bins use floor(start) and ceil(end), including overlapping bins.
+        # Padding or resizing here would change the existing checkpoint's predictions.
+        bins = [
+            value[
+                ...,
+                row * height // 4 : ((row + 1) * height + 3) // 4,
+                col * width // 4 : ((col + 1) * width + 3) // 4,
+            ].mean(dim=(-2, -1))
+            for row in range(4)
+            for col in range(4)
+        ]
+        return torch.stack(bins, dim=-1).reshape(*value.shape[:-2], 4, 4)
+
+
 class BallStateAutoencoder(ActionHistoryAutoencoder):
     def __init__(self, history, actions, shape, width=32, action_history=None):
         super().__init__(history, actions, shape, width, action_history)
@@ -14,7 +38,7 @@ class BallStateAutoencoder(ActionHistoryAutoencoder):
             history * (shape[0] + 3) + self.action_history * (actions + 1), width, 4, 2, 1
         )
         self.coordinates = nn.Sequential(
-            nn.AdaptiveAvgPool2d((4, 4)),
+            CoordinatePool(),
             nn.Flatten(),
             nn.Linear(width * 4 * 16, 64),
             nn.ReLU(),

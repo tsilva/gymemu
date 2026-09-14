@@ -1,4 +1,7 @@
 name: breakout
+ball_sprite:
+  height: 4
+  width: 2
 env_id: Breakout-Atari2600-v0
 dataset: tsilva/gradlab-breakout-trajectories
 revision: b8091d248295eb5135011dd9b943c75f4a7d50be

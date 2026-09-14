@@ -1,0 +1,15 @@
+defaults:
+  - override /model@_global_.model: action_history_cnn
+kind: ball_region
+models:
+  predictor: ${model}
+options:
+  sprite_height: ${game.ball_sprite.height}
+  sprite_width: ${game.ball_sprite.width}
+  padding: 4
+  ball_region_weight: 0.3
+stages:
+  - name: prediction
+    objective: next_frame_ball_region
+    epochs: ${trainer.epochs}
+    learning_rate: ${trainer.learning_rate}

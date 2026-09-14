@@ -58,6 +58,9 @@ under `runs/`. Training downloads the pinned
 [Breakout dataset](https://huggingface.co/datasets/tsilva/gradlab-breakout-trajectories)
 and writes a recorded `start-scene.npz` beside the checkpoints.
 
+On Apple Silicon, `play.py` can use MPS, including existing ball-position checkpoints.
+Pass `--device mps` to select it explicitly, or `--device cpu` for CPU playback.
+
 Training logs to Weights & Biases by default. Authenticate once before training:
 
 ```bash
@@ -120,6 +123,11 @@ The successful ten-epoch Breakout CNN run is saved as `recipe=breakout_cnn`.
 `recipe=breakout_actions` adds seven previous executed actions alongside the current
 action and eight RGB frames, using the same dataset, training budget, and MSE objective.
 Generic `recipe=direct` and `recipe=latent` presets cover the original approaches.
+`recipe=breakout_ball_region` keeps the action-history model and recorded training
+histories, adding a separately normalized RGB loss around a detected target ball.
+It uses a four-pixel margin and weight `0.3`, and logs detection coverage. See the
+[ball-region experiment](docs/recipes.md#ball-region-loss-experiment) for the control
+run, tuning, and detector limitations.
 `recipe=breakout_scheduled` tests recovery from generated context using the action-history
 CNN. It starts with two epochs of recorded context, then increases prediction feedback
 to 80% by epoch 8. The [recipe guide](docs/recipes.md#scheduled-frame-feedback) explains

@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from gymemu.ball_regions import ball_region_mask
 from gymemu.models import build_model
 
 
@@ -21,6 +22,13 @@ class Approach(nn.Module):
 
     def begin_epoch(self, epoch):
         """Update training curricula outside compiled computation; return log metadata."""
+        return {}
+
+    def reset_epoch_metrics(self):
+        """Reset optional diagnostics before each training or validation pass."""
+
+    def epoch_metrics(self):
+        """Return optional scalar diagnostics, separate from comparison metrics."""
         return {}
 
     def validate_stages(self, stages):
@@ -74,6 +82,67 @@ class ActionHistoryApproach(DirectApproach):
         if not hasattr(self.predictor, "action_history"):
             raise ValueError("direct_actions requires a predictor declaring action_history")
         self.action_history = self.predictor.action_history
+
+
+class BallRegionApproach(ActionHistoryApproach):
+    objectives = predictive_objectives = ("next_frame_ball_region",)
+
+    def __init__(
+        self, spec, history, actions, shape, *, sprite_height, sprite_width,
+        padding=4, ball_region_weight=0.3,
+    ):
+        super().__init__(spec, history, actions, shape)
+        if shape[0] != 3:
+            raise ValueError("Ball-region detection requires RGB frames")
+        for name, value in (("sprite_height", sprite_height), ("sprite_width", sprite_width)):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if type(padding) is not int or padding < 0:
+            raise ValueError("padding must be a nonnegative integer")
+        if (
+            type(ball_region_weight) not in (int, float)
+            or not math.isfinite(ball_region_weight)
+            or ball_region_weight < 0
+        ):
+            raise ValueError("ball_region_weight must be finite and nonnegative")
+        self.sprite_height, self.sprite_width = sprite_height, sprite_width
+        self.padding, self.ball_region_weight = padding, ball_region_weight
+        self.register_buffer("_region_totals", torch.zeros(4), persistent=False)
+
+    def reset_epoch_metrics(self):
+        self._region_totals.zero_()
+
+    def epoch_metrics(self):
+        samples, detected, rgb, region = self._region_totals.tolist()
+        return {
+            "ball_detection_coverage": detected / max(samples, 1),
+            "rgb_mse": rgb / max(samples, 1),
+            "ball_region_mse": region / max(samples, 1),
+        }
+
+    def joint_loss(self, prediction, target):
+        mask, available = ball_region_mask(
+            target, sprite_height=self.sprite_height, sprite_width=self.sprite_width,
+            padding=self.padding,
+        )
+        error = (prediction.float() - target.float()).square().mean(dim=1, keepdim=True)
+        rgb = error.flatten(1).mean(dim=1)
+        # Each detected region gets its own mean, including clipped edge regions.
+        # Undetected samples contribute zero; full-batch averaging is partition invariant.
+        region = (error * mask).flatten(1).sum(dim=1) / mask.flatten(1).sum(dim=1).clamp_min(1)
+        with torch.no_grad():
+            self._region_totals.add_(torch.stack((
+                rgb.new_full((), len(target)), available.sum().float(),
+                rgb.detach().sum(), region.detach().sum(),
+            )))
+        return (rgb + self.ball_region_weight * region).mean()
+
+    def loss(self, history, action, target):
+        return self.joint_loss(self(history, action), target)
+
+    def evaluate(self, history, action, target):
+        prediction = self(history, action)
+        return self.joint_loss(prediction, target), prediction
 
 
 class BallStateApproach(ActionHistoryApproach):
@@ -324,6 +393,7 @@ class LatentApproach(Approach):
 APPROACHES = {
     "direct": DirectApproach,
     "direct_actions": ActionHistoryApproach,
+    "ball_region": BallRegionApproach,
     "ball_state": BallStateApproach,
     "latent": LatentApproach,
     "scheduled_actions": ScheduledSamplingApproach,
