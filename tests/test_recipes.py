@@ -37,7 +37,9 @@ def test_successful_breakout_recipe_and_overrides():
 
 
 @pytest.mark.parametrize("kind", ["direct", "latent"])
-def test_run_recipe_replays_weights_and_tracks_source(snapshot, tmp_path, kind):
+def test_run_recipe_replays_weights_and_tracks_source(snapshot, tmp_path, kind, monkeypatch):
+    monkeypatch.setenv("GYMEMU_IMAGE_SOURCE_SHA", "a" * 40)
+    monkeypatch.setenv("GYMEMU_IMAGE_REF", "ghcr.io/tsilva/gymemu/train@sha256:" + "b" * 64)
     cfg = compose_config([f"recipe={kind}", "game=custom", "experiment=smoke"])
     cfg.game.dataset = str(snapshot)
     cfg.wandb.mode = "disabled"
@@ -52,6 +54,8 @@ def test_run_recipe_replays_weights_and_tracks_source(snapshot, tmp_path, kind):
         assert torch.equal(value, repeated.state_dict()[name]), name
     receipt = json.loads((first / "reproduction.json").read_text())
     assert receipt["dataset"]["local_content_sha256"]
+    assert receipt["container"]["source_commit"] == "a" * 40
+    assert receipt["container"]["image_ref"].endswith("b" * 64)
     assert (
         receipt["recipe_sha256"] == hashlib.sha256((first / "recipe.yaml").read_bytes()).hexdigest()
     )
@@ -62,6 +66,7 @@ def test_run_recipe_replays_weights_and_tracks_source(snapshot, tmp_path, kind):
     assert receipt["packages"]["torch"] and receipt["python"] and receipt["device"] == "cpu"
     with tarfile.open(first / "source.tar.gz") as archive:
         assert "uv.lock" in archive.getnames() and "gymemu/engine.py" in archive.getnames()
+        assert "containers/train/Dockerfile" in archive.getnames()
         for member in archive.getmembers():
             assert (
                 hashlib.sha256(archive.extractfile(member).read()).hexdigest()

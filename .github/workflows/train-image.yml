@@ -1,0 +1,78 @@
+name: Training image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '*.py'
+      - 'gymemu/**'
+      - 'configs/**'
+      - 'start_states/**'
+      - 'containers/train/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.python-version'
+      - '.dockerignore'
+      - '.github/workflows/train-image.yml'
+  pull_request:
+    paths:
+      - 'containers/train/**'
+      - '.dockerignore'
+      - '.github/workflows/train-image.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: train-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/tsilva/gymemu/train
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Make room for CUDA layers on the disposable runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build locked Linux runtime
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: containers/train/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Train, reload and play on CPU
+        run: |
+          mkdir -p "$RUNNER_TEMP/gymemu-verification"
+          docker run --rm --shm-size 1g \
+            -v "$RUNNER_TEMP/gymemu-verification:/workspace" \
+            "$IMAGE:sha-$GITHUB_SHA" smoke --device cpu
+      - name: Authenticate to GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish tested image
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          docker push "$IMAGE:sha-$GITHUB_SHA"
+          docker tag "$IMAGE:sha-$GITHUB_SHA" "$IMAGE:main"
+          docker push "$IMAGE:main"
+          docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:sha-$GITHUB_SHA" > "$RUNNER_TEMP/image-ref.txt"
+          printf 'Training image: `%s`\n' "$(cat "$RUNNER_TEMP/image-ref.txt")" >> "$GITHUB_STEP_SUMMARY"
