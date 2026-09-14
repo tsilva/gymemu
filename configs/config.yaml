@@ -24,7 +24,7 @@ wandb:
 
 r2:
   enabled: true
-  bucket: gymemu-models
+  bucket: gymemu
   prefix: runs
 
 hydra:

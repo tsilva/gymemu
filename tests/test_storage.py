@@ -73,8 +73,8 @@ def test_uploaded_checkpoint_and_scene_restore_playback(snapshot, tmp_path, fake
     receipt = json.loads((output / "r2.json").read_text())
     manifest = json.loads(fake_s3.objects[f"{receipt['prefix']}/manifest.json"])
     assert manifest["status"] == receipt["status"] == "complete"
-    assert manifest["bucket"] == "gymemu-models"
-    assert all(bucket == "gymemu-models" for bucket in fake_s3.buckets)
+    assert manifest["bucket"] == "gymemu"
+    assert all(bucket == "gymemu" for bucket in fake_s3.buckets)
     assert receipt["prefix"].startswith("runs/Fixture-v0/")
     assert {
         "best.pt",
@@ -165,6 +165,7 @@ def test_disabled_and_old_recipes_need_no_sdk_or_credentials(tmp_path, monkeypat
 
 
 def test_missing_credentials_fail_before_dataset_access(snapshot, tmp_path, monkeypatch):
+    monkeypatch.setenv("GYMEMU_R2_CONFIG", str(tmp_path / "missing-r2.toml"))
     for suffix in ("ENDPOINT_URL", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY"):
         monkeypatch.delenv(f"GYMEMU_MODELS_R2_{suffix}", raising=False)
     with pytest.raises(ValueError, match="GYMEMU_MODELS_R2_ACCESS_KEY_ID"):
@@ -175,7 +176,7 @@ def test_missing_credentials_fail_before_dataset_access(snapshot, tmp_path, monk
 def test_storage_validation_rejects_missing_identity_and_bad_prefix():
     config = {
         "game": {"env_id": None},
-        "r2": {"enabled": True, "bucket": "gymemu-models", "prefix": "runs"},
+        "r2": {"enabled": True, "bucket": "gymemu", "prefix": "runs"},
     }
     with pytest.raises(ValueError, match="canonical environment ID"):
         validate_storage(config)
