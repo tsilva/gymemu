@@ -3,6 +3,27 @@
 For the locked Docker image, Beast-3 scheduling, Runpod, and bounded GPU checks,
 see [container training](../containers/train/README.md).
 
+The image in [verified-image.txt](../ops/dstack/verified-image.txt) passed Beast-3
+verification on 2026-09-14 using its RTX 4090, PyTorch 2.14.0, and CUDA 13.0.
+Direct, two-stage latent, and ball-state GPU smokes passed with bf16 and compilation.
+A dstack job then trained `breakout_ball` on the pinned real dataset for eight
+batches and evaluated two held-out batches, with the normal 210×160 RGB frames,
+eight-frame history, and width-32 model. Checkpoint reload and 12-step playback
+passed from both recorded and empty starts. W&B synced and the uploaded R2
+checkpoint passed a SHA-256 read-back check. This proves execution, not rollout quality
+or sustained throughput. See the [verification run](https://wandb.ai/tsilva/gymemu-Breakout-Atari2600-v0/runs/91iwybk4)
+and [successful image build](https://github.com/tsilva/gymemu/actions/runs/34838073845).
+
+With the private dstack coordinator connection configured, launch full training using:
+
+```bash
+uv run --frozen python ops/dstack/launch.py \
+  --image "$(cat ops/dstack/verified-image.txt)" --name gymemu-ball --submit
+```
+
+The verified reference remains pinned when newer images are published. Update it
+only after verifying the replacement on a GPU.
+
 See the [README](../README.md) for setup, playback, and comparison commands.
 
 For joint RGB and ball-coordinate prediction, run

@@ -77,7 +77,7 @@ def main():
         print(rendered, end="")
         return
     with tempfile.TemporaryDirectory(prefix="gymemu-dstack-") as directory:
-        path = Path(directory) / "task.dstack.yml"
+        path = Path(directory).resolve() / "task.dstack.yml"
         path.write_text(rendered)
         subprocess.run(
             [
@@ -92,6 +92,7 @@ def main():
                 "--detach",
             ],
             check=True,
+            cwd=path.parent,
         )
 
 
