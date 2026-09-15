@@ -451,3 +451,12 @@ This uses `approach=scheduled_ball_region`, which reuses scheduled context gener
 and the ball objective. Generated context adds inference work to every training
 batch. Evaluate ball survival and duplicates during playback as well as held-out
 MSE; this objective does not enforce exactly one ball.
+
+## Breakout autoregressive ball-region recipe
+
+`breakout_autoregressive_ball_region` trains through generated RGB sequences with
+per-step RGB and auxiliary ball-region loss. It uses horizons 1 → 2 → 4 → 8 across
+the first four epochs, then eight steps for the remaining six epochs. Ball-region
+weight is 0.03, batch size is 8, and compilation is disabled. This is an experimental
+recipe, without a measured quality or throughput claim. See [training.md](training.md#differentiable-autoregressive-training)
+for boundary handling, normalization, and fixed-horizon overrides.

@@ -61,6 +61,49 @@ adaptive-pooling bins on MPS using equivalent regional means. Existing checkpoin
 weights load directly; no retraining or conversion is needed. CPU and CUDA retain
 PyTorch's native pooling operation.
 
+## Browse saved checkpoints
+
+```bash
+uv run gymemu play
+uv run gymemu play --runs-dir /absolute/path/to/runs
+```
+
+Without a checkpoint argument, the browser opens an environment → training run →
+checkpoint navigator for local and R2 runs. It discovers local run directories recursively, including
+Hydra timestamped runs, and sorts runs and checkpoints by their latest save time.
+Each run lists its root checkpoint files and `stages/<stage>/*.pt` checkpoints.
+Stage checkpoints use `start-scene.npz` from the run directory. Selecting a
+checkpoint loads it into the existing player in paused mode; the **Checkpoints**
+link returns to the catalog. Only one checkpoint is active per navigator server.
+
+Use the filter at each level or the breadcrumbs and browser Back to navigate.
+Refresh discovers new files. Runs without checkpoints display an empty state;
+unreadable runs display a notice. Older runs missing `config.json` use safely loaded
+checkpoint metadata for their environment ID, with **Unknown environment** when no
+ID was saved. Discovery does not construct inference models.
+
+R2 uses the existing credential profile and defaults to bucket `gymemu`, prefix
+`runs`. Override these with `--r2-bucket` and `--r2-prefix`. Each row identifies its
+local or R2 source. Opening an R2 run lists its current checkpoints and retained
+versions from immutable manifests, deduplicating repeated publications of the same
+file contents. Earlier versions show a short content hash. A remote run's count
+initially covers current checkpoint files and expands when its history is loaded.
+
+Selection downloads the checkpoint and the starting scene from the same manifest
+into `~/.cache/gymemu/checkpoints/`. Both downloads and cached files are checked
+against the published SHA-256 hashes and sizes. Selecting another checkpoint reuses
+verified cached files. Checkpoint loading still uses `weights_only=True` and the
+model registry. It does not execute Python targets from manifests or metadata.
+
+Use `--local-only` to avoid contacting R2. If R2 is unavailable, the navigator shows
+a notice and keeps local runs accessible. Refresh retries remote discovery.
+
+Playback options such as `--device cpu`, `--autoregressive`, `--start-state`, and
+`--empty-start` apply to each selected checkpoint. In autoregressive mode, missing
+starting scenes remain an error unless an explicit alternative is supplied. Headless playback and
+`--list-start-states` still require a checkpoint argument. Supplying a checkpoint
+directly continues to open the player and diagnostics tabs.
+
 ## Hierarchical configuration
 
 [Hydra](https://hydra.cc/docs/intro/) composes YAML defaults and command-line overrides.
@@ -422,6 +465,32 @@ The Input history widget shows every RGB history frame, oldest to newest,
 left to right and then top to bottom. Black frames retain the model's zero padding.
 After inference it shows the exact stack used for the displayed prediction; before
 the first prediction and after reset it shows the stack ready for the next step.
+After pausing on a prediction, drag one history tile onto another to insert it at
+that position and rerun inference for the same target. Alt + arrow keys move the
+focused tile too. Labels identify each frame's original slot while shuffled.
+This temporary experiment changes only RGB frame order; action tokens, auxiliary
+state, and the target stay fixed. The prediction, difference image, and current
+float32 RGB MSE update together. Recorded MSE chart points and autoregressive
+rollout history remain unchanged. Scrubbing, stepping, resetting, or switching
+episodes or modes restores normal history. A changed prediction demonstrates
+sensitivity to the chosen order; an unchanged prediction alone does not prove
+the model ignores history.
+The pencil button on each history tile opens a zoomed pixel editor, pausing playback
+if needed. Before the first prediction, the popup opens for inspection and explains
+that you must step once before applying edits. Its swatches contain only colors
+present in the frame when
+opened. Choose a square brush size from 1 to 32 image pixels; zoom does not change
+its painted area. Click or drag to paint, Alt-click to pick an existing
+color, and use zoom, Undo stroke, or Reset painting as needed. Apply and predict
+reruns the same target using the painted frame; Cancel discards unapplied strokes.
+The server validates colors against the original frame palette and preserves
+untouched float pixels. Edits follow the original frame through reordering, and
+scrubbing or stepping clears both painting and shuffling. The current prediction,
+difference, and MSE update together without changing recorded data, chart points,
+action/state inputs, or future rollout history.
+Edited tiles show a revert button in their bottom-right corner. It restores that
+frame's original float pixels and reruns inference for the same target. Other
+painted frames and the current frame order stay intact.
 Closing or leaving the browser pauses playback. Ctrl+C in the terminal stops the server.
 
 The player starts in single-step mode. Tab toggles continuous playback, capped at
@@ -447,9 +516,9 @@ keyboard, heartbeat, or blur commands. Ctrl+C stops the server.
 The UI reuses Gradlab's panel module lifecycle, registry, GridStack layout, fonts,
 and theme, including paired views with per-tab panel placement. Original, Prediction,
 and difference belong to the player tab with its playbar; input history, error charts,
-model context, and custom widgets belong to Diagnostics. Its default arrangement puts
-Input history across the full top row, with Prediction error and Model context side
-by side below. History tiles use minimal spacing, overlaid top-left frame numbers,
+and custom widgets belong to Diagnostics. Its default arrangement puts
+Input history across the full top row, with a full-width Prediction error chart
+below. History tiles use minimal spacing, overlaid top-left frame numbers,
 and no bottom caption. Older default arrangements migrate; custom placements remain. Header links open or focus
 the companion tab. Layout updates use BroadcastChannel with a storage-event fallback
 and ordered revisions, following Gradlab's workspace synchronization strategy.
@@ -466,12 +535,11 @@ its menu supports editing the title, selecting metrics, duplicating, and deletin
 custom instances. The error chart keeps all measured transitions in the current episode, sorted by
 timestep. Hover shows a vertical cursor and MSE; clicking a point pauses and selects
 the same target in both tabs and the playbar. Drag horizontally to zoom and double-click
-to reset, or use Reset zoom. While zoomed, Diagnostics also shows a segment selector beneath the charts.
+to reset, or use Reset zoom in the playbar. While zoomed, Diagnostics also shows a segment selector beneath the charts.
 The playbar in both tabs highlights the shared zoom range, with handles
 that can be dragged or adjusted with arrow keys (Shift moves ten steps), Home, and End.
 On a focused chart, arrow keys or Home/End inspect points; Enter or Space selects.
-Highest MSE selects the largest measured error, including points outside the zoom.
-Coverage reports measured transitions; unvisited steps remain unscored, with gaps
+Unvisited steps remain unscored, with gaps
 rather than interpolated errors. The purple line marks the selected step; the amber
 line marks the hovered step. Reset, episode changes, and mode changes clear the series
 and zoom. Stale chart selections from a previous episode or reset are rejected.
@@ -482,6 +550,13 @@ Reset layout restores defaults for both tabs. Old layouts retain their widget
 settings, with diagnostic placements moved into the second tab. These preferences
 do not change inference inputs.
 Extension instructions live in `gymemu/web_assets/panels/README.md`.
+
+New launches default to paused teacher forcing, including checkpoints opened from
+the navigator. Use `--autoregressive` to start with predicted frames feeding back
+into history. Scene options (`--start-state`, `--start-scene`, `--empty-start`) and
+action overrides (`--key-action`, `--headless-actions`) also select autoregressive
+mode. `--teacher-forcing` remains available as an explicit choice; dataset replay
+options work without it on a default launch.
 
 The mode selector switches between autoregressive play and teacher forcing using
 the same checkpoint. Each switch resets the selected mode and pauses. Dataset
@@ -516,7 +591,7 @@ An unknown episode, incompatible image geometry, missing required state labels, 
 action outside the checkpoint vocabulary produces an error.
 
 The dashboard opens paused with the real initial frame in Original. Prediction and
-Prediction − original show a pending message until the first prediction.
+Diff show a pending message until the first prediction.
 Space predicts the next recorded transition, Tab toggles continuous
 play at 30 predictions per second, R restarts the current episode, and C selects
 the next episode. Reset, focus loss, and episode end pause replay. Keyboard presses
@@ -571,7 +646,7 @@ and MSE. A shorter episode stops at its last frame without crossing into another
 `play.py CHECKPOINT --start-state NAME` loads a named snapshot from
 `start_states/<game>/NAME.npz`. `--list-start-states` lists names and descriptions for
 the checkpoint's game. `--start-state`, `--start-scene`, and `--empty-start` are mutually
-exclusive; omitting all three preserves the checkpoint's normal recorded start.
+exclusive; `--autoregressive` uses the checkpoint's normal recorded start.
 The repository's library is found regardless of the current working directory.
 Use `--state-dir /path/to/library` to select a different library.
 
@@ -627,3 +702,37 @@ This uses `approach=scheduled_ball_region`, which reuses scheduled context gener
 and the ball objective. Generated context adds inference work to every training
 batch. Evaluate ball survival and duplicates during playback as well as held-out
 MSE; this objective does not enforce exactly one ball.
+
+## Differentiable autoregressive training
+
+`recipe=breakout_autoregressive_ball_region` starts each example with recorded RGB
+history and generates future frames sequentially using the aligned recorded actions.
+Every subsequent input uses predicted RGB, with gradients preserved through feedback.
+Every valid target receives whole-frame RGB MSE plus ball-region MSE weighted by 0.03.
+The region term is zero when the target-image detector cannot locate a ball; this
+objective does not supervise invisible ball coordinates.
+
+The recipe uses horizons 1, 2, 4, and 8 in epochs 1 through 4, then keeps 8 through
+epoch 10. `approach.options.rollout_schedule` lists one horizon per epoch; its last
+value is repeated and must equal `approach.options.rollout_steps`, the maximum.
+Use `approach.options.rollout_schedule=[8]` for eight steps from the start. Future
+horizon and RGB history length are independent; the horizon can exceed history.
+
+Every recorded frame remains a possible first target, including bootstrap and final
+frames. Future targets stop at the episode boundary, with negative action tokens
+marking invalid right padding. Loss is averaged over valid steps within each example,
+then over examples, giving every sampled start equal weight. The diagnostic RGB and
+ball-region means pool valid frames, so they can differ from the example-weighted
+training objective when remaining sequence lengths differ. Bootstrap has zero RGB
+history and no game action. Both standard and cached loaders preserve this alignment.
+
+This recipe uses batch size 8 and disables compilation initially to limit rollout
+memory and compilation costs. These settings have not been benchmarked for throughput.
+Training loss is a sequence objective; checkpoint selection and held-out comparison
+remain float32 one-step RGB MSE on the same recorded targets as other approaches.
+The ordinary player and checkpoint contract remain unchanged. Better collision
+recovery must be checked in held-out recursive playback; it is not guaranteed.
+
+```bash
+uv run python train.py recipe=breakout_autoregressive_ball_region r2.enabled=false
+```

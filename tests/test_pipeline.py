@@ -228,6 +228,6 @@ def test_missing_default_scene_does_not_fall_back_to_empty_start(tmp_path, capsy
     import play
 
     with pytest.raises(SystemExit) as error:
-        play.main([str(tmp_path / "checkpoint.pt")])
+        play.main([str(tmp_path / "checkpoint.pt"), "--autoregressive"])
     assert error.value.code == 2
     assert "Recorded starting scene not found" in capsys.readouterr().err

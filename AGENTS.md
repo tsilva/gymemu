@@ -22,9 +22,11 @@ runner owns stages, evaluation, and run artifacts. Root scripts are entry points
   configs. The built-in dataset contract is fixed-size RGB and scalar integer actions;
   other schemas/action types need an explicit adapter. Do not claim arbitrary dataset
   formats or action spaces are already supported.
-- The player starts in single-step mode, with inference on fresh action key presses.
+- The player opens paused in teacher-forcing mode using recorded dataset history and
+  actions. --autoregressive selects interactive play, which starts in single-step
+  mode with inference on fresh action key presses.
   Tab toggles continuous play at 30 predictions/s for 60 Hz Atari with frameskip 2.
-  Reset and focus loss pause playback. By default it loads
+  Reset and focus loss pause playback. Autoregressive play loads
   start-scene.npz beside the checkpoint and restores it on reset. Breakout's config
   selects its existing full-wall scene after startup animation. --start-scene selects
   another scene; --empty-start explicitly tests learned initialization. Never silently

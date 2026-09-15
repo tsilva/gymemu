@@ -218,6 +218,7 @@ class Windows(Dataset):
         *,
         action_history: int = 1,
         rollout_steps: int = 0,
+        future_steps: int = 0,
         state_fields=(),
     ):
         if type(action_history) is not int or not 1 <= action_history <= history:
@@ -226,6 +227,14 @@ class Windows(Dataset):
         self.state_fields = tuple(state_fields)
         if type(rollout_steps) is not int or rollout_steps < 0:
             raise ValueError("rollout_steps must be a nonnegative integer")
+        if type(future_steps) is not int or future_steps < 0:
+            raise ValueError("future_steps must be a nonnegative integer")
+        if future_steps and (rollout_steps or state_fields):
+            raise ValueError(
+                "Future targets cannot be combined with prefix rollout or state inputs"
+            )
+        self.future_steps = future_steps
+        self.target_shape = ((future_steps,) if future_steps else ()) + tuple(frames.shape)
         self.rollout_steps = rollout_steps
         self.input_history = history + rollout_steps
         self.action_shape = (
@@ -233,6 +242,8 @@ class Windows(Dataset):
             if rollout_steps
             else (() if action_history == 1 else (action_history,))
         )
+        if future_steps:
+            self.action_shape = (future_steps, action_history)
         self.frames, self.episodes, self.history = frames, episodes, history
         self.action_index = {value: i for i, value in enumerate(actions)}
         self.start_action = len(actions)  # Explicit absence of a game action at reset.
@@ -248,6 +259,13 @@ class Windows(Dataset):
         return int(self.ends[-1])
 
     def action_at(self, episode, position):
+        if self.future_steps:
+            return [
+                self._action_tokens(episode, p)
+                if p < len(episode.frames)
+                else [-1] * self.action_history
+                for p in range(position, position + self.future_steps)
+            ]
         if self.rollout_steps:
             return [
                 self._action_tokens(episode, p) if p >= 0 else [-1] * self.action_history
@@ -283,10 +301,16 @@ class Windows(Dataset):
         action = self.action_at(episode, position)
         if self.action_shape:
             action = torch.tensor(action, dtype=torch.long)
+        if self.future_steps:
+            ids = episode.frames[position : position + self.future_steps]
+            target = torch.zeros(self.target_shape, dtype=history.dtype)
+            target[: len(ids)] = torch.stack([self.frames.get(int(i)) for i in ids])
+        else:
+            target = self.frames.get(int(episode.frames[position]))
         return (
             history,
             action,
-            self.frames.get(int(episode.frames[position])),
+            target,
             *self.state_at(episode, position),
         )
 

@@ -17,14 +17,17 @@ export function normalizeWorkspace(saved) {
     defaults.revision = {clock:saved.revision.clock, writer:saved.revision.writer.slice(0,80)};
   }
   for (const [id, value] of Object.entries(saved.panels).slice(0, 40)) {
+    if (id === 'model') continue; // Retired Model context panel, including saved layouts.
     if (!/^[a-z][a-z0-9-]{0,60}$/.test(id) || !PANEL_TYPES[value?.type]) continue;
     if (!defaults.panels[id] && value.type !== 'telemetry') continue;
     const fallback = defaults.panels[id] || defaults.panels.metrics;
     const minimum = PANEL_TYPES[value.type].minimum;
     const integer = (v, min, max, d) => Number.isInteger(v) ? Math.max(min, Math.min(max, v)) : d;
     const w = integer(value.placement?.w, minimum.w, 12, fallback.placement.w);
+    const title = id === 'difference' && /^Prediction [−–-] original$/.test(value.title)
+      ? fallback.title : value.title;
     defaults.panels[id] = {
-      type: fallback.type, title: String(value.title || fallback.title).slice(0, 80),
+      type: fallback.type, title: String(title || fallback.title).slice(0, 80),
       builtin: Boolean(BUILTIN_PANEL_PRESETS[id]), enabled: value.enabled !== false,
       config: { ...fallback.config,
         ...(fallback.type === 'telemetry' ? { view: value.config?.view === 'stats' ? 'stats' : 'chart',
@@ -44,12 +47,16 @@ export function normalizeWorkspace(saved) {
     defaults.panels.prediction.placement.x = 4;
   }
   // Upgrade the former default diagnostic arrangement without moving custom layouts.
-  const history = defaults.panels.history.placement, metrics = defaults.panels.metrics.placement, model = defaults.panels.model.placement;
+  const history = defaults.panels.history.placement, metrics = defaults.panels.metrics.placement, model = saved.panels.model?.placement;
+  const modelY = model?.y - (saved.version < 3 ? 14 : 0);
   if (history.x===0 && history.y===0 && history.w===8 && history.h===10
       && metrics.x===0 && metrics.y===10 && metrics.w===8 && [7,11].includes(metrics.h)
-      && model.x===8 && model.y===0 && model.w===4 && model.h===7) {
-    for (const id of ['history','metrics','model'])
+      && model?.x===8 && modelY===0 && model.w===4 && model.h===7) {
+    for (const id of ['history','metrics'])
       Object.assign(defaults.panels[id].placement, BUILTIN_PANEL_PRESETS[id].placement);
+  } else if (metrics.x===0 && metrics.y===16 && metrics.w===8 && metrics.h===11
+      && model?.x===8 && modelY===16 && model.w===4 && model.h===11) {
+    metrics.w = 12;
   }
   return defaults;
 }

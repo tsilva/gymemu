@@ -131,7 +131,6 @@ def test_replay_headless_without_start_scene(snapshot, tmp_path, monkeypatch, ca
     main(
         [
             str(tmp_path / "unused.pt"),
-            "--teacher-forcing",
             "--dataset",
             str(snapshot),
             "--headless-steps",
@@ -165,8 +164,8 @@ def test_difference_preserves_rgb_sign_and_zero(snapshot):
 @pytest.mark.parametrize(
     "options",
     [
-        ["--dataset", "unused"],
-        ["--headless-steps", "1"],
+        ["--autoregressive", "--dataset", "unused"],
+        ["--autoregressive", "--headless-steps", "1"],
         ["--teacher-forcing", "--empty-start"],
         ["--teacher-forcing", "--headless-actions", "0"],
         ["--teacher-forcing", "--key-action", "space=2"],

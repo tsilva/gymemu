@@ -40,7 +40,7 @@ class CachedBatchLoader:
             pin_memory=self.pin_memory,
         )
         targets = torch.empty(
-            (len(indices), *frames.shape), dtype=torch.uint8, pin_memory=self.pin_memory
+            (len(indices), *data.target_shape), dtype=torch.uint8, pin_memory=self.pin_memory
         )
         action_shape = (len(indices), *data.action_shape)
         actions = torch.empty(action_shape, dtype=torch.long, pin_memory=self.pin_memory)
@@ -61,8 +61,15 @@ class CachedBatchLoader:
             for column, frame_id in enumerate(ids, start=padding):
                 frame_ids.append(frame_id)
                 destinations.append(history_np[row, column])
-            frame_ids.append(episode.frames[position])
-            destinations.append(targets_np[row])
+            if data.future_steps:
+                target_ids = episode.frames[position : position + data.future_steps]
+                targets_np[row] = 0
+                for column, frame_id in enumerate(target_ids):
+                    frame_ids.append(frame_id)
+                    destinations.append(targets_np[row, column])
+            else:
+                frame_ids.append(episode.frames[position])
+                destinations.append(targets_np[row])
             actions_np[row] = data.action_at(episode, position)
             if data.state_fields:
                 states.append(data.state_at(episode, position))
