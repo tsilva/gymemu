@@ -11,17 +11,33 @@
 </head>
 <body>
   <header class="app-header">
-    <a class="app-wordmark" href="#" aria-label="Gymemu player"><span class="brand-mark">g</span> GYMEMU</a>
-    <div class="session-heading"><span class="eyebrow">NEURAL EMULATOR / PLAYER</span><strong id="checkpoint">Connecting to checkpoint…</strong></div>
+    <a class="app-wordmark" href="#" aria-label="Gymemu player">GYMEMU</a>
+    <span class="header-divider" aria-hidden="true"></span>
+    <div class="session-heading"><strong id="checkpoint">Connecting to checkpoint…</strong></div>
     <select id="mode" class="mode-badge" aria-label="Playback mode"><option value="autoregressive">Autoregressive</option><option value="teacher-forcing">Teacher forcing</option></select><span id="connection" class="connection" role="status">Connecting</span>
-    <div class="workspace-actions"><button id="panels-toggle" class="quiet">Panels</button><button id="add-panel">Add widget</button><button id="reset-layout" class="quiet">Reset layout</button></div>
+    <div class="workspace-actions">
+      <button id="panels-toggle" class="quiet" type="button" aria-label="Panels" title="Panels"><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-layout-grid"></use></svg></button>
+      <button id="add-panel" type="button" aria-label="Add widget" title="Add widget"><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-plus"></use></svg></button>
+      <button id="reset-layout" class="quiet" type="button" aria-label="Reset layout" title="Reset layout"><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-restore"></use></svg></button>
+    </div>
   </header>
   <aside id="panel-shelf" class="panel-shelf" hidden><span class="eyebrow">HIDDEN PANELS</span><div id="panel-shelf-items"></div></aside>
   <main id="dashboard" class="dashboard grid-stack" aria-label="Playback workspace"></main>
-  <footer class="timeline">
-    <div class="timeline-info"><strong id="position">Waiting for playback</strong><span id="timeline-hint">Drag panel handles to rearrange. Resize from a corner.</span></div>
-    <div class="timeline-controls"><button id="previous-step" title="Previous recorded frame">←</button><button id="play-toggle" class="primary">Play</button><button id="step-forward">Step →</button><input id="timeline-scrubber" type="range" min="0" max="0" value="0" step="1" aria-label="Recorded frame position" disabled><button id="reset-playback" class="quiet">Reset</button><button id="next-episode" class="quiet">Next</button></div>
+  <footer class="timeline" aria-label="Playback timeline">
+    <div class="timeline-labels"><strong id="position">Waiting for playback</strong></div>
+    <div class="timeline-track">
+      <div class="timeline-scrubber-track"><input id="timeline-scrubber" type="range" min="0" max="0" value="0" step="1" aria-label="Recorded frame position" disabled></div>
+      <div class="timeline-actions">
+        <button id="play-toggle" class="primary" type="button" data-action="play" aria-label="Play" title="Play" disabled><svg class="icon" aria-hidden="true"><use id="play-toggle-icon" href="/assets/tabler-icons.svg#ti-player-play"></use></svg></button>
+        <button id="reset-playback" class="quiet" type="button" aria-label="Reset playback" title="Reset playback" disabled><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-refresh"></use></svg></button>
+        <button id="playback-settings-toggle" class="quiet" type="button" aria-label="Playback settings" title="Playback settings" aria-haspopup="dialog" aria-controls="playback-settings" aria-expanded="false" disabled><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-settings"></use></svg></button>
+      </div>
+    </div>
   </footer>
+  <dialog id="playback-settings" aria-labelledby="playback-settings-heading">
+    <div class="playback-settings-heading"><h2 id="playback-settings-heading">Playback settings</h2><button id="playback-settings-close" class="icon-button" type="button" aria-label="Close playback settings" title="Close"><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-x"></use></svg></button></div>
+    <div id="playback-settings-content"></div>
+  </dialog>
   <div id="panel-menu" class="floating-menu" hidden></div>
   <dialog id="panel-editor"><form id="panel-editor-form">
     <span class="eyebrow">WIDGET BUILDER</span><h2 id="editor-heading">Add widget</h2>

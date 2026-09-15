@@ -2,6 +2,8 @@ import { PanelRuntime } from './panels/runtime.js';
 import { PANEL_TYPES, panelDefinition } from './panels/catalog.js';
 import { defaultWorkspace, normalizeWorkspace, loadWorkspace, saveWorkspace } from './panels/workspace.js';
 import { METRICS } from './panels/telemetry.js';
+import { mountPlaybackControls } from './panels/controls.js';
+import { setSvgUseHref } from './panels/shared.js';
 
 const $ = selector => document.querySelector(selector);
 const token = new URLSearchParams(location.hash.slice(1)).get('token') || sessionStorage.getItem('gymemu-token');
@@ -90,11 +92,27 @@ $('#reset-layout').onclick=async()=>{workspace=defaultWorkspace();await syncWork
 document.addEventListener('click',event=>{if(!event.target.closest('[data-panel-menu],#panel-menu')) $('#panel-menu').hidden=true;});
 $('#mode').onchange=()=>{showToast('Loading playback mode…');command({type:'mode',mode:$('#mode').value});};
 $('#play-toggle').onclick=()=>command({type:snapshot?.playing?'pause':'play'});
-$('#step-forward').onclick=()=>command({type:'step'});
 $('#reset-playback').onclick=()=>command({type:'reset'});
-$('#next-episode').onclick=()=>command({type:'next'});
-$('#previous-step').onclick=()=>command({type:'seek',position:Math.max(0,snapshot.step-1)});
-$('#timeline-scrubber').oninput=()=>{ $('#position').textContent=`Preview frame ${$('#timeline-scrubber').value}`; };
+const playbackSettings = mountPlaybackControls({ services: { getState:()=>snapshot, command } });
+playbackSettings.element.querySelector('[data-play]').hidden=true;
+playbackSettings.element.querySelector('[data-reset]').hidden=true;
+const previousStep=document.createElement('button');
+previousStep.textContent='Previous step';previousStep.title='Previous recorded frame';
+previousStep.onclick=()=>command({type:'seek',position:Math.max(0,snapshot.step-1)});
+playbackSettings.element.querySelector('.play-actions').prepend(previousStep);
+$('#playback-settings-content').append(playbackSettings.element);
+const settingsDialog=$('#playback-settings'), settingsToggle=$('#playback-settings-toggle');
+settingsToggle.onclick=()=>{settingsDialog.showModal();settingsToggle.setAttribute('aria-expanded','true');};
+$('#playback-settings-close').onclick=()=>settingsDialog.close();
+settingsDialog.addEventListener('close',()=>{settingsToggle.setAttribute('aria-expanded','false');settingsToggle.focus();});
+function timelinePosition(s, step=s.step) {
+  const name=s.mode==='teacher-forcing' ? `EPISODE ${s.selection}` : s.name.toUpperCase();
+  return `${name} · STEP ${step}${s.finished&&step===s.step?' · END':''}`;
+}
+function updateScrubberProgress(slider) {
+  slider.style.setProperty('--timeline-progress',`${Number(slider.max)>0?100*Number(slider.value)/Number(slider.max):0}%`);
+}
+$('#timeline-scrubber').oninput=()=>{ $('#position').textContent=timelinePosition(snapshot,Number($('#timeline-scrubber').value));updateScrubberProgress($('#timeline-scrubber')); };
 $('#timeline-scrubber').onchange=()=>command({type:'seek',position:Number($('#timeline-scrubber').value)});
 function keyName(event) { return event.key === ' ' ? 'space' : event.key.toLowerCase().replace(/^arrow/,''); }
 const pressed=new Set();
@@ -114,10 +132,16 @@ setInterval(()=>{if(active && !document.hidden) request('/api/command',{method:'
 function chrome(s) {
   $('#checkpoint').textContent=s.checkpoint.split('/').slice(-2).join('/');$('#checkpoint').title=s.checkpoint;
   $('#mode').value=s.mode;$('#mode').disabled=!s.available_modes?.length||Boolean(s.loading);
-  $('#position').textContent=`${s.name} · FRAME ${s.step}${s.total_steps==null?'':` / ${s.total_steps}`}${s.finished?' · END':''}`;
-  $('#play-toggle').textContent=s.playing?'Pause':'Play';$('#play-toggle').disabled=s.finished||Boolean(s.loading);$('#step-forward').disabled=s.finished||Boolean(s.loading);
-  $('#previous-step').disabled=s.mode!=='teacher-forcing'||s.step===0;
-  const slider=$('#timeline-scrubber');slider.disabled=s.mode!=='teacher-forcing';slider.max=s.total_steps||0;if(document.activeElement!==slider) slider.value=s.step;
+  $('#position').textContent=timelinePosition(s);
+  const play=$('#play-toggle'), action=s.playing?'pause':'play', label=s.playing?'Pause':'Play';
+  play.dataset.action=action;play.setAttribute('aria-label',label);play.title=label;
+  setSvgUseHref($('#play-toggle-icon'),`/assets/tabler-icons.svg#ti-player-${action}`);
+  play.disabled=s.finished||Boolean(s.loading);
+  $('#reset-playback').disabled=Boolean(s.loading);settingsToggle.disabled=Boolean(s.loading);
+  previousStep.disabled=s.mode!=='teacher-forcing'||s.step===0||Boolean(s.loading);
+  playbackSettings.render(s);
+  const slider=$('#timeline-scrubber');slider.disabled=s.mode!=='teacher-forcing'||Boolean(s.loading);slider.max=s.total_steps||0;if(document.activeElement!==slider) slider.value=s.step;
+  updateScrubberProgress(slider);
 }
 async function decode(images) {
   return Object.fromEntries(await Promise.all(Object.entries(images).map(async([key,src])=>{

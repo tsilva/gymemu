@@ -1,10 +1,19 @@
 import { createPanel } from './shared.js';
 export function mount({ definition, services }) {
-  const element = createPanel({ id: definition.id, label: definition.title, body: `
-    <div class="controls-body"><div class="play-actions"><button data-play class="primary">Play</button><button data-step>Step</button><button data-reset>Reset</button><button data-next>Next</button></div>
+  const element = createPanel({ id: definition.id, label: definition.title });
+  const controls = mountPlaybackControls({ services });
+  element.append(controls.element);
+  return { element, render: controls.render };
+}
+
+export function mountPlaybackControls({ services }) {
+  const element = document.createElement('div');
+  element.className = 'controls-body';
+  element.innerHTML = `
+    <div class="play-actions"><button data-play class="primary">Play</button><button data-step>Step</button><button data-reset>Reset</button><button data-next>Next</button></div>
     <label class="select-label"><span data-selection-label>Starting scene</span><select data-selection aria-label="Episode or starting scene"></select></label>
     <div class="action-picker"><span class="muted">Step with action</span><div class="action-buttons"></div></div>
-    <p class="control-help"></p><div class="context-note"></div></div>` });
+    <p class="control-help"></p><div class="context-note"></div>`;
   const send = type => services.command({ type });
   element.querySelector('[data-play]').onclick = () => send(services.getState().playing ? 'pause' : 'play');
   element.querySelector('[data-step]').onclick = () => send('step');
