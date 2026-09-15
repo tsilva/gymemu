@@ -88,8 +88,16 @@ class BallRegionApproach(ActionHistoryApproach):
     objectives = predictive_objectives = ("next_frame_ball_region",)
 
     def __init__(
-        self, spec, history, actions, shape, *, sprite_height, sprite_width,
-        padding=4, ball_region_weight=0.3,
+        self,
+        spec,
+        history,
+        actions,
+        shape,
+        *,
+        sprite_height,
+        sprite_width,
+        padding=4,
+        ball_region_weight=0.3,
     ):
         super().__init__(spec, history, actions, shape)
         if shape[0] != 3:
@@ -122,7 +130,9 @@ class BallRegionApproach(ActionHistoryApproach):
 
     def joint_loss(self, prediction, target):
         mask, available = ball_region_mask(
-            target, sprite_height=self.sprite_height, sprite_width=self.sprite_width,
+            target,
+            sprite_height=self.sprite_height,
+            sprite_width=self.sprite_width,
             padding=self.padding,
         )
         error = (prediction.float() - target.float()).square().mean(dim=1, keepdim=True)
@@ -131,10 +141,16 @@ class BallRegionApproach(ActionHistoryApproach):
         # Undetected samples contribute zero; full-batch averaging is partition invariant.
         region = (error * mask).flatten(1).sum(dim=1) / mask.flatten(1).sum(dim=1).clamp_min(1)
         with torch.no_grad():
-            self._region_totals.add_(torch.stack((
-                rgb.new_full((), len(target)), available.sum().float(),
-                rgb.detach().sum(), region.detach().sum(),
-            )))
+            self._region_totals.add_(
+                torch.stack(
+                    (
+                        rgb.new_full((), len(target)),
+                        available.sum().float(),
+                        rgb.detach().sum(),
+                        region.detach().sum(),
+                    )
+                )
+            )
         return (rgb + self.ball_region_weight * region).mean()
 
     def loss(self, history, action, target):
@@ -195,8 +211,9 @@ class ScheduledSamplingApproach(ActionHistoryApproach):
         schedule,
         feedback_dtype="fp32",
         selective_threshold=0.0,
+        **objective_options,
     ):
-        super().__init__(spec, history, actions, shape)
+        super().__init__(spec, history, actions, shape, **objective_options)
         if type(rollout_steps) is not int or not 1 <= rollout_steps <= history:
             raise ValueError("rollout_steps must be between 1 and the RGB history length")
         if set(schedule) != {"warmup_epochs", "ramp_epochs", "max_probability"}:
@@ -335,7 +352,17 @@ class ScheduledSamplingApproach(ActionHistoryApproach):
         else:
             context = history[:, -self.history_length :]
         prediction = self(context, self._model_actions(action[:, -1]))
+        return self.prediction_loss(prediction, target)
+
+    def prediction_loss(self, prediction, target):
         return F.mse_loss(prediction.float(), target.float())
+
+
+class ScheduledBallRegionApproach(ScheduledSamplingApproach, BallRegionApproach):
+    """Reuse sampled context generation and the target-only ball objective."""
+
+    def prediction_loss(self, prediction, target):
+        return self.joint_loss(prediction, target)
 
 
 class LatentApproach(Approach):
@@ -397,6 +424,7 @@ APPROACHES = {
     "ball_state": BallStateApproach,
     "latent": LatentApproach,
     "scheduled_actions": ScheduledSamplingApproach,
+    "scheduled_ball_region": ScheduledBallRegionApproach,
 }
 
 

@@ -432,3 +432,22 @@ Matching settings, code, data, and dependencies supports reproducible experiment
 CUDA kernels, compilation, hardware, and numerical nondeterminism can still change
 weights and scores. CPU smoke tests verify exact replay for both existing approaches.
 Rollout quality remains a separate evaluation from next-frame MSE.
+
+### Ball loss with prediction feedback
+
+`recipe=breakout_scheduled_ball_region` combines the existing scheduled history
+generation with `RGB MSE + 0.03 * ball-region MSE`. It trains from scratch for two
+epochs, replacing eligible history frames with detached predictions at probability
+0.4 in epoch 1 and 0.8 in epoch 2. The rollout prefix spans the configured history.
+The model, dataset, seed, and other trainer settings match `breakout_ball_region`.
+Masks and supervised targets always come from recorded frames. Validation uses
+recorded histories and reports the common RGB MSE separately from the joint loss.
+
+```bash
+uv run --frozen python train.py recipe=breakout_scheduled_ball_region
+```
+
+This uses `approach=scheduled_ball_region`, which reuses scheduled context generation
+and the ball objective. Generated context adds inference work to every training
+batch. Evaluate ball survival and duplicates during playback as well as held-out
+MSE; this objective does not enforce exactly one ball.

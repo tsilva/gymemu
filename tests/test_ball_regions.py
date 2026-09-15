@@ -32,10 +32,17 @@ def approach(weight=0.3):
     return build_approach(spec, 2, 2, (3, 21, 17))
 
 
-@pytest.mark.parametrize("name,x,y", [
-    ("ball-up", 53, 148), ("near-bricks", 27, 109), ("paddle-approach", 85, 179),
-    ("half-cleared", 28, 140), ("almost-cleared", 124, 117), ("above-bricks", 25, 35),
-])
+@pytest.mark.parametrize(
+    "name,x,y",
+    [
+        ("ball-up", 53, 148),
+        ("near-bricks", 27, 109),
+        ("paddle-approach", 85, 179),
+        ("half-cleared", 28, 140),
+        ("almost-cleared", 124, 117),
+        ("above-bricks", 25, 35),
+    ],
+)
 def test_saved_frames_detect_exact_documented_ball_regions(name, x, y):
     with np.load(SCENES / f"{name}.npz", allow_pickle=False) as data:
         frames = torch.from_numpy(data["frames"].copy()).float() / 255
@@ -78,7 +85,7 @@ def test_loss_and_gradients_weight_only_target_region_and_ignore_missing_detecti
     assert metrics["ball_detection_coverage"] == 0.5
     assert metrics["ball_region_mse"] == pytest.approx(0.005)
     model.reset_epoch_metrics()
-    losses = [model.joint_loss(prediction[i:i+1], target[i:i+1]) for i in range(2)]
+    losses = [model.joint_loss(prediction[i : i + 1], target[i : i + 1]) for i in range(2)]
     torch.testing.assert_close(torch.stack(losses).mean(), loss)
     assert model.epoch_metrics() == pytest.approx(metrics)
     assert all("_region_totals" not in key for key in model.state_dict())
@@ -124,16 +131,19 @@ def test_compiled_loss_preserves_values_gradients_and_metrics():
     assert compiled.epoch_metrics() == pytest.approx(plain.epoch_metrics())
 
 
-def test_train_reload_metrics_and_generated_playback(snapshot, tmp_path):
+@pytest.mark.parametrize(
+    "recipe,weight", [("breakout_ball_region", 0.3), ("breakout_scheduled_ball_region", 0.03)]
+)
+def test_train_reload_metrics_and_generated_playback(snapshot, tmp_path, recipe, weight):
     rows = pq.read_table(snapshot / "frames/assets/00000.parquet").to_pylist()
     for index, row in enumerate(rows):
         frame = np.zeros((21, 17, 3), dtype=np.uint8)
-        frame[5:9, index + 3:index + 5] = [200, 72, 72]
+        frame[5:9, index + 3 : index + 5] = [200, 72, 72]
         buffer = io.BytesIO()
         Image.fromarray(frame).save(buffer, format="PNG")
         row["image"] = {"bytes": buffer.getvalue(), "path": None}
     write(snapshot, "frames", "assets", rows)
-    cfg = compose_config(["recipe=breakout_ball_region", "experiment=smoke"])
+    cfg = compose_config([f"recipe={recipe}", "experiment=smoke"])
     cfg.game.dataset = str(snapshot)
     cfg.game.revision = None
     cfg.game.start.episode_id = 2
@@ -143,7 +153,7 @@ def test_train_reload_metrics_and_generated_playback(snapshot, tmp_path):
     cfg.output = str(tmp_path / "run")
     output = train(cfg)
     model, config = load_model(output / "best.pt", torch.device("cpu"))
-    assert config["approach"]["options"]["ball_region_weight"] == 0.3
+    assert config["approach"]["options"]["ball_region_weight"] == weight
     saved = compose_config(recipe=output / "recipe.yaml")
     assert saved.approach.options.sprite_height == 4
     records = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
@@ -152,11 +162,9 @@ def test_train_reload_metrics_and_generated_playback(snapshot, tmp_path):
         assert metrics["ball_detection_coverage"] == 1
         assert metrics["ball_region_mse"] > 0
         assert metrics["loss"] == pytest.approx(
-            metrics["rgb_mse"] + 0.3 * metrics["ball_region_mse"]
+            metrics["rgb_mse"] + weight * metrics["ball_region_mse"]
         )
-    assert records[0]["validation"]["mse"] == pytest.approx(
-        records[0]["validation"]["rgb_mse"]
-    )
+    assert records[0]["validation"]["mse"] == pytest.approx(records[0]["validation"]["rgb_mse"])
     scene = load_scene(output / "start-scene.npz", config)
     player = Player(model, config, torch.device("cpu"), scene)
     player.advance(2)
@@ -167,3 +175,76 @@ def test_train_reload_metrics_and_generated_playback(snapshot, tmp_path):
     player.reset()
     player.advance(2)
     torch.testing.assert_close(player.frame, first)
+
+
+def test_scheduled_ball_recipe_combines_feedback_with_target_only_loss():
+    cfg = compose_config(["recipe=breakout_scheduled_ball_region", "experiment=smoke"])
+    model = build_approach(OmegaConf.to_container(cfg.approach, resolve=True), 2, 2, (3, 21, 17))
+    assert model.begin_epoch(1)["prediction_probability"] == 0.4
+    assert model.begin_epoch(2)["prediction_probability"] == 0.8
+    assert model.training_rollout_steps == 2
+    assert model.ball_region_weight == 0.03
+    assert model.state_fields == ()
+    model.prediction_probability.fill_(1)
+    history = torch.rand(2, 4, 3, 21, 17)
+    actions = torch.zeros(2, 3, 2, dtype=torch.long)
+    target = torch.zeros(2, 3, 21, 17)
+    target[:, :, 8:12, 7:9] = 0.5
+    calls, predictions = [], []
+
+    def record(_, args, output):
+        calls.append((args[0].detach().clone(), torch.is_grad_enabled()))
+        predictions.append(output.detach().clone())
+
+    hook = model.predictor.register_forward_hook(record)
+    loss = model.loss(history, actions, target)
+    hook.remove()
+    loss.backward()
+    assert [grad for _, grad in calls] == [False, False, True]
+    torch.testing.assert_close(calls[-1][0], torch.stack(predictions[:2], dim=1))
+    metrics = model.epoch_metrics()
+    assert metrics["ball_detection_coverage"] == 1
+    assert loss.item() == pytest.approx(metrics["rgb_mse"] + 0.03 * metrics["ball_region_mse"])
+    model.reset_epoch_metrics()
+    eval_loss, prediction = model.evaluate(history[:, -2:], actions[:, -1], target)
+    torch.testing.assert_close(eval_loss, model.joint_loss(prediction, target))
+    assert all("probability" not in key for key in model.state_dict())
+
+
+def test_scheduled_ball_recipe_keeps_control_model_and_two_epoch_budget():
+    base = compose_config(["recipe=breakout_ball_region"])
+    combined = compose_config(["recipe=breakout_scheduled_ball_region"])
+    for key in ("game", "model", "optimizer", "history", "seed"):
+        assert (
+            OmegaConf.to_container(base, resolve=True)[key]
+            == OmegaConf.to_container(combined, resolve=True)[key]
+        )
+    assert combined.trainer.epochs == 2
+
+
+def test_compiled_scheduled_ball_loss_supports_both_epoch_probabilities():
+    cfg = compose_config(["recipe=breakout_scheduled_ball_region", "experiment=smoke"])
+    spec = OmegaConf.to_container(cfg.approach, resolve=True)
+    plain = build_approach(spec, 2, 2, (3, 21, 17))
+    compiled = build_approach(spec, 2, 2, (3, 21, 17))
+    compiled.load_state_dict(plain.state_dict())
+    loss_fn = torch.compile(compiled.loss, backend="aot_eager", fullgraph=True)
+    history = torch.rand(2, 4, 3, 21, 17)
+    actions = torch.zeros(2, 3, 2, dtype=torch.long)
+    target = torch.zeros(2, 3, 21, 17)
+    target[:, :, 8:12, 7:9] = 0.5
+    for epoch in (1, 2):
+        for model in (plain, compiled):
+            model.begin_epoch(epoch)
+            model.zero_grad(set_to_none=True)
+            model.reset_epoch_metrics()
+        torch.manual_seed(47)
+        expected = plain.loss(history, actions, target)
+        torch.manual_seed(47)
+        actual = loss_fn(history, actions, target)
+        expected.backward()
+        actual.backward()
+        torch.testing.assert_close(actual, expected)
+        for left, right in zip(plain.parameters(), compiled.parameters(), strict=True):
+            torch.testing.assert_close(left.grad, right.grad)
+        assert compiled.epoch_metrics() == pytest.approx(plain.epoch_metrics())

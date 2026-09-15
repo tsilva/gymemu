@@ -4,7 +4,7 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 
-from play import Player, handle_event, load_scene
+from play import Player, load_scene
 from train import (
     Autoencoder,
     Frames,
@@ -114,106 +114,6 @@ def test_player_empty_bootstrap_predicted_feedback_and_reset():
     assert not spy.calls[-1][0].any() and len(player.history) == 1 and player.steps == 0
 
 
-def test_only_fresh_action_key_presses_advance():
-    import pygame
-
-    spy = Spy()
-    config = {"history": 4, "shape": [3, 21, 17], "action_values": [0, 2]}
-    player = Player(spy, config, torch.device("cpu"))
-    keymap = {pygame.K_LEFT: 2}
-    for event in [
-        pygame.event.Event(pygame.MOUSEMOTION),
-        pygame.event.Event(pygame.KEYUP, key=pygame.K_LEFT),
-        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LEFT, repeat=True),
-        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_x),
-    ]:
-        assert handle_event(player, event, keymap)
-    assert len(spy.calls) == 0
-    handle_event(player, pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LEFT), keymap)
-    assert player.steps == 0 and len(spy.calls) == 1
-    handle_event(player, pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LEFT), keymap)
-    assert player.steps == 1 and len(spy.calls) == 2
-    assert not handle_event(player, pygame.event.Event(pygame.QUIT), keymap)
-
-
-def test_continuous_controls():
-    import pygame
-
-    spy = Spy()
-    config = {"history": 4, "shape": [3, 21, 17], "action_values": [0, 1, 2]}
-    player = Player(spy, config, torch.device("cpu"))
-    keymap = {pygame.K_LEFT: 2, pygame.K_RIGHT: 1}
-
-    def event(kind, key, **kwargs):
-        handle_event(player, pygame.event.Event(kind, key=key, **kwargs), keymap)
-
-    event(pygame.KEYDOWN, pygame.K_TAB)
-    event(pygame.KEYDOWN, pygame.K_TAB, repeat=True)
-    assert player.continuous and not spy.calls
-    player.tick(keymap)
-    assert spy.calls[-1][1].item() == 3  # Bootstrap has no action.
-    player.tick(keymap)
-    assert spy.calls[-1][1].item() == 0
-    event(pygame.KEYDOWN, pygame.K_LEFT)
-    event(pygame.KEYDOWN, pygame.K_RIGHT)
-    assert len(spy.calls) == 2  # Key events cannot add unpaced continuous steps.
-    player.tick(keymap)
-    assert spy.calls[-1][1].item() == 1
-    event(pygame.KEYUP, pygame.K_RIGHT)
-    player.tick(keymap)
-    assert spy.calls[-1][1].item() == 2
-    event(pygame.KEYUP, pygame.K_LEFT)
-    player.tick(keymap)
-    assert spy.calls[-1][1].item() == 0
-    event(pygame.KEYDOWN, pygame.K_TAB)
-    player.tick(keymap)
-    assert len(spy.calls) == 5
-    event(pygame.KEYDOWN, pygame.K_LEFT)
-    assert len(spy.calls) == 6
-    for pause in [pygame.K_r, pygame.K_c, None]:
-        event(pygame.KEYDOWN, pygame.K_TAB)
-        event(pygame.KEYDOWN, pygame.K_RIGHT)
-        if pause is None:
-            handle_event(player, pygame.event.Event(pygame.WINDOWFOCUSLOST), keymap)
-        else:
-            event(pygame.KEYDOWN, pause)
-        player.tick(keymap)
-        assert not player.continuous and not player.held_keys
-        assert len(spy.calls) == 6
-
-
-def test_continuous_loop_is_paced(monkeypatch, tmp_path):
-    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
-    monkeypatch.setenv("SDL_AUDIODRIVER", "dummy")
-    import pygame
-
-    import play
-
-    spy = Spy()
-    config = {"history": 4, "shape": [3, 21, 17], "action_values": [0, 1, 2]}
-    monkeypatch.setattr(play, "load_model", lambda *_: (spy, config))
-    batches = iter([
-        [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_TAB)],
-        [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LEFT)],
-        [],
-        [pygame.event.Event(pygame.KEYUP, key=pygame.K_LEFT)],
-        [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_TAB)],
-        [],
-        [pygame.event.Event(pygame.QUIT)],
-    ])
-    monkeypatch.setattr(pygame.event, "get", lambda: next(batches))
-    ticks = []
-
-    class Clock:
-        def tick(self, fps):
-            ticks.append((fps, len(spy.calls)))
-
-    monkeypatch.setattr(pygame.time, "Clock", Clock)
-    play.main([str(tmp_path / "unused.pt"), "--empty-start", "--device", "cpu"])
-    assert ticks == [(30, n) for n in [1, 2, 3, 4, 4, 4, 4]]
-    assert [action.item() for _, action in spy.calls] == [3, 2, 2, 0]
-
-
 @pytest.mark.parametrize("workers", [0, 1])
 def test_training_cli_and_player_load(snapshot, tmp_path, workers):
     torch.set_num_threads(2)
@@ -271,53 +171,6 @@ def test_training_split_overlap_rejected(snapshot, tmp_path):
                 "--no-r2",
             ]
         )
-
-
-@pytest.mark.parametrize("startup", ["default", "explicit", "empty"])
-def test_pygame_loop_waits_for_actions(monkeypatch, tmp_path, startup):
-    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
-    monkeypatch.setenv("SDL_AUDIODRIVER", "dummy")
-    import pygame
-
-    import play
-
-    spy = Spy()
-    config = {"history": 4, "shape": [3, 21, 17], "action_values": [0, 1, 2]}
-    monkeypatch.setattr(play, "load_model", lambda *_: (spy, config))
-    batches = iter(
-        [
-            [pygame.event.Event(pygame.MOUSEMOTION)],
-            [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE)],
-            [
-                pygame.event.Event(pygame.KEYUP, key=pygame.K_SPACE),
-                pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE, repeat=True),
-            ],
-            [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LEFT)],
-            [pygame.event.Event(pygame.QUIT)],
-        ]
-    )
-    monkeypatch.setattr(pygame.event, "get", lambda: next(batches))
-    calls_per_refresh = []
-    monkeypatch.setattr(pygame.display, "flip", lambda: calls_per_refresh.append(len(spy.calls)))
-    argv = [str(tmp_path / "unused.pt"), "--device", "cpu", "--scale", "1"]
-    if startup == "empty":
-        argv += ["--empty-start"]
-    else:
-        scene = tmp_path / ("start-scene.npz" if startup == "default" else "alternate.npz")
-        np.savez_compressed(scene, frames=np.full((2, 3, 21, 17), 50, np.uint8))
-        if startup == "explicit":
-            argv += ["--start-scene", str(scene)]
-    other_directory = tmp_path / "another-cwd"
-    other_directory.mkdir()
-    monkeypatch.chdir(other_directory)  # Default scene is relative to the checkpoint, not CWD.
-    play.main(argv)
-    assert calls_per_refresh == [0, 1, 1, 2, 2]
-    first_history, first_action = spy.calls[0]
-    if startup == "empty":
-        assert first_action.item() == 3 and not first_history.any()
-    else:
-        assert first_action.item() == 0  # First Space press executes the game action.
-        assert torch.equal(first_history[0, -2:], torch.full((2, 3, 21, 17), 50 / 255))
 
 
 def test_compact_windows_preserve_every_pixel_action_and_bootstrap(snapshot):

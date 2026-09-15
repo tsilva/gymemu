@@ -1,17 +1,15 @@
-"""Play a learned emulator. Tab toggles single-step and continuous playback."""
+"""Open the Gymemu browser player. Tab toggles single-step and continuous playback."""
 
 from __future__ import annotations
 
 import argparse
-from collections import deque
 from pathlib import Path
 
-import numpy as np
-import torch
 from PIL import Image
 
 from gymemu.checkpoints import load_model
-from gymemu.data import frame_stack, pad_actions, validate_states
+from gymemu.player import Player, default_bindings
+from gymemu.replay import COMPARISON_LABELS, load_replay
 from gymemu.runtime import device_for, positive
 from gymemu.scenes import (
     START_STATES,
@@ -21,255 +19,22 @@ from gymemu.scenes import (
     named_scene_path,
 )
 
-# Each learned transition covers two frames of the 60 Hz Atari simulation.
-PLAYBACK_FPS = 60 // 2
 
-
-class Player:
-    def __init__(
-        self,
-        model,
-        config,
-        device,
-        initial_history=None,
-        initial_actions=None,
-        *,
-        start_states=None,
-    ):
-        self.model, self.config, self.device = model, config, device
-        self.actions = config["action_values"]
-        self.action_history = config.get("action_history", 1)
-        if (
-            type(self.action_history) is not int
-            or not 1 <= self.action_history <= config["history"]
-        ):
-            raise ValueError("Action history must be between 1 and the RGB history length")
-        self.start_states = list(start_states or [])
-        self.start_index = 0
-        self.history = deque(maxlen=config["history"])
-        self.state_history = deque(maxlen=config["history"])
-        self.past_actions = deque(maxlen=self.action_history - 1)
-        # Validate all scenes before playback, including auxiliary state and actions.
-        for _, history in self.start_states:
-            self._set_initial_history(history)
-        if self.start_states:
-            initial_history = self.start_states[0][1]
-            initial_actions = None
-        self._set_initial_history(initial_history, initial_actions)
-        self.reset(cycle=False)
-
-    @property
-    def start_name(self):
-        return self.start_states[self.start_index][0] if self.start_states else None
-
-    def _set_initial_history(self, initial_history, initial_actions=None):
-        config = self.config
-        if initial_actions is None:
-            initial_actions = getattr(initial_history, "actions", None)
-        self.initial_history = [frame.clone() for frame in (initial_history or [])]
-        self.state_fields = tuple(config.get("state_fields", ()))
-        self.initial_states = []
-        if self.state_fields and self.initial_history:
-            states = getattr(initial_history, "states", None)
-            validate_states(states, len(self.initial_history), self.state_fields)
-            self.initial_states = [state.clone() for state in states]
-        required = min(self.action_history - 1, max(0, len(self.initial_history) - 1))
-        initial_actions = [] if initial_actions is None else list(initial_actions)
-        if not required <= len(initial_actions) <= max(0, len(self.initial_history) - 1):
-            raise ValueError("Starting scene lacks aligned recorded action history")
-        if any(action not in self.actions for action in initial_actions):
-            raise ValueError("Starting scene contains an unknown executed action")
-        self.initial_actions = (
-            [self.actions.index(a) for a in initial_actions[-(self.action_history - 1) :]]
-            if self.action_history > 1
-            else []
-        )
-        if len(self.initial_history) > config["history"]:
-            raise ValueError("Starting history is longer than the model history")
-        for frame in self.initial_history:
-            if tuple(frame.shape) != tuple(config["shape"]):
-                raise ValueError("Starting frame dimensions differ from the model")
-            if not torch.isfinite(frame).all() or frame.min() < 0 or frame.max() > 1:
-                raise ValueError("Starting frames must contain finite pixels in [0, 1]")
-
-    @torch.inference_mode()
-    def _predict(self, action_index):
-        stack = frame_stack(list(self.history), self.config["history"], self.config["shape"])
-        context = pad_actions(
-            [*self.past_actions, action_index], self.action_history, len(self.actions)
-        )
-        action = torch.tensor(context, dtype=torch.long, device=self.device)
-        action = action if self.action_history == 1 else action.unsqueeze(0)
-        inputs = stack.unsqueeze(0).to(self.device)
-        if self.state_fields:
-            states = (
-                frame_stack(
-                    list(self.state_history), self.config["history"], (len(self.state_fields) + 1,)
-                )
-                .unsqueeze(0)
-                .to(self.device)
-            )
-            prediction, state = self.model.predict_step(inputs, action, states)
-            result = prediction[0].cpu()
-            self.state_history.append(state[0].cpu())
-        else:
-            result = self.model(inputs, action)[0].cpu()
-        self.history.append(result)
-        if action_index != len(self.actions):
-            self.past_actions.append(action_index)
-        return result
-
-    def reset(self, *, cycle=False):
-        self.continuous = False
-        self.held_keys = []
-        if cycle and self.start_states:
-            self.start_index = (self.start_index + 1) % len(self.start_states)
-            self._set_initial_history(self.start_states[self.start_index][1])
-        self.history.clear()
-        self.state_history.clear()
-        self.state_history.extend(state.clone() for state in self.initial_states)
-        self.past_actions.clear()
-        self.past_actions.extend(self.initial_actions)
-        self.history.extend(frame.clone() for frame in self.initial_history)
-        self.steps = 0
-        # Recorded starts are displayed immediately; neither reset path runs inference.
-        self.frame = self.history[-1] if self.history else None
-
-    def advance(self, action):
-        if action not in self.actions:
-            raise ValueError(f"Unknown action {action}; choose from {self.actions}")
-        if self.frame is None:
-            self.frame = self._predict(len(self.actions))  # Empty history, no game action.
-            return
-        self.frame = self._predict(self.actions.index(action))
-        self.steps += 1
-
-    def pixels(self):
-        if self.frame is None:
-            channels, height, width = self.config["shape"]
-            return np.zeros((height, width, channels), dtype=np.uint8)
-        return self.frame.permute(1, 2, 0).mul(255).round().byte().numpy()
-
-    def tick(self, keymap):
-        """Execute at most one transition per paced playback tick."""
-        if self.continuous:
-            action = keymap[self.held_keys[-1]] if self.held_keys else (
-                0 if 0 in self.actions else self.actions[0]
-            )
-            self.advance(action)
-
-
-def handle_event(player, event, keymap):
-    import pygame
-
-    if event.type == pygame.QUIT:
-        return False
-    if event.type == pygame.WINDOWFOCUSLOST:
-        player.continuous = False
-        player.held_keys.clear()
-    if event.type == pygame.KEYUP and event.key in player.held_keys:
-        player.held_keys.remove(event.key)
-    if event.type != pygame.KEYDOWN or getattr(event, "repeat", False):
-        return True
-    if event.key == pygame.K_ESCAPE:
-        return False
-    if event.key == pygame.K_r:
-        player.reset()
-    elif event.key == pygame.K_c:
-        player.reset(cycle=True)
-    elif event.key == pygame.K_TAB:
-        player.continuous = not player.continuous
-    elif event.key in keymap:
-        if event.key in player.held_keys:
-            player.held_keys.remove(event.key)
-        player.held_keys.append(event.key)
-        if not player.continuous:
-            player.advance(keymap[event.key])
-    return True
-
-
-def default_bindings(config):
-    if "key_actions" not in config:
-        return ["left=2", "right=1", "space=0"]  # Legacy Breakout checkpoints.
-    bindings = config["key_actions"]
-    if bindings:
-        return [f"{key}={value}" for key, value in bindings.items()]
-    keys = "1234567890abcdefghijklmnopqrstuvwxyz"
-    keys = [key for key in keys if key not in "rc"]
-    if len(config["action_values"]) > len(keys):
-        raise ValueError("Too many actions for automatic bindings; supply --key-action")
-    return [f"{key}={value}" for key, value in zip(keys, config["action_values"])]
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("checkpoint", type=Path)
-    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
-    parser.add_argument("--scale", type=positive, default=3)
-    startup = parser.add_mutually_exclusive_group()
-    startup.add_argument(
-        "--start-state", help="Named snapshot for this game; use --list-start-states"
-    )
-    startup.add_argument(
-        "--start-scene",
-        type=Path,
-        help="Recorded history; defaults to start-scene.npz beside the checkpoint",
-    )
-    startup.add_argument(
-        "--empty-start",
-        action="store_true",
-        help="Test learned initialization from an empty history instead of a recorded scene",
-    )
-    parser.add_argument(
-        "--list-start-states", action="store_true", help="List named snapshots and exit"
-    )
-    parser.add_argument(
-        "--state-dir", type=Path, default=START_STATES, help="Snapshot library directory"
-    )
-    parser.add_argument(
-        "--key-action",
-        action="append",
-        metavar="KEY=VALUE",
-        help="Override checkpoint key bindings, e.g. --key-action left=2",
-    )
-    parser.add_argument("--headless-actions", help="Comma-separated action values for a smoke")
-    parser.add_argument("--output", type=Path, default=Path("logs/play.png"))
-    args = parser.parse_args(argv)
-    scene_path = (
-        None
-        if args.empty_start
-        else (args.start_scene or args.checkpoint.parent / "start-scene.npz")
-    )
-    if (
-        not args.start_state
-        and not args.list_start_states
-        and scene_path is not None
-        and not scene_path.is_file()
-    ):
-        parser.error(
-            f"Recorded starting scene not found: {scene_path}. Place start-scene.npz beside "
-            "the checkpoint, use --start-scene PATH, or use --empty-start to test initialization."
-        )
-    device = device_for(args.device)
-    model, config = load_model(args.checkpoint, device)
-    if args.list_start_states:
-        for state in list_start_states(config, args.state_dir):
-            print(f"{state['name']}: {state.get('description', '')}")
-        return
+def recorded_player(args, model, config, device, scene_path):
     if args.start_state:
-        try:
-            scene_path = named_scene_path(args.start_state, config, args.state_dir)
-        except ValueError as error:
-            parser.error(str(error))
+        scene_path = named_scene_path(args.start_state, config, args.state_dir)
         if not scene_path.is_file():
-            parser.error(f"Unknown start state {args.start_state!r}. Use --list-start-states.")
+            raise ValueError(f"Unknown start state {args.start_state!r}. Use --list-start-states.")
     initial_history = (
         load_named_scene(args.start_state, config, args.state_dir)
         if args.start_state
         else (load_scene(scene_path, config) if scene_path else None)
     )
     start_states = [
-        (args.start_state or ("recorded scene" if scene_path else "empty start"), initial_history)
+        (
+            args.start_state or ("recorded scene" if scene_path else "empty start"),
+            initial_history,
+        )
     ]
     try:
         available_states = list_start_states(config, args.state_dir)
@@ -296,6 +61,135 @@ def main(argv=None):
             "Each action key press now predicts one transition.",
             flush=True,
         )
+    return player
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("checkpoint", type=Path)
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
+    parser.add_argument(
+        "--scale",
+        type=positive,
+        default=3,
+        help="Accepted for compatibility; resize dashboard widgets to change frame size",
+    )
+    parser.add_argument("--port", default="auto", help="Local browser port, or auto")
+    parser.add_argument("--no-browser", action="store_true", help="Print URL without opening it")
+    startup = parser.add_mutually_exclusive_group()
+    startup.add_argument(
+        "--teacher-forcing",
+        action="store_true",
+        help="Replay dataset episodes with recorded inputs and side-by-side targets",
+    )
+    startup.add_argument(
+        "--start-state", help="Named snapshot for this game; use --list-start-states"
+    )
+    startup.add_argument(
+        "--start-scene",
+        type=Path,
+        help="Recorded history; defaults to start-scene.npz beside the checkpoint",
+    )
+    startup.add_argument(
+        "--empty-start",
+        action="store_true",
+        help="Test learned initialization from an empty history instead of a recorded scene",
+    )
+    parser.add_argument(
+        "--list-start-states", action="store_true", help="List named snapshots and exit"
+    )
+    parser.add_argument(
+        "--state-dir", type=Path, default=START_STATES, help="Snapshot library directory"
+    )
+    parser.add_argument(
+        "--key-action",
+        action="append",
+        metavar="KEY=VALUE",
+        help="Override checkpoint key bindings, e.g. --key-action left=2",
+    )
+    parser.add_argument("--dataset", help="Replay dataset path or Hub ID; defaults to checkpoint")
+    parser.add_argument("--revision", help="Replay dataset revision; defaults to saved revision")
+    parser.add_argument(
+        "--split", help="Replay split; defaults to checkpoint eval split or heldout"
+    )
+    parser.add_argument("--episode-id", type=int, help="Start replay at this recorded episode ID")
+    parser.add_argument(
+        "--headless-steps", type=positive, help="Replay N transitions and save a PNG"
+    )
+    parser.add_argument("--headless-actions", help="Comma-separated action values for a smoke")
+    parser.add_argument("--output", type=Path, default=Path("logs/play.png"))
+    args = parser.parse_args(argv)
+    if not args.teacher_forcing and any(
+        value is not None
+        for value in (args.dataset, args.revision, args.split, args.episode_id, args.headless_steps)
+    ):
+        parser.error("Dataset replay options require --teacher-forcing")
+    if args.teacher_forcing and (
+        args.headless_actions is not None or args.key_action or args.list_start_states
+    ):
+        parser.error(
+            "Teacher forcing uses recorded actions; scene listing and action overrides "
+            "are unavailable. Use --headless-steps for a replay smoke."
+        )
+    scene_path = (
+        None
+        if args.empty_start or args.teacher_forcing
+        else (args.start_scene or args.checkpoint.parent / "start-scene.npz")
+    )
+    if (
+        not args.start_state
+        and not args.list_start_states
+        and scene_path is not None
+        and not scene_path.is_file()
+    ):
+        parser.error(
+            f"Recorded starting scene not found: {scene_path}. Place start-scene.npz beside "
+            "the checkpoint, use --start-scene PATH, or use --empty-start to test initialization."
+        )
+    device = device_for(args.device)
+    model, config = load_model(args.checkpoint, device)
+    if args.list_start_states:
+        for state in list_start_states(config, args.state_dir):
+            print(f"{state['name']}: {state.get('description', '')}")
+        return
+    if args.teacher_forcing:
+        try:
+            player = load_replay(
+                model,
+                config,
+                device,
+                dataset=args.dataset,
+                revision=args.revision,
+                split=args.split,
+                episode_id=args.episode_id,
+            )
+        except (ValueError, OSError) as error:
+            parser.error(str(error))
+    else:
+        try:
+            player = recorded_player(args, model, config, device, scene_path)
+        except (ValueError, OSError) as error:
+            parser.error(str(error))
+    if args.headless_steps is not None:
+        for _ in range(args.headless_steps):
+            player.advance()
+            if player.finished:
+                break
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        from PIL import ImageDraw
+
+        pixels = Image.fromarray(player.pixels())
+        result = Image.new("RGB", (pixels.width, pixels.height + 36), (20, 20, 20))
+        result.paste(pixels, (0, 36))
+        draw = ImageDraw.Draw(result)
+        panel_width = pixels.width // len(COMPARISON_LABELS)
+        for index, label in enumerate(COMPARISON_LABELS):
+            draw.text((index * panel_width + 2, 2), label, fill="white")
+        draw.text((2 * panel_width + 2, 18), "Gray=0; brighter +; darker -", fill="white")
+        result.save(args.output)
+        print(f"{player.start_name} | {player.status()} | {player.comparison_label()}")
+        print(f"Saved comparison: {args.output.resolve()}")
+        return
     if args.headless_actions is not None:
         for value in args.headless_actions.split(","):
             if value.strip():
@@ -308,62 +202,52 @@ def main(argv=None):
         )
         return
 
-    import pygame
+    from gymemu.web_player import serve
 
-    pygame.init()
+    bindings = args.key_action or default_bindings(config)
+    keymap = {}
+    for binding in bindings:
+        key, value = binding.rsplit("=", 1)
+        key = key.lower()
+        if key in ("r", "c", "tab", "escape"):
+            parser.error("R, C, Tab, and Escape are reserved player controls")
+        if int(value) not in config["action_values"]:
+            parser.error(f"Action {value} absent from this checkpoint")
+        keymap[key] = int(value)
     try:
-        pygame.key.set_repeat()  # Playback ticks handle held keys in continuous mode.
-        bindings = args.key_action or default_bindings(config)
-        print("Key bindings: " + ", ".join(bindings), flush=True)
-        keymap = {}
-        for binding in bindings:
-            key, value = binding.rsplit("=", 1)
-            value = int(value)
-            if value not in player.actions:
-                parser.error(f"Action {value} absent from this checkpoint; set --key-action")
-            code = pygame.key.key_code(key)
-            if code in (pygame.K_r, pygame.K_c, pygame.K_TAB, pygame.K_ESCAPE):
-                parser.error("R, C, Tab, and Escape are reserved player controls")
-            keymap[code] = value
-        print(
-            f"Tab toggles continuous play at {PLAYBACK_FPS} FPS (60 Hz / frameskip 2). "
-            "Hold an action key; release for action "
-            f"{0 if 0 in player.actions else player.actions[0]}. R/C reset and pause.",
-            flush=True,
-        )
-        _, height, width = config["shape"]
-        size = (width * args.scale, height * args.scale)
-        screen = pygame.display.set_mode((size[0], size[1] + 40))
-        title = (
-            f"gymemu — {args.start_state}"
-            if args.start_state
-            else (
-                "gymemu — recorded scene" if scene_path else "gymemu — action-stepped CNN emulator"
+        port = 0 if args.port == "auto" else int(args.port)
+        if not 0 <= port <= 65535:
+            raise ValueError("Port must be between 0 and 65535, or auto")
+    except ValueError as error:
+        parser.error(str(error))
+
+    def mode_factory(mode):
+        if mode == "teacher-forcing":
+            return load_replay(
+                model,
+                config,
+                device,
+                dataset=args.dataset,
+                revision=args.revision,
+                split=args.split,
+                episode_id=args.episode_id,
             )
+        path = (
+            None
+            if args.empty_start
+            else (args.start_scene or args.checkpoint.parent / "start-scene.npz")
         )
-        pygame.display.set_caption(title)
-        font = pygame.font.Font(None, 22)
-        clock = pygame.time.Clock()
-        running = True
-        while running:
-            for event in pygame.event.get():
-                if not handle_event(player, event, keymap):
-                    running = False
-                    break
-            if running:
-                player.tick(keymap)
-            if player.start_name:
-                pygame.display.set_caption(f"gymemu — {player.start_name}")
-            screen.fill((20, 20, 20))
-            surface = pygame.surfarray.make_surface(np.swapaxes(player.pixels(), 0, 1))
-            screen.blit(pygame.transform.scale(surface, size), (0, 40))
-            mode = f"Play {PLAYBACK_FPS} FPS" if player.continuous else "Step mode"
-            label = f"{mode} | {player.steps} | Tab toggle | R reset | C next | Esc quit"
-            screen.blit(font.render(label, True, (240, 240, 240)), (8, 12))
-            pygame.display.flip()
-            clock.tick(PLAYBACK_FPS)  # One prediction per tick; slow inference never catches up.
-    finally:
-        pygame.quit()
+        return recorded_player(args, model, config, device, path)
+
+    serve(
+        player,
+        checkpoint=args.checkpoint,
+        keymap=keymap,
+        port=port,
+        open_browser=not args.no_browser,
+        mode_factory=mode_factory,
+        scale=args.scale,
+    )
 
 
 if __name__ == "__main__":

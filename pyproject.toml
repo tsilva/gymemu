@@ -10,7 +10,6 @@ dependencies = [
     "pillow>=12.3.0,<13",
     "pyarrow>=19,<24",
     "huggingface-hub>=0.34,<2",
-    "pygame>=2.6,<3",
     "hydra-core>=1.3.2,<1.4",
     "wandb>=0.21,<1",
     "boto3>=1.40,<2",

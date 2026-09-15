@@ -80,13 +80,52 @@ immutable objects and manifests retain successfully uploaded checkpoint versions
 Use `r2.enabled=false` to keep artifacts local. Retry interrupted uploads with
 `uv run python upload_checkpoints.py runs/my-run`.
 
-The player opens that scene immediately in step mode. Every fresh action key press
+The player opens a local browser dashboard with that scene in step mode. Every fresh action key press
 predicts one next frame. Press Tab to toggle continuous play at 30 predictions per
 second, matching 60 Hz Atari with frameskip 2. Hold an action key to repeat it;
 releasing all keys uses action 0, or the first checkpoint action if 0 is absent.
 The most recently pressed held key wins. Slow inference reduces playback speed
-without catch-up steps. R restores the scene and pauses; Escape quits. Breakout uses Left, Right, and Space. Other games use checkpoint key bindings,
+without catch-up steps. R restores the scene and pauses; Escape pauses. Breakout uses Left, Right, and Space. Other games use checkpoint key bindings,
 or numbered keys for their action vocabulary. The player prints its bindings.
+
+The Input history widget shows every RGB history frame, oldest to newest,
+left to right and then top to bottom. Black frames retain the model's zero padding.
+After inference it shows the exact stack used for the displayed prediction; before
+the first prediction and after reset it shows the stack ready for the next step.
+Closing or leaving the browser pauses playback. Ctrl+C in the terminal stops the server.
+
+The dashboard uses Gradlab's widget structure and theme. Drag a widget's grip to
+move it, resize from its corner, or use its menu to hide or disable it. Panels restores
+hidden widgets. Add widget creates editable metric cards or RGB MSE charts. Layouts
+persist across launches; Reset layout restores the default workspace.
+
+Use the mode selector to switch between autoregressive play and teacher forcing.
+Playback controls select an episode or starting scene. In teacher forcing, the bottom
+slider seeks directly to a recorded target without replaying intervening predictions.
+The difference widget offers display gain for small errors. `--no-browser` prints the
+local URL without opening a tab; `--port auto` chooses an unused port by default.
+
+To inspect one-step predictions without accumulated feedback errors, replay recorded
+episodes with teacher forcing:
+
+```bash
+uv run python play.py runs/breakout-direct/best.pt --teacher-forcing
+```
+
+The dashboard starts with Original, Prediction, and Prediction − original widgets
+from left to right. The signed RGB difference uses gray for zero,
+brighter channels for positive differences, and darker channels for negative ones.
+Every step uses recorded RGB history, executed actions, and any required auxiliary
+state. Space steps, Tab plays or pauses, R restarts the episode, and C selects the
+next episode. Replay pauses at episode end. The timeline shows the frame position; the metrics widgets show
+recorded action and float32 RGB MSE. The Input history widget shows the recorded inputs.
+Replay starts with the real initial frame and predicts transitions only.
+
+The dataset and pinned revision come from the checkpoint, with its evaluation split
+selected by default. Use `--episode-id 5` to select an episode, `--split train` to
+inspect training examples, or `--dataset /path/to/snapshot` to use a local copy.
+See [teacher-forced replay](docs/training.md#teacher-forced-replay) for diagnostics
+and headless output.
 
 Use `--start-scene path/to/scene.npz` to select another scene, `--key-action left=10`
 to set a binding, or `--empty-start` to test learned initialization. In empty-start
@@ -103,7 +142,7 @@ uv run python play.py runs/breakout-direct/best.pt --start-state ball-up
 Press R to reset the current state, or C to reset to the next named snapshot.
 No flag is needed. The cycle begins with your selected start, then visits the
 other compatible states in alphabetical order and wraps around. `--state-dir`
-selects the library; the window title shows the current state. Each reset restores
+selects the library; the timeline shows the current state. Each reset restores
 RGB, action, and any auxiliary state histories without inference. Incompatible
 library snapshots are skipped with a message. With no other compatible states,
 C resets the current state too.
@@ -275,3 +314,7 @@ Game thumbnails illustrate the flow; they are not measured outputs.
 ## License
 
 [MIT](LICENSE)
+
+`recipe=breakout_scheduled_ball_region` combines generated history with the 0.03
+ball loss for two epochs, using feedback probabilities 0.4 and 0.8. See the
+[recipe details](docs/recipes.md#ball-loss-with-prediction-feedback).

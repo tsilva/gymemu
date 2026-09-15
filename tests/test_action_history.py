@@ -15,8 +15,9 @@ from gymemu.data import Episode, Frames, Windows
 from gymemu.engine import train
 from gymemu.models.action_history import ActionHistoryAutoencoder
 from gymemu.models.direct import Autoencoder
+from gymemu.player import handle_key
 from gymemu.scenes import load_scene, write_scene
-from play import Player, handle_event
+from play import Player
 
 
 def episodes():
@@ -111,8 +112,6 @@ def metadata():
 
 
 def test_recorded_actions_match_training_then_follow_actual_player_actions(snapshot, tmp_path):
-    import pygame
-
     frames = Frames(snapshot, compact=True)
     config = metadata()
     game = {
@@ -139,11 +138,7 @@ def test_recorded_actions_match_training_then_follow_actual_player_actions(snaps
     assert spy.calls[-1][1].tolist() == [[0, 0, 1, 0]]
     assert torch.equal(spy.calls[-1][0][0, -1], first_prediction)
     before = list(player.past_actions)
-    handle_event(
-        player,
-        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LEFT, repeat=True),
-        {pygame.K_LEFT: 2},
-    )
+    handle_key(player, "left", {"left": 2}, repeat=True)
     assert len(spy.calls) == 2 and list(player.past_actions) == before
     player.reset()
     assert player.steps == 0 and len(spy.calls) == 2

@@ -1,0 +1,55 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {defaultWorkspace,normalizeWorkspace,saveWorkspace,loadWorkspace} from '../../gymemu/web_assets/panels/workspace.js';
+import {panelDefinition} from '../../gymemu/web_assets/panels/catalog.js';
+
+test('workspace preserves edits, disabled panels, and custom metric widgets',()=>{
+  const workspace=defaultWorkspace();
+  workspace.panels.prediction.title='Generated';
+  workspace.panels.original.enabled=false;
+  workspace.panels.history.placement.visible=false;
+  workspace.panels.difference.config.gain=4;
+  workspace.panels['panel-custom']={type:'telemetry',title:'Latency',enabled:true,config:{view:'stats',metrics:['inference_ms']},placement:{x:2,y:40,w:5,h:6,visible:true}};
+  const restored=normalizeWorkspace(workspace);
+  assert.equal(restored.panels.prediction.title,'Generated');
+  assert.equal(panelDefinition(restored,'original').enabled,false);
+  assert.equal(restored.panels.history.placement.visible,false);
+  assert.equal(restored.panels.difference.config.gain,4);
+  assert.deepEqual(restored.panels['panel-custom'].config.metrics,['inference_ms']);
+  assert.equal(restored.panels['panel-custom'].builtin,false);
+});
+
+test('workspace rejects executable paths, invalid kinds and unsafe geometry',()=>{
+  const workspace=defaultWorkspace();
+  workspace.panels.prediction.module='https://evil.example/script.js';
+  workspace.panels.prediction.placement={x:100,y:-3,w:100,h:0};
+  workspace.panels['panel-evil']={type:'script',module:'evil.js'};
+  const restored=normalizeWorkspace(workspace);
+  assert.equal(panelDefinition(restored,'prediction').module,'./frame.js');
+  assert.equal(restored.panels['panel-evil'],undefined);
+  assert.deepEqual(restored.panels.prediction.placement,{x:0,y:0,w:12,h:6,visible:true,window:'main'});
+  assert.deepEqual(normalizeWorkspace({version:0}),defaultWorkspace());
+});
+
+test('storage failure leaves a usable default workspace',()=>{
+  const storage={getItem(){throw Error('disabled')},setItem(){throw Error('disabled')}};
+  assert.deepEqual(loadWorkspace(storage),defaultWorkspace());
+  assert.doesNotThrow(()=>saveWorkspace(defaultWorkspace(),storage));
+});
+
+test('legacy default frame positions migrate while custom positions survive',()=>{
+  const legacy=defaultWorkspace();
+  legacy.version=1;
+  legacy.panels.prediction.placement.x=0;
+  legacy.panels.original.placement.x=4;
+  const restored=normalizeWorkspace(legacy);
+  assert.equal(restored.panels.original.placement.x,0);
+  assert.equal(restored.panels.prediction.placement.x,4);
+  assert.equal(restored.panels.difference.placement.x,8);
+  assert.deepEqual(normalizeWorkspace(restored),restored);
+  legacy.panels.prediction.placement.y=14;
+  const custom=normalizeWorkspace(legacy);
+  assert.equal(custom.panels.prediction.placement.x,0);
+  assert.equal(custom.panels.prediction.placement.y,14);
+  assert.equal(custom.panels.original.placement.x,4);
+});
