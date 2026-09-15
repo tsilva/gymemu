@@ -3,9 +3,8 @@ export function mount({ definition, services }) {
   const source = definition.config.source;
   const element = createPanel({ id: definition.id, label: definition.title, body: `
     <div class="frame-viewport"><canvas aria-label="${source} frame"></canvas><p class="frame-empty"></p></div>
-    <footer class="frame-foot"><span></span><button class="quiet fullscreen" title="Fullscreen frame">Expand</button></footer>` });
+    ${source === 'difference' ? '<footer class="frame-foot"><span>Gray = 0 · brighter + · darker −</span></footer>' : ''}` });
   const canvas = element.querySelector('canvas'), empty = element.querySelector('.frame-empty');
-  element.querySelector('.fullscreen').onclick = () => element.requestFullscreen().catch(e => services.showToast(e.message));
   if (source === 'difference') {
     const label = document.createElement('label'); label.className = 'gain-control'; label.textContent = 'Gain ';
     const select = document.createElement('select'); select.setAttribute('aria-label', 'Difference gain');
@@ -29,9 +28,6 @@ export function mount({ definition, services }) {
         context.putImageData(pixels,0,0);
       }
     }
-    element.querySelector('.frame-foot span').textContent = source === 'difference'
-      ? 'Gray = 0 · brighter + · darker −' : source === 'original' ? `Recorded frame ${snapshot.step}`
-      : snapshot.has_prediction ? `Generated frame ${snapshot.step}` : 'Starting scene';
     // Autoregressive starts show the recorded scene before the first prediction.
     if (source === 'prediction' && snapshot.mode === 'autoregressive' && bitmap) { canvas.hidden = false; empty.hidden = true; }
   }};

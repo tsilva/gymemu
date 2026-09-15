@@ -101,12 +101,15 @@ hidden widgets. Add widget creates editable metric cards or RGB MSE charts. Layo
 persist across launches; Reset layout restores the default workspace.
 
 Use the mode selector to switch between autoregressive play and teacher forcing.
-Playback controls select an episode or starting scene. In teacher forcing, the bottom
+Open the bottom bar's gear for playback settings and episode or starting-scene
+selection. In teacher forcing, the bottom
 slider seeks directly to a recorded target without replaying intervening predictions.
 The bottom bar follows Gradlab's player styling: a purple episode/step label and
 scrubber, purple play button (amber while playing), coral reset, and cyan settings.
-The gear opens step navigation, episode or scene selection, and action controls.
-The difference widget offers display gain for small errors. `--no-browser` prints the
+The gear contains play/pause, reset, step navigation, and action controls. Playback
+controls live in settings rather than a dashboard widget, including in saved layouts.
+Original and Prediction have no footer; the difference widget keeps its gain control
+and legend for small errors. `--no-browser` prints the
 local URL without opening a tab; `--port auto` chooses an unused port by default.
 
 To inspect one-step predictions without accumulated feedback errors, replay recorded

@@ -139,7 +139,6 @@ button.quiet { background: transparent; }
 .frame-viewport canvas { display: block; max-width: 100%; max-height: 100%; width: auto; height: 100%; object-fit: contain; image-rendering: pixelated; }
 .frame-empty { position: absolute; max-width: 220px; text-align: center; color: var(--color-text-muted); padding: 15px; }
 .frame-foot { display: flex; gap: 8px; justify-content: space-between; align-items: center; padding: 7px 10px; color: var(--color-text-muted); font-size: .65rem; flex-shrink: 0; min-height: 34px; }
-.frame-foot button { padding: 2px 5px; font-size: .65rem; }
 .gain-control { display: flex; align-items: center; gap: 3px; }.gain-control select { padding: 2px; font-size: .65rem; }
 .history-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; padding: 12px; flex: 1; min-height: 0; overflow: auto; }
 .history-grid figure { margin: 0; min-height: 0; display: flex; flex-direction: column; gap: 5px; }
@@ -180,6 +179,5 @@ button.quiet { background: transparent; }
 .floating-menu { position: fixed; display: grid; gap: 5px; z-index: 10; min-width: 180px; padding: 8px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-surface-secondary); box-shadow: 0 10px 35px #0008; }.floating-menu button { text-align: left; background: transparent; border: 0; }
 dialog { width: min(480px,90vw); padding: 26px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface-primary); color: var(--color-text); }dialog::backdrop { background: #000a; }dialog h2 { font-size: 1.25rem; }dialog label { display: grid; gap: 6px; margin-bottom: 15px; }dialog input[type=text], #editor-title { padding: 9px; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-surface-secondary); }fieldset { border: 1px solid var(--color-border); border-radius: 5px; padding: 12px; }fieldset label { display: flex; align-items: center; margin: 8px 0; }input[type=checkbox] { accent-color: var(--color-interaction); }.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 #toast { position: fixed; bottom: 110px; right: 24px; max-width: min(440px,90vw); padding: 13px 18px; border-radius: 8px; border: 1px solid var(--color-border); background: var(--color-surface-quaternary); z-index: 30; }
-.panel:fullscreen { border-radius: 0; height: 100vh; }
 @media (max-width: 720px) { .app-header { gap: .45rem; padding-inline: .65rem; }.app-wordmark, .header-divider { display: none; }.session-heading strong { font-size: var(--font-size-sm); }.connection { flex-shrink: 0; width: 6px; gap: 0; overflow: hidden; font-size: 0; }.connection::before { flex-shrink: 0; }.mode-badge { max-width: 7.5rem; padding-inline: 5px; } }
 @media (max-width: 600px) { .dashboard { margin: 8px; }.timeline { padding: 10px; }.history-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }

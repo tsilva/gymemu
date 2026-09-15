@@ -37,6 +37,22 @@ test('storage failure leaves a usable default workspace',()=>{
   assert.doesNotThrow(()=>saveWorkspace(defaultWorkspace(),storage));
 });
 
+test('saved layouts drop the retired playback widget and preserve other widgets',()=>{
+  for (const version of [1,2]) {
+    const saved=defaultWorkspace();
+    saved.version=version;
+    saved.panels.controls={type:'controls',title:'Playback controls',config:{},placement:{x:8,y:14,w:4,h:10,visible:true}};
+    saved.panels.model.placement={x:8,y:24,w:4,h:7,visible:false,window:'main'};
+    saved.panels.prediction.title='My prediction';
+    const restored=normalizeWorkspace(saved);
+    assert.equal(restored.panels.controls,undefined);
+    assert.equal(panelDefinition(restored,'controls'),null);
+    assert.deepEqual(restored.panels.model.placement,saved.panels.model.placement);
+    assert.equal(restored.panels.prediction.title,'My prediction');
+    assert.deepEqual(normalizeWorkspace(restored),restored);
+  }
+});
+
 test('legacy default frame positions migrate while custom positions survive',()=>{
   const legacy=defaultWorkspace();
   legacy.version=1;
