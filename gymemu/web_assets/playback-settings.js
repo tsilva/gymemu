@@ -1,11 +1,3 @@
-import { createPanel } from './shared.js';
-export function mount({ definition, services }) {
-  const element = createPanel({ id: definition.id, label: definition.title });
-  const controls = mountPlaybackControls({ services });
-  element.append(controls.element);
-  return { element, render: controls.render };
-}
-
 export function mountPlaybackControls({ services }) {
   const element = document.createElement('div');
   element.className = 'controls-body';

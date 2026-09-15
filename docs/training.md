@@ -439,7 +439,8 @@ that session. Close the browser or lose focus to pause; Ctrl+C stops the server.
 The UI reuses Gradlab's panel module lifecycle, registry, GridStack layout, fonts,
 and theme. Each widget can be dragged, resized, hidden, or disabled. Hidden widgets
 are restored from Panels. Disabled widgets remain in place but stop rendering.
-Prediction widgets can expand to fullscreen. Add widget creates a metric widget;
+Original and Prediction show frames without footer labels or expand buttons; the
+difference widget retains its gain control and legend. Add widget creates a metric widget;
 its menu supports editing the title, selecting metrics, duplicating, and deleting
 custom instances. The built-in error chart keeps the last 300 measured transitions.
 
@@ -453,7 +454,10 @@ the same checkpoint. Each switch resets the selected mode and pauses. Dataset
 loading uses the same provenance and CLI overrides as startup. Switching to ordinary
 play requires a compatible starting scene unless launched with `--empty-start`;
 a missing scene remains an error. Episode and starting-scene selection are in
-Playback controls. The timeline slider seeks teacher-forced targets directly using
+the playback settings panel opened by the bottom bar's gear. Play/pause, reset,
+step navigation, action buttons, and keyboard help are also in settings. Saved layouts
+automatically drop the former Playback controls widget while preserving other widgets.
+The timeline slider seeks teacher-forced targets directly using
 the aligned dataset window. Seeking pauses and clears the displayed error history.
 
 Frame images, input history, and metrics are committed together from one inference
@@ -500,7 +504,7 @@ layout; hover over an icon for its label. The timeline shows episode and target 
 position. The bar uses Gradlab's purple scrubber and icon controls: purple play,
 amber pause, coral reset, and cyan playback settings. Open settings for previous-step
 navigation in replay, single stepping, next episode or scene, selection, and action
-buttons. The Playback controls widget provides the same selection and action controls.
+buttons. Playback controls are contained in settings rather than a dashboard widget.
 Metric widgets show executed action and float32 next-frame RGB MSE over
 pixels normalized to `[0, 1]`. Replay starts from a recorded initial frame;
 it does not score empty-history bootstrap predictions. Its displayed MSE is for the

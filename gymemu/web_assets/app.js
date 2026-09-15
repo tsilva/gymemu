@@ -2,7 +2,7 @@ import { PanelRuntime } from './panels/runtime.js';
 import { PANEL_TYPES, panelDefinition } from './panels/catalog.js';
 import { defaultWorkspace, normalizeWorkspace, loadWorkspace, saveWorkspace } from './panels/workspace.js';
 import { METRICS } from './panels/telemetry.js';
-import { mountPlaybackControls } from './panels/controls.js';
+import { mountPlaybackControls } from './playback-settings.js';
 import { setSvgUseHref } from './panels/shared.js';
 
 const $ = selector => document.querySelector(selector);
@@ -94,8 +94,6 @@ $('#mode').onchange=()=>{showToast('Loading playback mode…');command({type:'mo
 $('#play-toggle').onclick=()=>command({type:snapshot?.playing?'pause':'play'});
 $('#reset-playback').onclick=()=>command({type:'reset'});
 const playbackSettings = mountPlaybackControls({ services: { getState:()=>snapshot, command } });
-playbackSettings.element.querySelector('[data-play]').hidden=true;
-playbackSettings.element.querySelector('[data-reset]').hidden=true;
 const previousStep=document.createElement('button');
 previousStep.textContent='Previous step';previousStep.title='Previous recorded frame';
 previousStep.onclick=()=>command({type:'seek',position:Math.max(0,snapshot.step-1)});
