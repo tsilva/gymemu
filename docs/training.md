@@ -494,8 +494,14 @@ into either RGB or state history. The Input history widget shows the exact
 recorded RGB stack used for the displayed prediction.
 
 The default layout shows the original on the left, prediction in the middle, and
-prediction minus original on the right. The timeline shows episode and target frame
-position. Metric widgets show executed action and float32 next-frame RGB MSE over
+prediction minus original on the right. The compact topbar shows the checkpoint,
+playback mode, connection status, and icon buttons for Panels, Add widget, and Reset
+layout; hover over an icon for its label. The timeline shows episode and target frame
+position. The bar uses Gradlab's purple scrubber and icon controls: purple play,
+amber pause, coral reset, and cyan playback settings. Open settings for previous-step
+navigation in replay, single stepping, next episode or scene, selection, and action
+buttons. The Playback controls widget provides the same selection and action controls.
+Metric widgets show executed action and float32 next-frame RGB MSE over
 pixels normalized to `[0, 1]`. Replay starts from a recorded initial frame;
 it does not score empty-history bootstrap predictions. Its displayed MSE is for the
 current transition, not the full held-out evaluation metric.

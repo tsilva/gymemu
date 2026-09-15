@@ -94,7 +94,8 @@ After inference it shows the exact stack used for the displayed prediction; befo
 the first prediction and after reset it shows the stack ready for the next step.
 Closing or leaving the browser pauses playback. Ctrl+C in the terminal stops the server.
 
-The dashboard uses Gradlab's widget structure and theme. Drag a widget's grip to
+The dashboard uses Gradlab's widget structure and theme, with a compact single-row
+topbar and icon buttons for Panels, Add widget, and Reset layout. Drag a widget's grip to
 move it, resize from its corner, or use its menu to hide or disable it. Panels restores
 hidden widgets. Add widget creates editable metric cards or RGB MSE charts. Layouts
 persist across launches; Reset layout restores the default workspace.
@@ -102,6 +103,9 @@ persist across launches; Reset layout restores the default workspace.
 Use the mode selector to switch between autoregressive play and teacher forcing.
 Playback controls select an episode or starting scene. In teacher forcing, the bottom
 slider seeks directly to a recorded target without replaying intervening predictions.
+The bottom bar follows Gradlab's player styling: a purple episode/step label and
+scrubber, purple play button (amber while playing), coral reset, and cyan settings.
+The gear opens step navigation, episode or scene selection, and action controls.
 The difference widget offers display gain for small errors. `--no-browser` prints the
 local URL without opening a tab; `--port auto` chooses an unused port by default.
 
