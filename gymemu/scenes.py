@@ -9,8 +9,9 @@ import numpy as np
 import torch
 
 from gymemu.data import validate_states
+from gymemu.resources import RESOURCE_ROOT
 
-START_STATES = Path(__file__).resolve().parents[1] / "start_states"
+START_STATES = RESOURCE_ROOT / "start_states"
 
 
 def _state_component(value):

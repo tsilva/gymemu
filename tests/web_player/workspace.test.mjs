@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {defaultWorkspace,normalizeWorkspace,saveWorkspace,loadWorkspace} from '../../gymemu/web_assets/panels/workspace.js';
+import {defaultWorkspace,normalizeWorkspace,saveWorkspace,loadWorkspace,compareWorkspaceRevisions} from '../../gymemu/web_assets/panels/workspace.js';
 import {panelDefinition} from '../../gymemu/web_assets/panels/catalog.js';
 
 test('workspace preserves edits, disabled panels, and custom metric widgets',()=>{
@@ -47,10 +47,45 @@ test('saved layouts drop the retired playback widget and preserve other widgets'
     const restored=normalizeWorkspace(saved);
     assert.equal(restored.panels.controls,undefined);
     assert.equal(panelDefinition(restored,'controls'),null);
-    assert.deepEqual(restored.panels.model.placement,saved.panels.model.placement);
+    assert.deepEqual(restored.panels.model.placement,{...saved.panels.model.placement,y:10,window:'stats'});
     assert.equal(restored.panels.prediction.title,'My prediction');
     assert.deepEqual(normalizeWorkspace(restored),restored);
   }
+});
+
+test('paired workspace puts frames in the player and diagnostic widgets in stats',()=>{
+  const workspace=defaultWorkspace();
+  assert.deepEqual(Object.entries(workspace.panels).filter(([,p])=>p.placement.window==='main').map(([id])=>id),['original','prediction','difference']);
+  assert.deepEqual(Object.entries(workspace.panels).filter(([,p])=>p.placement.window==='stats').map(([id])=>id),['history','metrics','model']);
+  workspace.panels.original.placement.window='stats';
+  workspace.panels['panel-custom']={type:'telemetry',title:'Latency',config:{metrics:['inference_ms']},placement:{x:0,y:3,w:4,h:6,window:'main'}};
+  const restored=normalizeWorkspace(workspace);
+  assert.equal(restored.panels.original.placement.window,'main');
+  assert.equal(restored.panels['panel-custom'].placement.window,'stats');
+  assert.equal(restored.panels['panel-custom'].placement.y,3);
+});
+
+test('legacy diagnostics retain relative positions and preferences in the stats tab',()=>{
+  const saved=defaultWorkspace();
+  saved.version=2;
+  saved.panels.history.placement.y=14;
+  saved.panels.metrics.placement.y=24;
+  saved.panels.metrics.enabled=false;
+  saved.panels.metrics.config.metrics=['mse'];
+  const restored=normalizeWorkspace(saved);
+  assert.equal(restored.panels.history.placement.y,0);
+  assert.equal(restored.panels.metrics.placement.y,10);
+  assert.equal(restored.panels.metrics.enabled,false);
+  assert.deepEqual(restored.panels.metrics.config.metrics,['mse']);
+  assert.deepEqual(normalizeWorkspace(restored),restored);
+});
+
+test('workspace revisions order delayed and simultaneous tab updates deterministically',()=>{
+  assert.ok(compareWorkspaceRevisions({clock:2,writer:'a'},{clock:1,writer:'z'})>0);
+  assert.ok(compareWorkspaceRevisions({clock:2,writer:'b'},{clock:2,writer:'a'})>0);
+  assert.equal(compareWorkspaceRevisions({clock:2,writer:'a'},{clock:2,writer:'a'}),0);
+  const saved=defaultWorkspace();saved.revision={clock:123,writer:'stats'};
+  assert.deepEqual(normalizeWorkspace(saved).revision,saved.revision);
 });
 
 test('legacy default frame positions migrate while custom positions survive',()=>{
@@ -68,4 +103,21 @@ test('legacy default frame positions migrate while custom positions survive',()=
   assert.equal(custom.panels.prediction.placement.x,0);
   assert.equal(custom.panels.prediction.placement.y,14);
   assert.equal(custom.panels.original.placement.x,4);
+});
+
+test('old default diagnostics migrate to full-width history and an aligned lower row',()=>{
+  const saved=defaultWorkspace();
+  Object.assign(saved.panels.history.placement,{x:0,y:0,w:8,h:10});
+  Object.assign(saved.panels.metrics.placement,{x:0,y:10,w:8,h:7});
+  Object.assign(saved.panels.model.placement,{x:8,y:0,w:4,h:7});
+  saved.panels.history.enabled=false;
+  saved.panels.difference.config.gain=8;
+  const restored=normalizeWorkspace(saved),defaults=defaultWorkspace();
+  for(const id of ['history','metrics','model'])
+    assert.deepEqual(restored.panels[id].placement,defaults.panels[id].placement);
+  assert.equal(restored.panels.history.enabled,false);
+  assert.equal(restored.panels.difference.config.gain,8);
+  assert.deepEqual(normalizeWorkspace(restored),restored);
+  saved.panels.history.placement.h=12;
+  assert.equal(normalizeWorkspace(saved).panels.history.placement.h,12);
 });

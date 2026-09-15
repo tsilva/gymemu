@@ -13,7 +13,7 @@ from PIL import Image
 
 from gymemu.player import Player, handle_key
 from gymemu.replay import load_replay
-from gymemu.web_player import PlaybackSession, make_server
+from gymemu.web_player import PlaybackSession, dashboard_urls, make_server
 
 
 class Spy(torch.nn.Module):
@@ -91,7 +91,7 @@ def test_replay_seek_select_atomic_images_and_history(snapshot):
     s.control({"type": "step", "action": 999})
     assert player.steps == 1  # Uses the recorded action.
     s.control({"type": "seek", "position": 0})
-    assert player.frame is None and not s.history
+    assert player.frame is None and list(s.history) == [1]
     for command in (
         {"type": "seek", "position": -1},
         {"type": "seek", "position": 2},
@@ -100,6 +100,40 @@ def test_replay_seek_select_atomic_images_and_history(snapshot):
     ):
         with pytest.raises(ValueError):
             s.control(command)
+
+
+def test_mse_history_survives_seek_and_rejects_stale_chart_selection(snapshot):
+    player = load_replay(Spy(), config(), torch.device("cpu"), dataset=str(snapshot), split="train")
+    s = PlaybackSession(player, "model.pt", {})
+    epoch = s.history_epoch
+    episode = player.episode.episode_id
+    for step in (2, 1, 2):
+        s.control({"type": "seek", "position": step, "episode_id": episode, "history_epoch": epoch})
+    s.publish()
+    assert [p["step"] for p in s.read()["history"]] == [1, 2]
+    assert s.read()["mse"] == s.read()["history"][-1]["mse"]
+    s.control({"type": "seek", "position": 0})
+    s.publish()
+    assert s.read()["mse"] is None and len(s.read()["history"]) == 2
+    s.control({"type": "reset"})
+    assert not s.history and s.history_epoch > epoch
+    with pytest.raises(ValueError, match="history has changed"):
+        s.control({"type": "seek", "position": 1, "history_epoch": epoch})
+    s.control({"type": "select", "value": 3})
+    with pytest.raises(ValueError, match="episode has changed"):
+        s.control({"type": "seek", "position": 1, "episode_id": episode})
+    assert player.steps == 0 and not s.history
+
+
+def test_mse_history_retains_more_than_300_measured_steps(snapshot):
+    player = load_replay(Spy(), config(), torch.device("cpu"), dataset=str(snapshot), split="train")
+    s = PlaybackSession(player, "model.pt", {})
+    for step in range(1, 502):
+        player.steps = step
+        player.mse = step / 10000
+        s.record_mse()
+    assert len(s.history) == 501
+    assert s.history[1] == {"step": 1, "mse": 0.0001}
 
 
 @pytest.fixture
@@ -152,6 +186,7 @@ def test_http_commands_security_assets_and_workspace(running_server):
     root = url.split("#")[0]
     for path in (
         "",
+        "workspace/stats",
         "assets/app.js",
         "assets/panels/runtime.js",
         "assets/vendor/gridstack/gridstack-all.js",
@@ -161,6 +196,58 @@ def test_http_commands_security_assets_and_workspace(running_server):
             assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
     with pytest.raises(HTTPError):
         urlopen(root + "assets/../web_player.py", timeout=5)
+
+
+def test_paired_tabs_share_one_inference_revision(running_server):
+    s, url = running_server
+    player_url, stats_url = dashboard_urls(url)
+    assert player_url == url
+    assert stats_url == url.replace("/#token=", "/workspace/stats#token=")
+    with urlopen(stats_url.split("#")[0], timeout=5) as response:
+        assert response.status == 200
+    api(player_url, "/api/command", {"type": "step", "action": 2})
+    main_snapshot = api(player_url, "/api/state")
+    calls = len(s.player.model.calls)
+    stats_snapshot = api(url, "/api/state")
+    assert stats_snapshot == main_snapshot
+    assert len(s.player.model.calls) == calls == 1
+
+
+def test_workspace_persists_paired_layout_and_ignores_delayed_writes(running_server):
+    _, url = running_server
+    layout = {
+        "version": 3,
+        "revision": {"clock": 2, "writer": "stats"},
+        "panels": {"history": {"placement": {"window": "stats"}}},
+    }
+    api(url, "/api/workspace", layout)
+    api(url, "/api/workspace", {**layout, "revision": {"clock": 1, "writer": "main"}})
+    assert api(url, "/api/workspace") == layout
+
+
+@pytest.mark.parametrize("open_browser", [True, False])
+def test_serve_opens_or_prints_both_tabs(monkeypatch, capsys, open_browser):
+    import gymemu.web_player as web
+
+    class Server:
+        def serve_forever(self, **_):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    url = "http://127.0.0.1:12345/#token=test"
+    opened = []
+    monkeypatch.setattr(web, "make_server", lambda *_: (Server(), url))
+    monkeypatch.setattr(web.webbrowser, "open", lambda target, **kw: opened.append((target, kw)))
+    player = session().player
+    web.serve(player, checkpoint="model.pt", keymap={}, open_browser=open_browser)
+    urls = dashboard_urls(url)
+    assert [target for target, _ in opened] == (list(urls) if open_browser else [])
+    assert all(options["new"] == 2 for _, options in opened)
+    output = capsys.readouterr().out
+    assert all(target in output for target in urls)
+    assert not player.model.calls
 
 
 def test_worker_pacing_and_disconnect_pause(running_server):

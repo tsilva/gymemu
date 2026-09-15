@@ -16,7 +16,9 @@ from pathlib import Path
 import torch
 from omegaconf import OmegaConf
 
-ROOT = Path(__file__).resolve().parents[1]
+from gymemu.resources import IS_CHECKOUT, PACKAGE_DIR, RESOURCE_ROOT
+
+ROOT = RESOURCE_ROOT
 
 
 def recipe_path(value):
@@ -87,8 +89,8 @@ def _hash(path):
 def save_reproduction(output, config, cfg, device, dataset_identity):
     write_recipe(output / "recipe.yaml", config, cfg)
     files = set(ROOT.glob("*.py"))
-    files.update((ROOT / "gymemu").rglob("*.py"))
-    files.update(path for path in (ROOT / "gymemu/web_assets").rglob("*") if path.is_file())
+    files.update(PACKAGE_DIR.rglob("*.py"))
+    files.update(path for path in (PACKAGE_DIR / "web_assets").rglob("*") if path.is_file())
     files.update((ROOT / "configs").rglob("*.yaml"))
     files.update((ROOT / "start_states").rglob("*.npz"))
     files.update(ROOT / name for name in ("pyproject.toml", "uv.lock", ".python-version"))
@@ -105,6 +107,8 @@ def save_reproduction(output, config, cfg, device, dataset_identity):
             archive.add(path, arcname=name, recursive=False)
 
     def git(*args):
+        if not IS_CHECKOUT:
+            return None
         try:
             return subprocess.check_output(
                 ["git", "-C", str(ROOT), *args], stderr=subprocess.DEVNULL, text=True

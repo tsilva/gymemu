@@ -3,7 +3,7 @@ export function mount({ definition, services }) {
   const source = definition.config.source;
   const element = createPanel({ id: definition.id, label: definition.title, body: `
     <div class="frame-viewport"><canvas aria-label="${source} frame"></canvas><p class="frame-empty"></p></div>
-    ${source === 'difference' ? '<footer class="frame-foot"><span>Gray = 0 · brighter + · darker −</span></footer>' : ''}` });
+    <footer class="frame-foot frame-footer"${source === 'difference' ? '' : ' aria-hidden="true"'}>${source === 'difference' ? '<span class="frame-mse" title="RGB mean squared error, independent of display gain">MSE —</span><span class="difference-legend" title="Gray = 0 · brighter + · darker −">Gray = 0 · brighter + · darker −</span>' : ''}</footer>` });
   const canvas = element.querySelector('canvas'), empty = element.querySelector('.frame-empty');
   if (source === 'difference') {
     const label = document.createElement('label'); label.className = 'gain-control'; label.textContent = 'Gain ';
@@ -14,6 +14,7 @@ export function mount({ definition, services }) {
   }
   return { element, render(snapshot, view) {
     if (!snapshot) return;
+    if (source === 'difference') element.querySelector('.frame-mse').textContent = `MSE ${snapshot.mse == null ? '—' : snapshot.mse.toFixed(7)}`;
     const bitmap = view.bitmaps?.[source];
     const pending = Boolean(bitmap) && source !== 'original' && !snapshot.has_prediction;
     empty.hidden = Boolean(bitmap) && !pending;

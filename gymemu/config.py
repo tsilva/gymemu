@@ -1,10 +1,10 @@
 """Hydra composition, also usable from tests and notebooks without changing CWD."""
 
-from pathlib import Path
-
 from hydra import compose, initialize_config_dir
 
-CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
+from gymemu.resources import RESOURCE_ROOT
+
+CONFIG_DIR = RESOURCE_ROOT / "configs"
 
 
 def compose_config(overrides=(), *, recipe=None):
