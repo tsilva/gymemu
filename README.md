@@ -30,7 +30,14 @@ Install [uv](https://docs.astral.sh/uv/), then run:
 git clone https://github.com/tsilva/gymemu.git
 cd gymemu
 uv sync --frozen
+uv tool install . --editable --exclude-newer "7 days"
+gymemu --help
 ```
+
+The editable install adds `gymemu` to your shell. Use `gymemu train`, `gymemu play`,
+and `gymemu compare` from any directory. Use absolute dataset/checkpoint paths when
+working elsewhere. `uv tool install . --exclude-newer "7 days"` installs a self-contained copy.
+The original `python train.py` and other repository scripts remain supported.
 
 The locked environment uses Python 3.13. Python 3.11 through 3.13 is supported.
 
@@ -44,13 +51,13 @@ From the repository root:
 
 ```bash
 # Default direct CNN on Breakout
-uv run python train.py output=runs/breakout-direct
+uv run gymemu train output=runs/breakout-direct
 
 # Frame autoencoder, then a separate latent prediction model
-uv run python train.py approach=latent output=runs/breakout-latent
+uv run gymemu train approach=latent output=runs/breakout-latent
 
 # Play either approach using its checkpoint
-uv run python play.py runs/breakout-direct/best.pt
+uv run gymemu play runs/breakout-direct/best.pt
 ```
 
 Use a new output directory for each run. Omit `output` for a timestamped directory
@@ -65,7 +72,7 @@ Training logs to Weights & Biases by default. Authenticate once before training:
 
 ```bash
 uv run wandb login
-uv run python train.py output=runs/breakout-tracked
+uv run gymemu train output=runs/breakout-tracked
 ```
 
 Projects use `gymemu-<canonical-env-id>`, so Breakout logs to
@@ -78,7 +85,7 @@ Checkpoints also upload to the separate `gymemu` R2 bucket, together with the
 recorded start scene, metrics, and reproduction files. Each run has a unique prefix;
 immutable objects and manifests retain successfully uploaded checkpoint versions.
 Use `r2.enabled=false` to keep artifacts local. Retry interrupted uploads with
-`uv run python upload_checkpoints.py runs/my-run`.
+`uv run gymemu upload-checkpoints runs/my-run`.
 
 The player opens a local browser dashboard with that scene in step mode. Every fresh action key press
 predicts one next frame. Press Tab to toggle continuous play at 30 predictions per
@@ -89,16 +96,30 @@ without catch-up steps. R restores the scene and pauses; Escape pauses. Breakout
 or numbered keys for their action vocabulary. The player prints its bindings.
 
 The Input history widget shows every RGB history frame, oldest to newest,
-left to right and then top to bottom. Black frames retain the model's zero padding.
+left to right and then top to bottom, with frame numbers overlaid at each tile's
+top-left corner. The compact grid has no bottom caption. Black frames retain the model's zero padding.
 After inference it shows the exact stack used for the displayed prediction; before
 the first prediction and after reset it shows the stack ready for the next step.
 Closing or leaving the browser pauses playback. Ctrl+C in the terminal stops the server.
 
+The player opens two synchronized browser tabs using Gradlab's paired workspace
+approach. The first contains Original, Prediction, Prediction − original, and the
+playbar. The Diagnostics tab contains Input history, Prediction error, Model context,
+and custom metric widgets. Its default layout places Input history across the top,
+with Prediction error below on the left and Model context on the right.
+Both display snapshots from one inference session.
+The header's Diagnostics/Player link reopens or focuses the companion tab.
+
 The dashboard uses Gradlab's widget structure and theme, with a compact single-row
-topbar and icon buttons for Panels, Add widget, and Reset layout. Drag a widget's grip to
-move it, resize from its corner, or use its menu to hide or disable it. Panels restores
-hidden widgets. Add widget creates editable metric cards or RGB MSE charts. Layouts
-persist across launches; Reset layout restores the default workspace.
+topbar and icon buttons for Panels, Add widget, and Reset layout. Comparison panels
+automatically share the available space above the playbar with equal canvas sizes;
+unused space around original, predicted, difference, and history frames matches the
+widget background, keeping black image pixels distinct from display padding;
+on narrow screens they stack vertically. In Diagnostics, drag a widget's grip to move
+it or resize from its corner. Panel menus can hide or disable widgets. Panels restores
+hidden widgets in the current tab. Add widget in Diagnostics creates editable metric
+cards or RGB MSE charts. Layout changes synchronize between tabs and persist across
+launches; Reset layout restores both tabs. Existing layouts migrate automatically.
 
 Use the mode selector to switch between autoregressive play and teacher forcing.
 Open the bottom bar's gear for playback settings and episode or starting-scene
@@ -108,15 +129,27 @@ The bottom bar follows Gradlab's player styling: a purple episode/step label and
 scrubber, purple play button (amber while playing), coral reset, and cyan settings.
 The gear contains play/pause, reset, step navigation, and action controls. Playback
 controls live in settings rather than a dashboard widget, including in saved layouts.
-Original and Prediction have no footer; the difference widget keeps its gain control
-and legend for small errors. `--no-browser` prints the
-local URL without opening a tab; `--port auto` chooses an unused port by default.
+All three frame panels reserve the same footer height to keep the images aligned.
+The difference footer shows current RGB MSE, independent of display gain. Diagnostics
+charts every measured transition in the current episode: hover for a vertical cursor
+and value, click to select that step in the player, drag to zoom, or double-click to
+reset zoom. The playbar shows the shared zoom range with adjustable handles. While zoomed,
+Diagnostics also shows the segment selector beneath the charts. Drag either bracket
+or use its arrow keys to resize the range without moving the playback cursor.
+Highest MSE jumps to the largest measured error. Seeking preserves measurements;
+resetting, changing episode, or switching mode clears them. Unvisited steps are
+unscored and gaps are left visible.
+Original and Prediction have blank footers; the difference footer keeps its gain
+control and legend. `--no-browser` prints both URLs without opening tabs;
+`--port auto` chooses an unused port by default. Diagnostics observes playback and
+does not send keyboard, heartbeat, or pause commands. Leaving the player tab pauses
+playback; returning to either tab shows the current server snapshot.
 
 To inspect one-step predictions without accumulated feedback errors, replay recorded
 episodes with teacher forcing:
 
 ```bash
-uv run python play.py runs/breakout-direct/best.pt --teacher-forcing
+uv run gymemu play runs/breakout-direct/best.pt --teacher-forcing
 ```
 
 The dashboard starts with Original, Prediction, and Prediction − original widgets
@@ -142,8 +175,8 @@ A missing recorded scene produces an error instead of silently switching modes.
 For repeatable debugging, select a named frame/action snapshot:
 
 ```bash
-uv run python play.py runs/breakout-direct/best.pt --list-start-states
-uv run python play.py runs/breakout-direct/best.pt --start-state ball-up
+uv run gymemu play runs/breakout-direct/best.pt --list-start-states
+uv run gymemu play runs/breakout-direct/best.pt --start-state ball-up
 ```
 
 Press R to reset the current state, or C to reset to the next named snapshot.
@@ -197,16 +230,16 @@ for measured gains and reproduction commands. Existing recipes remain available 
 
 ```bash
 # Inspect a recipe without downloading data or starting training
-uv run python train.py recipe=breakout_cnn --cfg job --resolve
+uv run gymemu train recipe=breakout_cnn --cfg job --resolve
 
 # Train on a CUDA host after building the frame cache described below
-uv run python train.py recipe=breakout_cnn output=runs/breakout-recipe
+uv run gymemu train recipe=breakout_cnn output=runs/breakout-recipe
 
 # Try the action-history variant with the same cache
-uv run python train.py recipe=breakout_actions output=runs/breakout-actions
+uv run gymemu train recipe=breakout_actions output=runs/breakout-actions
 
 # Replay the settings captured by a previous run
-uv run python train.py --recipe runs/breakout-recipe/recipe.yaml output=runs/replay
+uv run gymemu train --recipe runs/breakout-recipe/recipe.yaml output=runs/replay
 ```
 
 Every new run saves a standalone `recipe.yaml`, a source archive, and a code/environment
@@ -221,22 +254,22 @@ optional `recipe` and `experiment` presets. Command-line overrides take preceden
 
 ```bash
 # Inspect the complete configuration without loading data
-uv run python train.py approach=latent --cfg job --resolve
+uv run gymemu train approach=latent --cfg job --resolve
 
 # Inherit a smaller CNN config and override training settings
-uv run python train.py model=direct_small history=4 trainer.epochs=5
+uv run gymemu train model=direct_small history=4 trainer.epochs=5
 
 # Reuse CUDA settings for either approach
-uv run python train.py approach=latent experiment=cuda
+uv run gymemu train approach=latent experiment=cuda
 
 # Tune one stage independently
-uv run python train.py approach=latent approach.stages.0.epochs=5 approach.stages.1.epochs=20
+uv run gymemu train approach=latent approach.stages.0.epochs=5 approach.stages.1.epochs=20
 
 # Sweep architectures and seeds; Hydra creates a separate directory per run
-uv run python train.py --multirun approach=direct,latent seed=47,48 hydra.sweep.dir=runs/comparison
+uv run gymemu train --multirun approach=direct,latent seed=47,48 hydra.sweep.dir=runs/comparison
 
 # Rank runs with matching evaluation targets and export their budgets and metrics
-uv run python compare.py runs/comparison --csv logs/comparison.csv
+uv run gymemu compare runs/comparison --csv logs/comparison.csv
 ```
 
 The latent approach's `model` group configures its codec. Set
@@ -251,12 +284,12 @@ The cache preserves every RGB pixel and verifies source and cache checksums.
 Use the same immutable dataset revision for caching and training.
 
 ```bash
-uv run python cache_frames.py \
+uv run gymemu cache-frames \
   --dataset tsilva/gradlab-breakout-trajectories \
   --revision 676ff6388f4218d3c3a3ce9f2f33e075fa7314a3 \
   --output data/breakout-676ff638-lz4
 
-uv run python train.py experiment=cuda_cached \
+uv run gymemu train experiment=cuda_cached \
   game.revision=676ff6388f4218d3c3a3ce9f2f33e075fa7314a3 \
   trainer.frame_cache=data/breakout-676ff638-lz4 trainer.epochs=10 \
   output=runs/breakout-cached
@@ -274,7 +307,7 @@ The training path is game-independent. Supply a dataset with the supported RGB-f
 episode, and scalar integer action schema:
 
 ```bash
-uv run python train.py game=custom game.name=my-game game.dataset=/absolute/path/to/snapshot
+uv run gymemu train game=custom game.name=my-game game.dataset=/absolute/path/to/snapshot
 ```
 
 Hub IDs work too. Add a YAML file under `configs/game/` to save a dataset ID, immutable
@@ -289,8 +322,8 @@ uv run pytest
 uv run ruff check .
 
 # Bounded training; still downloads the dataset snapshot
-uv run python train.py experiment=smoke wandb.mode=disabled r2.enabled=false output=runs/smoke
-uv run python play.py runs/smoke/best.pt --device cpu --headless-actions 0,1,2 --output logs/smoke.png
+uv run gymemu train experiment=smoke wandb.mode=disabled r2.enabled=false output=runs/smoke
+uv run gymemu play runs/smoke/best.pt --device cpu --headless-actions 0,1,2 --output logs/smoke.png
 ```
 
 Open `logs/smoke.png` to inspect the result. A smoke checks the pipeline; its training

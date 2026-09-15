@@ -200,7 +200,7 @@ export function lineCursorIndex(plot, x, pointCount) {
   return Math.round(fraction * Math.max(0, pointCount - 1));
 }
 
-export function drawLines(canvas, series, { cursorIndex = null, steps = null, cursorStep = null, cursorLabel = null, referenceStep = null, dimBeforeStep = null, showStepTicks = false } = {}) {
+export function drawLines(canvas, series, { cursorIndex = null, steps = null, cursorStep = null, cursorLabel = null, referenceStep = null, dimBeforeStep = null, showStepTicks = false, connectGaps = true } = {}) {
   if (steps?.length) canvas.setAttribute("aria-description", `Episode steps ${steps[0]}–${steps.at(-1)}. Drag to zoom; double-click to reset.`);
   const { context, ratio, width, height } = resizeCanvas(canvas);
   const chartSurface = themeColor("chartSurface");
@@ -273,6 +273,7 @@ export function drawLines(canvas, series, { cursorIndex = null, steps = null, cu
     let connected = false;
     points.forEach((value, index) => {
       if (!Number.isFinite(value)) { connected = false; return; }
+      if (!connectGaps && index > 0 && steps[index] !== steps[index - 1] + 1) connected = false;
       const x = plot.left
         + fraction(index, points.length) * (plot.right - plot.left);
       const y = plot.bottom
@@ -282,6 +283,17 @@ export function drawLines(canvas, series, { cursorIndex = null, steps = null, cu
       connected = true;
     });
     context.stroke();
+    if (!connectGaps) points.forEach((value, index) => {
+      if (!Number.isFinite(value)) return;
+      const isolated = (index === 0 || steps[index] !== steps[index - 1] + 1)
+        && (index === points.length - 1 || steps[index + 1] !== steps[index] + 1);
+      if (!isolated) return;
+      context.fillStyle = color;
+      context.beginPath();
+      context.arc(plot.left + fraction(index, points.length) * (plot.right - plot.left),
+        plot.bottom - ((value - scale.min) / (scale.max - scale.min)) * (plot.bottom - plot.top), 2.5, 0, Math.PI * 2);
+      context.fill();
+    });
   });
   context.setLineDash([]);
   if (Number.isFinite(dimBeforeStep) && steps?.length && dimBeforeStep > steps[0]) {

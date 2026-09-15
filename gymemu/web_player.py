@@ -11,7 +11,6 @@ import secrets
 import threading
 import time
 import webbrowser
-from collections import deque
 from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +23,21 @@ from gymemu.player import PLAYBACK_FPS, handle_key
 from gymemu.replay import ReplayPlayer
 
 ASSETS = Path(__file__).with_name("web_assets")
+
+
+def workspace_revision(value):
+    revision = value.get("revision", {}) if isinstance(value, dict) else {}
+    if not isinstance(revision, dict):
+        return (0, "")
+    clock, writer = revision.get("clock"), revision.get("writer")
+    if type(clock) is int and clock >= 0 and isinstance(writer, str):
+        return (clock, writer)
+    return (0, "")
+
+
+def dashboard_urls(player_url):
+    url = urlsplit(player_url)
+    return player_url, url._replace(path="/workspace/stats").geturl()
 
 
 def png(pixels):
@@ -46,7 +60,8 @@ class PlaybackSession:
         self.revision = 0
         self.error = None
         self.loading = None
-        self.history = deque(maxlen=300)
+        self.history = {}
+        self.history_epoch = 0
         self.last_heartbeat = time.monotonic()
         self.inference_ms = None
         self.commands = queue.Queue(maxsize=64)
@@ -59,6 +74,14 @@ class PlaybackSession:
         self.player.continuous = False
         self.player.held_keys.clear()
 
+    def clear_history(self):
+        self.history.clear()
+        self.history_epoch += 1
+
+    def record_mse(self):
+        if self.replay and self.player.mse is not None:
+            self.history[self.player.steps] = {"step": self.player.steps, "mse": self.player.mse}
+
     def advance(self, action=None):
         if self.replay and self.player.finished:
             self.pause()
@@ -69,8 +92,7 @@ class PlaybackSession:
         else:
             self.player.advance(self.default_action if action is None else action)
         self.inference_ms = (time.perf_counter() - start) * 1000
-        if self.replay and self.player.mse is not None:
-            self.history.append({"step": self.player.steps, "mse": self.player.mse})
+        self.record_mse()
 
     @property
     def default_action(self):
@@ -97,7 +119,7 @@ class PlaybackSession:
             self.replay = isinstance(self.player, ReplayPlayer)
             self.keymap = {"space": None} if self.replay else self.normal_keymap
             self.player.reset()
-            self.history.clear()
+            self.clear_history()
             self.inference_ms = None
         elif kind in ("pause", "blur"):
             self.pause()
@@ -109,7 +131,7 @@ class PlaybackSession:
             self.advance(command.get("action"))
         elif kind in ("reset", "next"):
             self.player.reset(cycle=kind == "next")
-            self.history.clear()
+            self.clear_history()
             self.inference_ms = None
         elif kind == "select":
             self.pause()
@@ -129,16 +151,19 @@ class PlaybackSession:
                 self.player.start_index = value
                 self.player._set_initial_history(self.player.start_states[value][1])
             self.player.reset()
-            self.history.clear()
+            self.clear_history()
             self.inference_ms = None
         elif kind == "seek":
             if not self.replay:
                 raise ValueError("Seeking requires teacher-forced dataset replay")
+            if "episode_id" in command and command["episode_id"] != self.player.episode.episode_id:
+                raise ValueError("The chart episode has changed")
+            if "history_epoch" in command and command["history_epoch"] != self.history_epoch:
+                raise ValueError("The chart history has changed")
             position = command.get("position")
             if type(position) is not int or not 0 <= position <= len(self.player.episode.actions):
                 raise ValueError("Frame position is outside this episode")
             self.pause()
-            self.history.clear()
             self.player.reset()
             self.inference_ms = None
             if position:
@@ -158,10 +183,10 @@ class PlaybackSession:
             if key in self.keymap and self.player.frame is not previous_frame:
                 self.inference_ms = (time.perf_counter() - started) * 1000
             if key in ("r", "c") and down and not repeat:
-                self.history.clear()
+                self.clear_history()
                 self.inference_ms = None
             if self.replay and self.player.steps != before and self.player.mse is not None:
-                self.history.append({"step": self.player.steps, "mse": self.player.mse})
+                self.record_mse()
             self.last_heartbeat = time.monotonic()
         else:
             raise ValueError(f"Unknown playback command: {kind}")
@@ -224,7 +249,8 @@ class PlaybackSession:
             "keymap": self.keymap,
             "mse": player.mse if self.replay else None,
             "inference_ms": self.inference_ms,
-            "history": list(self.history),
+            "history": [self.history[step] for step in sorted(self.history)],
+            "history_epoch": self.history_epoch,
             "history_length": player.config["history"],
             "shape": player.config["shape"],
             "scale": self.scale,
@@ -362,8 +388,9 @@ def make_server(session, port=0, *, workspace_path=None):
                 except ValueError:
                     return self.respond(400, b'{"error":"Invalid revision"}')
                 return self.respond(200, json.dumps(session.read(after), allow_nan=False).encode())
-            path = ASSETS / ("index.html" if url.path == "/" else url.path.removeprefix("/assets/"))
-            if url.path != "/" and not url.path.startswith("/assets/"):
+            dashboard = url.path in ("/", "/workspace/stats")
+            path = ASSETS / ("index.html" if dashboard else url.path.removeprefix("/assets/"))
+            if not dashboard and not url.path.startswith("/assets/"):
                 return self.respond(404, b"Not found", "text/plain")
             if not path.resolve().is_relative_to(ASSETS.resolve()) or not path.is_file():
                 return self.respond(404, b"Not found", "text/plain")
@@ -384,11 +411,19 @@ def make_server(session, port=0, *, workspace_path=None):
                 if not isinstance(command, dict):
                     raise ValueError("Expected a playback command")
                 if self.path == "/api/workspace":
-                    if command.get("version") != 1 or not isinstance(command.get("panels"), dict):
+                    if command.get("version") not in (1, 2, 3) or not isinstance(
+                        command.get("panels"), dict
+                    ):
                         raise ValueError("Invalid workspace")
                     if len(command["panels"]) > 40:
                         raise ValueError("Workspace supports at most 40 widgets")
                     with workspace_lock:
+                        try:
+                            saved = json.loads(workspace_path.read_text())
+                        except (OSError, ValueError):
+                            saved = None
+                        if workspace_revision(command) < workspace_revision(saved):
+                            return self.respond(200, b'{"ok":true}')
                         workspace_path.parent.mkdir(parents=True, exist_ok=True)
                         temporary = workspace_path.with_suffix(".tmp")
                         temporary.write_text(json.dumps(command))
@@ -411,13 +446,16 @@ def serve(player, *, checkpoint, keymap, port=0, open_browser=True, scale=3, mod
     server = None
     try:
         server, url = make_server(session, port)
+        player_url, stats_url = dashboard_urls(url)
         print(f"Gymemu player: {url}", flush=True)
+        print(f"Gymemu diagnostics: {stats_url}", flush=True)
         print(
             "Space/action keys step; Tab plays; R resets; C selects next. Ctrl+C stops server.",
             flush=True,
         )
         if open_browser:
-            webbrowser.open(url)
+            webbrowser.open(player_url, new=2)
+            webbrowser.open(stats_url, new=2, autoraise=False)
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass

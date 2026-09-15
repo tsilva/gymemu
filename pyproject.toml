@@ -1,6 +1,7 @@
 [project]
 name = "gymemu"
 version = "0.1.0"
+readme = "README.md"
 description = "Train, compare, and play configurable neural emulator pipelines from trajectory datasets"
 requires-python = ">=3.11,<3.14"
 license = "MIT"
@@ -41,3 +42,22 @@ select = ["E", "F", "I"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[project.scripts]
+gymemu = "gymemu.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gymemu"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"configs" = "gymemu/configs"
+"start_states" = "gymemu/start_states"
+"pyproject.toml" = "gymemu/pyproject.toml"
+"uv.lock" = "gymemu/uv.lock"
+
+[tool.hatch.build.targets.sdist]
+include = ["/gymemu", "/configs", "/start_states", "/README.md", "/LICENSE", "/uv.lock"]

@@ -1,5 +1,10 @@
 # Training guide
 
+Install the command with `uv tool install . --editable --exclude-newer "7 days"` from the checkout.
+Run `gymemu --help` to list subcommands. The `uv run gymemu` examples below use
+the locked project environment; the installed `gymemu` command also works outside
+the checkout. Relative dataset, output, and checkpoint paths use your current directory.
+
 For the locked Docker image, Beast-3 scheduling, Runpod, and bounded GPU checks,
 see [container training](../containers/train/README.md).
 
@@ -29,7 +34,7 @@ See the [README](../README.md) for setup, playback, and comparison commands.
 For a ball-region RGB loss with recorded histories, run:
 
 ```bash
-uv run python train.py recipe=breakout_ball_region
+uv run gymemu train recipe=breakout_ball_region
 ```
 
 This inherits the `breakout_actions` data, model, cache, and training budget. Each
@@ -44,7 +49,7 @@ still feeds back predicted frames. See the [experiment guide](recipes.md#ball-re
 for matched controls, throughput interpretation, and missed-detection limitations.
 
 For joint RGB and ball-coordinate prediction, run
-`uv run python train.py recipe=breakout_ball`. This uses the action-history recipe's
+`uv run gymemu train recipe=breakout_ball`. This uses the action-history recipe's
 data and training budget, with frame-aligned normalized x/y inputs and successor
 coordinate targets. The loss adds masked coordinate MSE with weight `0.01`; tune it
 using `approach.options.coordinate_loss_weight`. The comparison metric stays RGB
@@ -100,8 +105,8 @@ same way; `configs/model/direct_small.yaml` is a working example.
 Hydra also supports external config search directories through `--config-dir`.
 
 ```bash
-uv run python train.py model.width=16 trainer.learning_rate=0.0003
-uv run python train.py --multirun model.width=16,32 history=4,8 seed=47,48
+uv run gymemu train model.width=16 trainer.learning_rate=0.0003
+uv run gymemu train --multirun model.width=16,32 history=4,8 seed=47,48
 ```
 
 Multiruns execute sequentially with Hydra's default local launcher. Use
@@ -163,13 +168,13 @@ Authenticate once, then train any approach or recipe with the Hydra interface:
 
 ```bash
 uv run wandb login
-uv run python train.py recipe=breakout_cnn
+uv run gymemu train recipe=breakout_cnn
 
 # Select an existing W&B team and label related runs
-uv run python train.py wandb.entity=my-team wandb.group=history-study
+uv run gymemu train wandb.entity=my-team wandb.group=history-study
 
 # Save W&B logs locally without credentials or an upload
-uv run python train.py experiment=smoke wandb.mode=offline r2.enabled=false output=runs/tracked-smoke
+uv run gymemu train experiment=smoke wandb.mode=offline r2.enabled=false output=runs/tracked-smoke
 ```
 
 Each experiment creates one W&B run across all training stages. Hydra multiruns
@@ -258,16 +263,16 @@ through the host's secret manager or process environment.
 
 ```bash
 # With W&B authentication and the three R2 variables already configured
-uv run python train.py output=runs/breakout-stored
+uv run gymemu train output=runs/breakout-stored
 
 # Choose another dedicated bucket or object prefix
-uv run python train.py r2.bucket=gymemu r2.prefix=experiments
+uv run gymemu train r2.bucket=gymemu r2.prefix=experiments
 
 # Local-only smoke with no W&B or R2 credentials
-uv run python train.py experiment=smoke wandb.mode=disabled r2.enabled=false
+uv run gymemu train experiment=smoke wandb.mode=disabled r2.enabled=false
 
 # Retry publication using an existing run's saved R2 destination
-uv run python upload_checkpoints.py runs/breakout-stored
+uv run gymemu upload-checkpoints runs/breakout-stored
 ```
 
 Legacy argparse commands accept `--no-r2` to disable uploads and `--env-id` for a
@@ -430,23 +435,52 @@ the first tick initializes the frame without executing a game action.
 ## Browser player workspace
 
 `play.py` serves the player on loopback and opens its browser URL. No JavaScript
-installation, build, CDN, or Gradlab installation is needed. `--no-browser` prints
-the complete URL for opening manually or in Codex's in-app Browser. `--port auto`
+installation, build, CDN, or Gradlab installation is needed. Playback opens a player
+tab and a Diagnostics tab. `--no-browser` prints both complete URLs for opening
+manually or in Codex's in-app Browser. `--port auto`
 selects an unused port; `--port NUMBER` selects a specific port. Each server has one
-playback session and a random access token in its printed URL. Multiple tabs share
-that session. Close the browser or lose focus to pause; Ctrl+C stops the server.
+playback session and a random access token shared by its printed URLs. Both tabs
+read the same atomic frame/metric revisions from that session, without duplicate
+inference. Leaving or closing the player tab pauses playback; Diagnostics only sends explicit chart selections as seek commands; it sends no
+keyboard, heartbeat, or blur commands. Ctrl+C stops the server.
 
 The UI reuses Gradlab's panel module lifecycle, registry, GridStack layout, fonts,
-and theme. Each widget can be dragged, resized, hidden, or disabled. Hidden widgets
+and theme, including paired views with per-tab panel placement. Original, Prediction,
+and difference belong to the player tab with its playbar; input history, error charts,
+model context, and custom widgets belong to Diagnostics. Its default arrangement puts
+Input history across the full top row, with Prediction error and Model context side
+by side below. History tiles use minimal spacing, overlaid top-left frame numbers,
+and no bottom caption. Older default arrangements migrate; custom placements remain. Header links open or focus
+the companion tab. Layout updates use BroadcastChannel with a storage-event fallback
+and ordered revisions, following Gradlab's workspace synchronization strategy.
+The comparison panels automatically fill the available height above the playbar in
+equal-width columns. All three reserve equal-height footers so the image viewports
+align; Original and Prediction footers are blank. Narrow screens stack the panels.
+Unused space around original, predicted, difference, and history frames uses the widget
+background color so black image pixels remain distinct from display padding.
+Diagnostic widgets can be dragged and resized. All widgets can be hidden or disabled. Hidden widgets
 are restored from Panels. Disabled widgets remain in place but stop rendering.
 Original and Prediction show frames without footer labels or expand buttons; the
-difference widget retains its gain control and legend. Add widget creates a metric widget;
+difference widget retains its gain control, current RGB MSE, and legend. Add widget creates a metric widget;
 its menu supports editing the title, selecting metrics, duplicating, and deleting
-custom instances. The built-in error chart keeps the last 300 measured transitions.
+custom instances. The error chart keeps all measured transitions in the current episode, sorted by
+timestep. Hover shows a vertical cursor and MSE; clicking a point pauses and selects
+the same target in both tabs and the playbar. Drag horizontally to zoom and double-click
+to reset, or use Reset zoom. While zoomed, Diagnostics also shows a segment selector beneath the charts.
+The playbar in both tabs highlights the shared zoom range, with handles
+that can be dragged or adjusted with arrow keys (Shift moves ten steps), Home, and End.
+On a focused chart, arrow keys or Home/End inspect points; Enter or Space selects.
+Highest MSE selects the largest measured error, including points outside the zoom.
+Coverage reports measured transitions; unvisited steps remain unscored, with gaps
+rather than interpolated errors. The purple line marks the selected step; the amber
+line marks the hovered step. Reset, episode changes, and mode changes clear the series
+and zoom. Stale chart selections from a previous episode or reset are rejected.
 
 Layout and widget configuration are stored in
 `~/.config/gymemu/player-workspace.json`, with browser storage as a secondary copy.
-Reset layout restores defaults. These preferences do not change inference inputs.
+Reset layout restores defaults for both tabs. Old layouts retain their widget
+settings, with diagnostic placements moved into the second tab. These preferences
+do not change inference inputs.
 Extension instructions live in `gymemu/web_assets/panels/README.md`.
 
 The mode selector switches between autoregressive play and teacher forcing using
@@ -458,7 +492,7 @@ the playback settings panel opened by the bottom bar's gear. Play/pause, reset,
 step navigation, action buttons, and keyboard help are also in settings. Saved layouts
 automatically drop the former Playback controls widget while preserving other widgets.
 The timeline slider seeks teacher-forced targets directly using
-the aligned dataset window. Seeking pauses and clears the displayed error history.
+the aligned dataset window. Seeking pauses and preserves measured errors, replacing the value if a step is measured again.
 
 Frame images, input history, and metrics are committed together from one inference
 revision. The browser only controls and visualizes playback; Python owns all model
@@ -468,9 +502,9 @@ steps. A lost browser heartbeat pauses playback and clears held actions.
 ## Teacher-forced replay
 
 ```bash
-uv run python play.py runs/my-run/best.pt --teacher-forcing
-uv run python play.py runs/my-run/best.pt --teacher-forcing --episode-id 5
-uv run python play.py runs/my-run/best.pt --teacher-forcing --dataset /path/to/snapshot --split heldout
+uv run gymemu play runs/my-run/best.pt --teacher-forcing
+uv run gymemu play runs/my-run/best.pt --teacher-forcing --episode-id 5
+uv run gymemu play runs/my-run/best.pt --teacher-forcing --dataset /path/to/snapshot --split heldout
 ```
 
 Replay uses the checkpoint's dataset and saved revision, and defaults to its evaluation
@@ -526,7 +560,7 @@ For state-conditioned models, teacher forcing also removes accumulated state err
 For a bounded replay smoke, save the comparison after at most N transitions:
 
 ```bash
-uv run python play.py runs/my-run/best.pt --teacher-forcing --headless-steps 60 --output logs/replay.png
+uv run gymemu play runs/my-run/best.pt --teacher-forcing --headless-steps 60 --output logs/replay.png
 ```
 
 The image labels all three panels; stdout records the episode, frame position, action,
@@ -560,11 +594,11 @@ the learned emulator, not serialized simulator states.
 
 ```bash
 # Name an existing recorded scene without changing its frame or action values
-uv run python save_start_state.py runs/my-run/best.pt --name opening \
+uv run gymemu save-start-state runs/my-run/best.pt --name opening \
   --scene runs/my-run/start-scene.npz --description "Recorded opening scene"
 
 # Export another point in the checkpoint's recorded dataset
-uv run python save_start_state.py runs/my-run/best.pt --name my-debug-state \
+uv run gymemu save-start-state runs/my-run/best.pt --name my-debug-state \
   --episode-id 5 --frame-position 45 --split heldout \
   --frame-cache data/breakout-676ff638-lz4
 ```
