@@ -25,9 +25,7 @@ def ball_region_mask(target, *, sprite_height, sprite_width, padding):
     candidates = color.ne(0).any(dim=1)
 
     def same(dy, dx):
-        return (pixels[:, :, 1 + dy : 1 + dy + rows, 1 + dx : 1 + dx + cols] == color).all(
-            dim=1
-        )
+        return (pixels[:, :, 1 + dy : 1 + dy + rows, 1 + dx : 1 + dx + cols] == color).all(dim=1)
 
     for dy in range(sprite_height):
         for dx in range(sprite_width):

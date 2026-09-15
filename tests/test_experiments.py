@@ -66,6 +66,22 @@ def test_approach_train_checkpoint_and_generic_game_playback(snapshot, tmp_path,
     )
     player.advance(2)
     assert player.steps == 1 and player.pixels().shape == (21, 17, 3)
+    # Exercise dataset replay from both a direct and a multi-stage inference bundle.
+    from play import main as play_main
+
+    play_main(
+        [
+            str(output / "best.pt"),
+            "--teacher-forcing",
+            "--device",
+            "cpu",
+            "--headless-steps",
+            "2",
+            "--output",
+            str(output / "replay.png"),
+        ]
+    )
+    assert (output / "replay.png").is_file()
     assert (output / "resolved.yaml").is_file()
     records = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
     expected = ["prediction"] if kind == "direct" else ["representation", "dynamics"]

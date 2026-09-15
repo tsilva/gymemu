@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gymemu player</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/vendor/gridstack/gridstack.min.css">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script defer src="/assets/vendor/gridstack/gridstack-all.js"></script>
+  <script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="app-wordmark" href="#" aria-label="Gymemu player"><span class="brand-mark">g</span> GYMEMU</a>
+    <div class="session-heading"><span class="eyebrow">NEURAL EMULATOR / PLAYER</span><strong id="checkpoint">Connecting to checkpoint…</strong></div>
+    <select id="mode" class="mode-badge" aria-label="Playback mode"><option value="autoregressive">Autoregressive</option><option value="teacher-forcing">Teacher forcing</option></select><span id="connection" class="connection" role="status">Connecting</span>
+    <div class="workspace-actions"><button id="panels-toggle" class="quiet">Panels</button><button id="add-panel">Add widget</button><button id="reset-layout" class="quiet">Reset layout</button></div>
+  </header>
+  <aside id="panel-shelf" class="panel-shelf" hidden><span class="eyebrow">HIDDEN PANELS</span><div id="panel-shelf-items"></div></aside>
+  <main id="dashboard" class="dashboard grid-stack" aria-label="Playback workspace"></main>
+  <footer class="timeline">
+    <div class="timeline-info"><strong id="position">Waiting for playback</strong><span id="timeline-hint">Drag panel handles to rearrange. Resize from a corner.</span></div>
+    <div class="timeline-controls"><button id="previous-step" title="Previous recorded frame">←</button><button id="play-toggle" class="primary">Play</button><button id="step-forward">Step →</button><input id="timeline-scrubber" type="range" min="0" max="0" value="0" step="1" aria-label="Recorded frame position" disabled><button id="reset-playback" class="quiet">Reset</button><button id="next-episode" class="quiet">Next</button></div>
+  </footer>
+  <div id="panel-menu" class="floating-menu" hidden></div>
+  <dialog id="panel-editor"><form id="panel-editor-form">
+    <span class="eyebrow">WIDGET BUILDER</span><h2 id="editor-heading">Add widget</h2>
+    <label>Title<input id="editor-title" maxlength="80" required value="Telemetry"></label>
+    <label>Visualization<select id="editor-view"><option value="stats">Current metrics</option><option value="chart">RGB MSE chart and metrics</option></select></label>
+    <fieldset id="editor-metrics"><legend>Metrics</legend></fieldset>
+    <div class="dialog-actions"><button type="button" id="editor-cancel" class="quiet">Cancel</button><button class="primary" type="submit">Save widget</button></div>
+  </form></dialog>
+  <div id="toast" role="alert" hidden></div>
+</body>
+</html>

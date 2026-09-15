@@ -67,6 +67,8 @@ def test_run_recipe_replays_weights_and_tracks_source(snapshot, tmp_path, kind, 
     with tarfile.open(first / "source.tar.gz") as archive:
         assert "uv.lock" in archive.getnames() and "gymemu/engine.py" in archive.getnames()
         assert "containers/train/Dockerfile" in archive.getnames()
+        assert "gymemu/web_assets/index.html" in archive.getnames()
+        assert "gymemu/web_assets/vendor/gridstack/gridstack-all.js" in archive.getnames()
         for member in archive.getmembers():
             assert (
                 hashlib.sha256(archive.extractfile(member).read()).hexdigest()

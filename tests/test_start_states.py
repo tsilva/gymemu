@@ -202,10 +202,8 @@ def test_curated_ball_up_snapshot_has_upward_motion_and_complete_actions():
 
 
 def test_reset_cycles_complete_context_without_inference():
-    import pygame
-
+    from gymemu.player import handle_key
     from gymemu.scenes import SceneHistory
-    from play import handle_event
 
     config = {**contract(), "state_fields": ["x"]}
     starts = [
@@ -227,15 +225,14 @@ def test_reset_cycles_complete_context_without_inference():
     ]
     player = Player(None, config, torch.device("cpu"), start_states=starts)
     assert player.start_name == "first"
-    repeated = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_c, repeat=True)
-    handle_event(player, repeated, {})
+    handle_key(player, "c", {}, repeat=True)
     assert player.start_name == "first"
     for name, history in [*starts[1:], starts[0]]:
         player.history.clear()
         player.past_actions.clear()
         player.state_history.clear()
         player.steps = 10
-        handle_event(player, pygame.event.Event(pygame.KEYDOWN, key=pygame.K_c), {})
+        handle_key(player, "c", {})
         assert player.start_name == name and player.steps == 0
         if history is None:
             assert player.frame is None
@@ -246,7 +243,7 @@ def test_reset_cycles_complete_context_without_inference():
                 config["action_values"].index(a) for a in history.actions
             ]
             assert torch.equal(torch.stack(list(player.state_history)), history.states)
-            handle_event(player, pygame.event.Event(pygame.KEYDOWN, key=pygame.K_r), {})
+            handle_key(player, "r", {})
             assert player.start_name == name
             assert torch.equal(player.frame, history[-1])
             player.frame.zero_()

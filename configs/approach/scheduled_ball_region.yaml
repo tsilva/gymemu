@@ -1,0 +1,9 @@
+defaults:
+  - ball_region
+kind: scheduled_ball_region
+options:
+  rollout_steps: ${history}
+  schedule:
+    warmup_epochs: 0
+    ramp_epochs: 2
+    max_probability: 0.8

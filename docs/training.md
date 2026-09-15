@@ -413,6 +413,12 @@ at least the last `min(action_history - 1, frame_count - 1)` recorded actions. L
 frame-only scenes remain valid for models that use only the current action.
 Reset restores both frames and actions. Subsequent frames come entirely from the model,
 and each prediction uses the previous executed actions plus the current action.
+The Input history widget shows every RGB history frame, oldest to newest,
+left to right and then top to bottom. Black frames retain the model's zero padding.
+After inference it shows the exact stack used for the displayed prediction; before
+the first prediction and after reset it shows the stack ready for the next step.
+Closing or leaving the browser pauses playback. Ctrl+C in the terminal stops the server.
+
 The player starts in single-step mode. Tab toggles continuous playback, capped at
 30 predictions per second for the 60 Hz Atari simulation with frameskip 2. Held
 keys repeat on each tick; the most recently pressed held action key wins. With no
@@ -420,6 +426,101 @@ held keys, playback uses action 0, or the first checkpoint action if 0 is absent
 Slow inference lowers the effective rate without catch-up steps. R, C, or losing
 window focus pauses continuous playback and clears held keys. In empty-start mode,
 the first tick initializes the frame without executing a game action.
+
+## Browser player workspace
+
+`play.py` serves the player on loopback and opens its browser URL. No JavaScript
+installation, build, CDN, or Gradlab installation is needed. `--no-browser` prints
+the complete URL for opening manually or in Codex's in-app Browser. `--port auto`
+selects an unused port; `--port NUMBER` selects a specific port. Each server has one
+playback session and a random access token in its printed URL. Multiple tabs share
+that session. Close the browser or lose focus to pause; Ctrl+C stops the server.
+
+The UI reuses Gradlab's panel module lifecycle, registry, GridStack layout, fonts,
+and theme. Each widget can be dragged, resized, hidden, or disabled. Hidden widgets
+are restored from Panels. Disabled widgets remain in place but stop rendering.
+Prediction widgets can expand to fullscreen. Add widget creates a metric widget;
+its menu supports editing the title, selecting metrics, duplicating, and deleting
+custom instances. The built-in error chart keeps the last 300 measured transitions.
+
+Layout and widget configuration are stored in
+`~/.config/gymemu/player-workspace.json`, with browser storage as a secondary copy.
+Reset layout restores defaults. These preferences do not change inference inputs.
+Extension instructions live in `gymemu/web_assets/panels/README.md`.
+
+The mode selector switches between autoregressive play and teacher forcing using
+the same checkpoint. Each switch resets the selected mode and pauses. Dataset
+loading uses the same provenance and CLI overrides as startup. Switching to ordinary
+play requires a compatible starting scene unless launched with `--empty-start`;
+a missing scene remains an error. Episode and starting-scene selection are in
+Playback controls. The timeline slider seeks teacher-forced targets directly using
+the aligned dataset window. Seeking pauses and clears the displayed error history.
+
+Frame images, input history, and metrics are committed together from one inference
+revision. The browser only controls and visualizes playback; Python owns all model
+inference and input history. Slow inference lowers playback rate without catch-up
+steps. A lost browser heartbeat pauses playback and clears held actions.
+
+## Teacher-forced replay
+
+```bash
+uv run python play.py runs/my-run/best.pt --teacher-forcing
+uv run python play.py runs/my-run/best.pt --teacher-forcing --episode-id 5
+uv run python play.py runs/my-run/best.pt --teacher-forcing --dataset /path/to/snapshot --split heldout
+```
+
+Replay uses the checkpoint's dataset and saved revision, and defaults to its evaluation
+split, or `heldout` for checkpoints without split metadata. `--dataset`, `--revision`,
+and `--split` override those selections. Selecting another dataset does not inherit
+the original dataset's revision. Episode IDs are the recorded IDs in the selected
+split, not row offsets. C cycles through episodes in ID order and wraps around.
+An unknown episode, incompatible image geometry, missing required state labels, or
+action outside the checkpoint vocabulary produces an error.
+
+The dashboard opens paused with the real initial frame in Original. Prediction and
+Prediction − original show a pending message until the first prediction.
+Space predicts the next recorded transition, Tab toggles continuous
+play at 30 predictions per second, R restarts the current episode, and C selects
+the next episode. Reset, focus loss, and episode end pause replay. Keyboard presses
+never replace recorded actions. Start-scene options and action overrides cannot be
+combined with `--teacher-forcing`.
+
+Each prediction uses the same aligned dataset windows as training: recorded RGB
+frames ordered oldest to newest, left-zero-padding, and the executed action leading
+to the displayed target. Models with action history receive the recorded action
+sequence with START padding. Models with auxiliary state receive recorded state
+history, including the unavailable initial-state marker. Predictions never feed back
+into either RGB or state history. The Input history widget shows the exact
+recorded RGB stack used for the displayed prediction.
+
+The default layout shows the original on the left, prediction in the middle, and
+prediction minus original on the right. The timeline shows episode and target frame
+position. Metric widgets show executed action and float32 next-frame RGB MSE over
+pixels normalized to `[0, 1]`. Replay starts from a recorded initial frame;
+it does not score empty-history bootstrap predictions. Its displayed MSE is for the
+current transition, not the full held-out evaluation metric.
+
+The difference subtracts the original from the prediction in float32, before display
+quantization. Each signed RGB channel maps `[-1, 1]` to `[0, 255]`, with zero at gray
+128, positive differences brighter, and negative differences darker. The display
+uses a fixed scale across frames and preserves both signs. The browser difference
+widget can amplify contrast by 2×, 4×, or 8× without changing the MSE. Mixed channel differences
+appear colored. This visualization does not change the prediction or MSE.
+
+Errors visible here occur even with recorded history. If a failure disappears here
+but appears during autoregressive playback on comparable frames and actions,
+feedback error is a plausible contributor. This diagnostic alone does not establish
+that feedback is the only cause or that low pixel MSE implies playable rollouts.
+For state-conditioned models, teacher forcing also removes accumulated state errors.
+
+For a bounded replay smoke, save the comparison after at most N transitions:
+
+```bash
+uv run python play.py runs/my-run/best.pt --teacher-forcing --headless-steps 60 --output logs/replay.png
+```
+
+The image labels all three panels; stdout records the episode, frame position, action,
+and MSE. A shorter episode stops at its last frame without crossing into another.
 
 ## Named debug start states
 
@@ -433,7 +534,7 @@ Use `--state-dir /path/to/library` to select a different library.
 Press R to reset the current state, or C to reset to the next named snapshot.
 No flag is needed. The cycle begins with your selected start, then visits the
 other compatible states in alphabetical order and wraps around. `--state-dir`
-selects the library; the window title shows the current state. Each reset restores
+selects the library; the timeline shows the current state. Each reset restores
 RGB, action, and any auxiliary state histories without inference. Incompatible
 library snapshots are skipped with a message. With no other compatible states,
 C resets the current state too.
@@ -463,3 +564,22 @@ Dataset export defaults to the checkpoint's dataset/revision and held-out split;
 states in the default library are versioned and included in new run source archives.
 Use an ignored directory under `artifacts/` for disposable snapshots. Existing names
 are never overwritten. See [the library](../start_states/README.md) for included scenes.
+
+### Ball loss with prediction feedback
+
+`recipe=breakout_scheduled_ball_region` combines the existing scheduled history
+generation with `RGB MSE + 0.03 * ball-region MSE`. It trains from scratch for two
+epochs, replacing eligible history frames with detached predictions at probability
+0.4 in epoch 1 and 0.8 in epoch 2. The rollout prefix spans the configured history.
+The model, dataset, seed, and other trainer settings match `breakout_ball_region`.
+Masks and supervised targets always come from recorded frames. Validation uses
+recorded histories and reports the common RGB MSE separately from the joint loss.
+
+```bash
+uv run --frozen python train.py recipe=breakout_scheduled_ball_region
+```
+
+This uses `approach=scheduled_ball_region`, which reuses scheduled context generation
+and the ball objective. Generated context adds inference work to every training
+batch. Evaluate ball survival and duplicates during playback as well as held-out
+MSE; this objective does not enforce exactly one ball.

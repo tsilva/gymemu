@@ -166,3 +166,10 @@ Use held-out data for model selection and retain a separate test partition for f
 claims. Evaluation uses recorded histories; interactive playback feeds generated frames
 back into the model and can accumulate errors. Inspect rollouts before calling a model
 playable. See [history.md](history.md) for the limits of finite frame stacks.
+
+`scheduled_ball_region` combines `ScheduledSamplingApproach` and
+`BallRegionApproach`. Scheduled training calls `prediction_loss` after building
+context; the combined approach applies `joint_loss` there. Cooperative construction
+passes ball options to the ball approach. Validation inherits the ball approach's
+single recorded-history forward and joint loss. The runner and player need no
+approach-specific behavior.
