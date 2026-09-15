@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gymemu checkpoints</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/catalog.css">
+  <script type="module" src="/assets/catalog.js"></script>
+</head>
+<body class="catalog-window">
+  <header class="app-header">
+    <a class="app-wordmark" href="/" aria-label="Gymemu environments">GYMEMU</a>
+    <span class="header-divider" aria-hidden="true"></span>
+    <nav id="breadcrumbs" aria-label="Checkpoint navigation"></nav>
+  </header>
+  <main class="catalog-shell">
+    <div class="catalog-heading"><div><span class="eyebrow">CHECKPOINT LIBRARY</span><h1 id="catalog-title" tabindex="-1">Environments</h1><p id="catalog-description">Choose an environment to browse its training runs.</p></div><button id="refresh" class="quiet" type="button">Refresh</button></div>
+    <label class="catalog-search"><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-search"></use></svg><input id="search" type="search" aria-label="Filter items" placeholder="Filter environments…" autocomplete="off"><span id="item-count"></span></label>
+    <p id="catalog-status" role="status">Loading runs…</p>
+    <div id="catalog-error" role="alert" hidden></div>
+    <div class="catalog-table"><table><thead id="catalog-columns"></thead><tbody id="catalog-items"></tbody></table></div>
+    <p id="catalog-empty" hidden></p>
+    <details id="catalog-warnings" hidden><summary>Some runs could not be read</summary><ul></ul></details>
+    <p class="catalog-root" id="catalog-root"></p>
+  </main>
+</body>
+</html>

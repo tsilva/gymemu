@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import mimetypes
@@ -17,6 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
+import torch
 from PIL import Image
 
 from gymemu.player import PLAYBACK_FPS, handle_key
@@ -69,6 +71,112 @@ class PlaybackSession:
         self.closed = threading.Event()
         self.current = None
         self.worker = None
+        self.history_preview = None
+        self.history_revision = 0
+        self.history_source = None
+        self.history_edits = {}
+
+    def sync_history_source(self):
+        # Every prediction and reset replaces the input stack, even a seek to the same step.
+        if self.history_source is not self.player.input_stack:
+            self.history_source = self.player.input_stack
+            self.history_preview = None
+            self.history_edits = {}
+            self.history_revision += 1
+
+    def validate_history_revision(self, command):
+        self.sync_history_source()
+        if not self.player.has_prediction:
+            raise ValueError("Predict a frame before modifying its history")
+        if command.get("history_revision") != self.history_revision:
+            raise ValueError("The input history has changed; reopen the frame or drag again")
+
+    def reorder_history(self, command):
+        """Preview a permutation without writing into recorded or generated trajectory history."""
+        self.validate_history_revision(command)
+        order = command.get("order")
+        count = self.player.config["history"]
+        if (
+            not isinstance(order, list)
+            or len(order) != count
+            or any(type(index) is not int for index in order)
+            or sorted(order) != list(range(count))
+        ):
+            raise ValueError("History order must contain each frame exactly once")
+        self.predict_history(order, self.history_edits)
+
+    def edit_history(self, command):
+        """Apply palette-constrained pixel changes to one original frame identity."""
+        self.validate_history_revision(command)
+        frame = command.get("frame")
+        if type(frame) is not int or not 0 <= frame < self.player.config["history"]:
+            raise ValueError("Unknown history frame")
+        source = self.player.input_stack[frame]
+        _, height, width = source.shape
+        pixels = command.get("pixels")
+        if not isinstance(pixels, list) or not 0 < len(pixels) <= height * width:
+            raise ValueError("Supply at most one edit per frame pixel")
+        # Match the RGB bytes shown in the browser, but preserve all untouched float pixels.
+        palette = set(
+            map(tuple, source.mul(255).round().byte().permute(1, 2, 0).reshape(-1, 3).tolist())
+        )
+        seen = set()
+        for pixel in pixels:
+            if (
+                not isinstance(pixel, list)
+                or len(pixel) != 4
+                or any(type(value) is not int for value in pixel)
+                or not 0 <= pixel[0] < height * width
+                or pixel[0] in seen
+            ):
+                raise ValueError("Invalid or duplicate pixel position")
+            if tuple(pixel[1:]) not in palette:
+                raise ValueError("Paint colors must belong to the frame's original palette")
+            seen.add(pixel[0])
+        edits = dict(self.history_edits)
+        edited = edits.get(frame, source).clone()
+        changes = torch.tensor(pixels)
+        positions = changes[:, 0]
+        edited[:, positions // width, positions % width] = changes[:, 1:].T.to(edited.dtype) / 255
+        edits[frame] = edited
+        order = (
+            self.history_preview[1]
+            if self.history_preview
+            else list(range(len(self.history_source)))
+        )
+        self.predict_history(order, edits)
+
+    def revert_history(self, command):
+        """Restore one painted frame while retaining the other edits and frame order."""
+        self.validate_history_revision(command)
+        frame = command.get("frame")
+        if type(frame) is not int or frame not in self.history_edits:
+            raise ValueError("This history frame has no edits to revert")
+        edits = dict(self.history_edits)
+        del edits[frame]
+        self.predict_history(self.history_preview[1], edits)
+
+    @torch.inference_mode()
+    def predict_history(self, order, edits):
+        self.pause()
+        player = copy.copy(self.player)
+        stack = torch.stack([edits.get(index, player.input_stack[index]) for index in order])
+        started = time.perf_counter()
+        inputs = stack.unsqueeze(0).to(player.device)
+        if player.input_states is None:
+            prediction = player.model(inputs, player.input_tokens)
+        else:
+            prediction, _ = player.model.predict_step(
+                inputs, player.input_tokens, player.input_states
+            )
+        player.frame = prediction[0].float().cpu()
+        elapsed = (time.perf_counter() - started) * 1000
+        player.input_stack = stack
+        if self.replay:
+            player.mse = (player.frame - player.target.float()).square().mean().item()
+        self.history_preview = (player, order, elapsed)
+        self.history_edits = edits
+        self.history_revision += 1
 
     def pause(self):
         self.player.continuous = False
@@ -153,6 +261,12 @@ class PlaybackSession:
             self.player.reset()
             self.clear_history()
             self.inference_ms = None
+        elif kind == "reorder_history":
+            self.reorder_history(command)
+        elif kind == "edit_history":
+            self.edit_history(command)
+        elif kind == "revert_history":
+            self.revert_history(command)
         elif kind == "seek":
             if not self.replay:
                 raise ValueError("Seeking requires teacher-forced dataset replay")
@@ -207,7 +321,8 @@ class PlaybackSession:
         return True
 
     def snapshot(self):
-        player = self.player
+        self.sync_history_source()
+        player = self.history_preview[0] if self.history_preview else self.player
         pixels = player.pixels()
         images = {}
         if self.replay:
@@ -237,7 +352,7 @@ class PlaybackSession:
             "available_modes": ["autoregressive", "teacher-forcing"] if self.mode_factory else [],
             "checkpoint": self.checkpoint,
             "name": player.start_name or "Empty start",
-            "playing": player.continuous,
+            "playing": self.player.continuous,
             "step": player.steps,
             "total_steps": len(player.episode.actions) if self.replay else None,
             "selection": player.episode.episode_id if self.replay else player.start_index,
@@ -248,10 +363,22 @@ class PlaybackSession:
             "action_values": player.actions,
             "keymap": self.keymap,
             "mse": player.mse if self.replay else None,
-            "inference_ms": self.inference_ms,
+            "inference_ms": self.history_preview[2] if self.history_preview else self.inference_ms,
             "history": [self.history[step] for step in sorted(self.history)],
             "history_epoch": self.history_epoch,
             "history_length": player.config["history"],
+            "history_order": (
+                self.history_preview[1]
+                if self.history_preview
+                else list(range(player.config["history"]))
+            ),
+            "history_revision": self.history_revision,
+            "history_editable": True,
+            "history_edited_frames": sorted(self.history_edits),
+            "history_reordered": bool(
+                self.history_preview
+                and self.history_preview[1] != list(range(player.config["history"]))
+            ),
             "shape": player.config["shape"],
             "scale": self.scale,
             "action_history": player.config.get("action_history", 1),
@@ -333,7 +460,73 @@ class PlaybackSession:
             self.changed.notify_all()
 
 
-def make_server(session, port=0, *, workspace_path=None):
+class CatalogSession:
+    """Own one active player; serialize checkpoint replacement with player requests."""
+
+    def __init__(self, catalog, factory):
+        self.catalog, self.factory = catalog, factory
+        self.session = None
+        self.lock = threading.RLock()
+        self.generation = 0
+        self.label = None
+
+    def open(self, identifier):
+        with self.lock:
+            checkpoint = self.catalog.resolve(identifier)
+            if self.session:
+                self.session.submit({"type": "pause"})
+            label = self.catalog.label(identifier)
+            candidate = self.factory(checkpoint)
+            candidate.revision = self.session.revision if self.session else 0
+            candidate.start()
+            if self.session:
+                self.session.close()
+            self.generation += 1
+            self.session = candidate
+            self.label = label
+
+    def submit(self, command):
+        with self.lock:
+            if self.session is None:
+                raise ValueError("Choose a checkpoint first")
+            self.session.submit(command)
+
+    def read(self, after=-1):
+        with self.lock:
+            if self.session is None:
+                return {"catalog": True, "revision": 0}
+            return {
+                **self.session.read(after),
+                "catalog": True,
+                "generation": self.generation,
+                "checkpoint_label": self.label,
+            }
+
+    def close(self):
+        with self.lock:
+            if self.session:
+                self.session.close()
+
+
+def serve_catalog(catalog, factory, *, port=0, open_browser=True):
+    session = CatalogSession(catalog, factory)
+    server = None
+    try:
+        server, url = make_server(session, port, catalog=catalog)
+        print(f"Gymemu navigator: {url}", flush=True)
+        print(f"Local runs: {catalog.root}", flush=True)
+        if open_browser:
+            webbrowser.open(url, new=2)
+        server.serve_forever(poll_interval=0.2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if server:
+            server.server_close()
+        session.close()
+
+
+def make_server(session, port=0, *, workspace_path=None, catalog=None):
     token = secrets.token_urlsafe(32)
     workspace_path = workspace_path or Path.home() / ".config/gymemu/player-workspace.json"
     workspace_lock = threading.Lock()
@@ -371,6 +564,16 @@ def make_server(session, port=0, *, workspace_path=None):
 
         def do_GET(self):
             url = urlsplit(self.path)
+            if url.path == "/api/catalog" and catalog is not None:
+                if not self.authorized():
+                    return self.respond(403, b'{"error":"Unauthorized player request"}')
+                with session.lock:
+                    query = parse_qs(url.query)
+                    result = catalog.snapshot(
+                        run_id=query.get("run", [None])[0],
+                        refresh=query.get("refresh", [""])[0] == "1",
+                    )
+                return self.respond(200, json.dumps(result, allow_nan=False).encode())
             if url.path == "/api/workspace":
                 if not self.authorized():
                     return self.respond(403, b'{"error":"Unauthorized player request"}')
@@ -388,8 +591,10 @@ def make_server(session, port=0, *, workspace_path=None):
                 except ValueError:
                     return self.respond(400, b'{"error":"Invalid revision"}')
                 return self.respond(200, json.dumps(session.read(after), allow_nan=False).encode())
-            dashboard = url.path in ("/", "/workspace/stats")
-            path = ASSETS / ("index.html" if dashboard else url.path.removeprefix("/assets/"))
+            navigator = catalog is not None and url.path in ("/", "/browse")
+            dashboard = url.path in ("/", "/player", "/workspace/stats", "/browse")
+            page = "catalog.html" if navigator else "index.html"
+            path = ASSETS / (page if dashboard else url.path.removeprefix("/assets/"))
             if not dashboard and not url.path.startswith("/assets/"):
                 return self.respond(404, b"Not found", "text/plain")
             if not path.resolve().is_relative_to(ASSETS.resolve()) or not path.is_file():
@@ -399,18 +604,38 @@ def make_server(session, port=0, *, workspace_path=None):
             )
 
         def do_POST(self):
-            if self.path not in ("/api/command", "/api/workspace"):
+            if self.path not in ("/api/command", "/api/workspace", "/api/open"):
                 return self.respond(404, b'{"error":"Not found"}')
             if not self.authorized():
                 return self.respond(403, b'{"error":"Unauthorized player request"}')
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= (65536 if self.path == "/api/workspace" else 4096):
+                limit = (
+                    65536
+                    if self.path == "/api/workspace"
+                    else 16 * 1024 * 1024
+                    if self.path == "/api/command"
+                    else 4096
+                )
+                if not 0 < length <= limit:
                     raise ValueError("Invalid command size")
                 command = json.loads(self.rfile.read(length))
                 if not isinstance(command, dict):
                     raise ValueError("Expected a playback command")
-                if self.path == "/api/workspace":
+                if (
+                    self.path == "/api/command"
+                    and command.get("type") != "edit_history"
+                    and length > 4096
+                ):
+                    raise ValueError("Invalid command size")
+                if self.path == "/api/open":
+                    if catalog is None:
+                        raise ValueError("The checkpoint navigator is unavailable")
+                    try:
+                        session.open(command.get("checkpoint"))
+                    except Exception as error:
+                        return self.respond(400, json.dumps({"error": str(error)}).encode())
+                elif self.path == "/api/workspace":
                     if command.get("version") not in (1, 2, 3) or not isinstance(
                         command.get("panels"), dict
                     ):

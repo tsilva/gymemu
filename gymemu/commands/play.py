@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from copy import copy
 from pathlib import Path
 
 from PIL import Image
 
+from gymemu.catalog import run_directory
 from gymemu.checkpoints import load_model
 from gymemu.player import Player, default_bindings
 from gymemu.replay import COMPARISON_LABELS, load_replay
@@ -64,9 +66,80 @@ def recorded_player(args, model, config, device, scene_path):
     return player
 
 
+def load_playback(args):
+    """Construct the same paused player for CLI and catalog selections."""
+    scene_path = (
+        None
+        if args.empty_start or args.teacher_forcing
+        else (args.start_scene or run_directory(args.checkpoint) / "start-scene.npz")
+    )
+    if (
+        not args.start_state
+        and not args.list_start_states
+        and scene_path is not None
+        and not scene_path.is_file()
+    ):
+        raise ValueError(
+            f"Recorded starting scene not found: {scene_path}. Place start-scene.npz beside "
+            "the checkpoint, use --start-scene PATH, or use --empty-start to test initialization."
+        )
+    device = device_for(args.device)
+    model, config = load_model(args.checkpoint, device)
+    if args.teacher_forcing:
+        player = load_replay(
+            model,
+            config,
+            device,
+            dataset=args.dataset,
+            revision=args.revision,
+            split=args.split,
+            episode_id=args.episode_id,
+        )
+    else:
+        player = recorded_player(args, model, config, device, scene_path)
+    bindings = (
+        []
+        if args.headless_steps is not None or args.headless_actions is not None
+        else args.key_action or default_bindings(config)
+    )
+    keymap = {}
+    for binding in bindings:
+        key, value = binding.rsplit("=", 1)
+        key = key.lower()
+        if key in ("r", "c", "tab", "escape"):
+            raise ValueError("R, C, Tab, and Escape are reserved player controls")
+        if int(value) not in config["action_values"]:
+            raise ValueError(f"Action {value} absent from this checkpoint")
+        keymap[key] = int(value)
+
+    def mode_factory(mode):
+        if mode == "teacher-forcing":
+            return load_replay(
+                model,
+                config,
+                device,
+                dataset=args.dataset,
+                revision=args.revision,
+                split=args.split,
+                episode_id=args.episode_id,
+            )
+        path = (
+            None
+            if args.empty_start
+            else (args.start_scene or run_directory(args.checkpoint) / "start-scene.npz")
+        )
+        return recorded_player(args, model, config, device, path)
+
+    return player, keymap, mode_factory
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("checkpoint", type=Path)
+    parser.add_argument("checkpoint", type=Path, nargs="?", help="Omit to browse training runs")
+    parser.add_argument("--runs-dir", type=Path, default=Path("runs"), help="Local catalog root")
+    parser.add_argument("--local-only", action="store_true", help="Browse without contacting R2")
+    parser.add_argument("--r2-bucket", default="gymemu", help="R2 checkpoint bucket")
+    parser.add_argument("--r2-prefix", default="runs", help="R2 run prefix")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     parser.add_argument(
         "--scale",
@@ -80,7 +153,14 @@ def main(argv=None):
     startup.add_argument(
         "--teacher-forcing",
         action="store_true",
-        help="Replay dataset episodes with recorded inputs and side-by-side targets",
+        default=None,
+        help="Replay dataset episodes with recorded inputs and side-by-side targets (default)",
+    )
+    startup.add_argument(
+        "--autoregressive",
+        dest="teacher_forcing",
+        action="store_false",
+        help="Start interactive play from the checkpoint's recorded scene",
     )
     startup.add_argument(
         "--start-state", help="Named snapshot for this game; use --list-start-states"
@@ -119,6 +199,15 @@ def main(argv=None):
     parser.add_argument("--headless-actions", help="Comma-separated action values for a smoke")
     parser.add_argument("--output", type=Path, default=Path("logs/play.png"))
     args = parser.parse_args(argv)
+    if args.teacher_forcing is None:
+        args.teacher_forcing = not (
+            args.start_state is not None
+            or args.start_scene is not None
+            or args.empty_start
+            or args.headless_actions is not None
+            or args.key_action
+            or args.list_start_states
+        )
     if not args.teacher_forcing and any(
         value is not None
         for value in (args.dataset, args.revision, args.split, args.episode_id, args.headless_steps)
@@ -131,45 +220,52 @@ def main(argv=None):
             "Teacher forcing uses recorded actions; scene listing and action overrides "
             "are unavailable. Use --headless-steps for a replay smoke."
         )
-    scene_path = (
-        None
-        if args.empty_start or args.teacher_forcing
-        else (args.start_scene or args.checkpoint.parent / "start-scene.npz")
-    )
-    if (
-        not args.start_state
-        and not args.list_start_states
-        and scene_path is not None
-        and not scene_path.is_file()
-    ):
-        parser.error(
-            f"Recorded starting scene not found: {scene_path}. Place start-scene.npz beside "
-            "the checkpoint, use --start-scene PATH, or use --empty-start to test initialization."
+    try:
+        port = 0 if args.port == "auto" else int(args.port)
+        if not 0 <= port <= 65535:
+            raise ValueError("Port must be between 0 and 65535, or auto")
+    except ValueError as error:
+        parser.error(str(error))
+    if args.checkpoint is None:
+        if (
+            args.headless_steps is not None
+            or args.headless_actions is not None
+            or args.list_start_states
+        ):
+            parser.error("Headless playback and scene listing require a checkpoint")
+        from gymemu.catalog import CheckpointCatalog
+        from gymemu.remote_catalog import RemoteCatalog
+        from gymemu.web_player import PlaybackSession, serve_catalog
+
+        def session_factory(checkpoint):
+            selected = copy(args)
+            selected.checkpoint = checkpoint
+            player, keymap, mode_factory = load_playback(selected)
+            return PlaybackSession(
+                player, checkpoint, keymap, scale=args.scale, mode_factory=mode_factory
+            )
+
+        serve_catalog(
+            CheckpointCatalog(
+                args.runs_dir,
+                remote=None
+                if args.local_only
+                else RemoteCatalog(bucket=args.r2_bucket, prefix=args.r2_prefix),
+            ),
+            session_factory,
+            port=port,
+            open_browser=not args.no_browser,
         )
-    device = device_for(args.device)
-    model, config = load_model(args.checkpoint, device)
+        return
     if args.list_start_states:
+        _, config = load_model(args.checkpoint, device_for(args.device))
         for state in list_start_states(config, args.state_dir):
             print(f"{state['name']}: {state.get('description', '')}")
         return
-    if args.teacher_forcing:
-        try:
-            player = load_replay(
-                model,
-                config,
-                device,
-                dataset=args.dataset,
-                revision=args.revision,
-                split=args.split,
-                episode_id=args.episode_id,
-            )
-        except (ValueError, OSError) as error:
-            parser.error(str(error))
-    else:
-        try:
-            player = recorded_player(args, model, config, device, scene_path)
-        except (ValueError, OSError) as error:
-            parser.error(str(error))
+    try:
+        player, keymap, mode_factory = load_playback(args)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
     if args.headless_steps is not None:
         for _ in range(args.headless_steps):
             player.advance()
@@ -203,41 +299,6 @@ def main(argv=None):
         return
 
     from gymemu.web_player import serve
-
-    bindings = args.key_action or default_bindings(config)
-    keymap = {}
-    for binding in bindings:
-        key, value = binding.rsplit("=", 1)
-        key = key.lower()
-        if key in ("r", "c", "tab", "escape"):
-            parser.error("R, C, Tab, and Escape are reserved player controls")
-        if int(value) not in config["action_values"]:
-            parser.error(f"Action {value} absent from this checkpoint")
-        keymap[key] = int(value)
-    try:
-        port = 0 if args.port == "auto" else int(args.port)
-        if not 0 <= port <= 65535:
-            raise ValueError("Port must be between 0 and 65535, or auto")
-    except ValueError as error:
-        parser.error(str(error))
-
-    def mode_factory(mode):
-        if mode == "teacher-forcing":
-            return load_replay(
-                model,
-                config,
-                device,
-                dataset=args.dataset,
-                revision=args.revision,
-                split=args.split,
-                episode_id=args.episode_id,
-            )
-        path = (
-            None
-            if args.empty_start
-            else (args.start_scene or args.checkpoint.parent / "start-scene.npz")
-        )
-        return recorded_player(args, model, config, device, path)
 
     serve(
         player,

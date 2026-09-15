@@ -56,9 +56,22 @@ uv run gymemu train output=runs/breakout-direct
 # Frame autoencoder, then a separate latent prediction model
 uv run gymemu train approach=latent output=runs/breakout-latent
 
+# Browse environment IDs, training runs, then checkpoints
+uv run gymemu play
+
 # Play either approach using its checkpoint
 uv run gymemu play runs/breakout-direct/best.pt
 ```
+
+Omitting the checkpoint opens a navigator for local runs under `runs/` and published
+R2 runs. Select an
+environment ID, a training run, and a checkpoint to open the paused player. Use
+`--runs-dir /path/to/runs` to browse another directory. The navigator supports
+filtering, breadcrumbs, browser Back, and Refresh for newly saved checkpoints.
+R2 checkpoints download with their saved starting scene when selected; retained
+versions appear in the checkpoint list. Use `--local-only` to browse offline.
+The player's **Checkpoints** link returns to the selected run. Runs without saved
+environment IDs appear under **Unknown environment**.
 
 Use a new output directory for each run. Omit `output` for a timestamped directory
 under `runs/`. Training downloads the pinned
@@ -87,7 +100,13 @@ immutable objects and manifests retain successfully uploaded checkpoint versions
 Use `r2.enabled=false` to keep artifacts local. Retry interrupted uploads with
 `uv run gymemu upload-checkpoints runs/my-run`.
 
-The player opens a local browser dashboard with that scene in step mode. Every fresh action key press
+The player opens paused in **teacher forcing** mode, using recorded dataset history
+and actions. This is also the default when selecting a checkpoint in the navigator.
+Use the mode selector or `--autoregressive` to play with predicted frames feeding
+back into history. `--start-state`, `--start-scene`, `--empty-start`, `--key-action`,
+and `--headless-actions` also select autoregressive mode.
+
+Autoregressive play starts with the recorded scene in step mode. Every fresh action key press
 predicts one next frame. Press Tab to toggle continuous play at 30 predictions per
 second, matching 60 Hz Atari with frameskip 2. Hold an action key to repeat it;
 releasing all keys uses action 0, or the first checkpoint action if 0 is absent.
@@ -97,16 +116,30 @@ or numbered keys for their action vocabulary. The player prints its bindings.
 
 The Input history widget shows every RGB history frame, oldest to newest,
 left to right and then top to bottom, with frame numbers overlaid at each tile's
-top-left corner. The compact grid has no bottom caption. Black frames retain the model's zero padding.
+top-left corner. Black frames retain the model's zero padding.
 After inference it shows the exact stack used for the displayed prediction; before
 the first prediction and after reset it shows the stack ready for the next step.
+While paused after a prediction, drag a history tile onto another to move it there
+and rerun inference for the same target. Alt + arrow keys also move a focused tile.
+The temporary shuffle changes only RGB order; actions and auxiliary state stay fixed.
+Scrubbing or stepping restores the original history. The shuffled prediction and
+current MSE update together without changing the saved MSE chart or rollout history.
+Each history tile also has a pencil button that opens a zoomed pixel editor.
+The pencil pauses running playback. Before the first prediction it opens for
+inspection and explains that you must step once before applying edits.
+Choose a color already present in that frame and a square brush size from 1 to 32
+image pixels, paint, then select **Apply and
+predict**. Zoom, Alt-click color picking, undo, and reset are available. Painted
+frames retain their edits when reordered; scrubbing or stepping clears all edits.
+An edited tile shows a revert button in its bottom-right corner. Revert restores
+that frame and reruns inference while keeping the other edits and current order.
 Closing or leaving the browser pauses playback. Ctrl+C in the terminal stops the server.
 
 The player opens two synchronized browser tabs using Gradlab's paired workspace
-approach. The first contains Original, Prediction, Prediction − original, and the
-playbar. The Diagnostics tab contains Input history, Prediction error, Model context,
+approach. The first contains Original, Prediction, Diff, and the
+playbar. The Diagnostics tab contains Input history, Prediction error,
 and custom metric widgets. Its default layout places Input history across the top,
-with Prediction error below on the left and Model context on the right.
+with a full-width Prediction error chart below.
 Both display snapshots from one inference session.
 The header's Diagnostics/Player link reopens or focuses the companion tab.
 
@@ -136,7 +169,7 @@ and value, click to select that step in the player, drag to zoom, or double-clic
 reset zoom. The playbar shows the shared zoom range with adjustable handles. While zoomed,
 Diagnostics also shows the segment selector beneath the charts. Drag either bracket
 or use its arrow keys to resize the range without moving the playback cursor.
-Highest MSE jumps to the largest measured error. Seeking preserves measurements;
+Seeking preserves measurements;
 resetting, changing episode, or switching mode clears them. Unvisited steps are
 unscored and gaps are left visible.
 Original and Prediction have blank footers; the difference footer keeps its gain
@@ -152,7 +185,7 @@ episodes with teacher forcing:
 uv run gymemu play runs/breakout-direct/best.pt --teacher-forcing
 ```
 
-The dashboard starts with Original, Prediction, and Prediction − original widgets
+The dashboard starts with Original, Prediction, and Diff widgets
 from left to right. The signed RGB difference uses gray for zero,
 brighter channels for positive differences, and darker channels for negative ones.
 Every step uses recorded RGB history, executed actions, and any required auxiliary
@@ -358,3 +391,15 @@ Game thumbnails illustrate the flow; they are not measured outputs.
 `recipe=breakout_scheduled_ball_region` combines generated history with the 0.03
 ball loss for two epochs, using feedback probabilities 0.4 and 0.8. See the
 [recipe details](docs/recipes.md#ball-loss-with-prediction-feedback).
+
+### Train through predicted sequences
+
+```bash
+uv run python train.py recipe=breakout_autoregressive_ball_region r2.enabled=false
+```
+
+This experimental recipe trains on 1, 2, 4, then 8 autoregressive steps, with RGB
+and auxiliary ball-region loss at every valid step. Gradients flow through predicted
+frames. Episode endings mask unavailable targets; the direct baseline and held-out
+one-step RGB metric are unchanged. See [the training guide](docs/training.md#differentiable-autoregressive-training)
+for configuration and memory costs.

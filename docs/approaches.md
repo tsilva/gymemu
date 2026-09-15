@@ -173,3 +173,14 @@ context; the combined approach applies `joint_loss` there. Cooperative construct
 passes ball options to the ball approach. Validation inherits the ball approach's
 single recorded-history forward and joint loss. The runner and player need no
 approach-specific behavior.
+
+### Future-target sequences
+
+An approach can declare `training_future_steps > 0` to request a clean history plus
+right-padded future targets from `Windows`. Actions have shape `[B, K, A]`, targets
+`[B, K, C, H, W]`; a negative final action token marks an invalid future position.
+This contract is mutually exclusive with extended-prefix scheduled sampling and
+auxiliary state inputs. Evaluation continues to supply ordinary one-step examples.
+The approach owns curriculum, unrolling, gradient flow, and valid-step reduction.
+`autoregressive_ball_region` implements this contract using the existing action-history
+model and ball-region objective. No approach-specific behavior belongs in the player.

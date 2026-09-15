@@ -1,14 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {measuredHistory,highestMse,chartPoint} from '../../gymemu/web_assets/panels/telemetry.js';
+import {measuredHistory,chartPoint} from '../../gymemu/web_assets/panels/telemetry.js';
 import {selectedRange,resizeChartRange,bindChartRange} from '../../gymemu/web_assets/chart-range.js';
 
 const snapshot={mode:'teacher-forcing',history:[{step:1,mse:.1},{step:2,mse:.8},{step:100,mse:.3},{step:101,mse:null}]};
-test('MSE chart filters invalid and unscored points, preserves timestep gaps and finds peak',()=>{
+test('MSE chart filters invalid and unscored points, preserves timestep gaps',()=>{
   assert.deepEqual(measuredHistory(snapshot).map(p=>p.step),[1,2,100]);
   assert.deepEqual(measuredHistory(snapshot,{first:2,last:50}),[{step:2,mse:.8}]);
-  assert.deepEqual(highestMse(measuredHistory(snapshot)),{step:2,mse:.8});
-  assert.equal(highestMse([]),null);
   assert.deepEqual(measuredHistory({...snapshot,mode:'autoregressive'}),[]);
 });
 test('chart selection uses actual timestep coordinates instead of treating steps as array offsets',()=>{

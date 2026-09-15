@@ -18,7 +18,7 @@ history atlas is oldest to newest, laid out horizontally at native frame dimensi
 Never compute model inputs from resized or displayed canvas pixels.
 
 The default workspace assigns original, prediction, and signed difference to `main`,
-with input history, prediction-error chart, model context, and custom telemetry in
+with input history, prediction-error chart, and custom telemetry in
 `stats`. Playback controls live in the main tab's gear dialog. Original and difference
 are unavailable during autoregressive playback. The signed difference's optional
 1×/2×/4×/8× gain changes display contrast only; it does not change raw RGB MSE.
@@ -39,6 +39,9 @@ The widget builder supports current metric cards and an RGB MSE chart with selec
 metric cards. Add a metric descriptor in `telemetry.js` and its allowed key in
 `workspace.js`. The chart always plots RGB MSE; unrelated units are not combined.
 The chart retains all measured episode transitions across seeks, deduplicated by step.
+The history pencil can also pause playback before opening its pixel editor. It
+opens for inspection before the first prediction, with Apply disabled and an
+explanation. Frame reordering availability must not disable descendant edit buttons.
 Reset, episode changes, and mode changes clear the series and increment history_epoch.
 Unvisited steps stay unscored. services.inspectStep selects a measured target;
 services.setChartRange synchronizes zoom through BroadcastChannel and storage events.

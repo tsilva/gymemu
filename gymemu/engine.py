@@ -307,6 +307,7 @@ def train(cfg):
         config["history"],
         actions,
         rollout_steps=model.training_rollout_steps,
+        future_steps=model.training_future_steps,
         **input_options,
     )
     evaluation = Windows(frames, eval_episodes, config["history"], actions, **input_options)

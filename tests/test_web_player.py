@@ -12,7 +12,7 @@ import torch
 from PIL import Image
 
 from gymemu.player import Player, handle_key
-from gymemu.replay import load_replay
+from gymemu.replay import ReplayPlayer, load_replay
 from gymemu.web_player import PlaybackSession, dashboard_urls, make_server
 
 
@@ -263,7 +263,7 @@ def test_worker_pacing_and_disconnect_pause(running_server):
     assert len(s.player.model.calls) == calls
 
 
-@pytest.mark.parametrize("startup", ["default", "explicit", "empty"])
+@pytest.mark.parametrize("startup", ["autoregressive", "explicit", "empty"])
 def test_cli_opens_web_without_inference(monkeypatch, tmp_path, startup):
     import gymemu.web_player as web
     import play
@@ -276,16 +276,44 @@ def test_cli_opens_web_without_inference(monkeypatch, tmp_path, startup):
     if startup == "empty":
         argv.append("--empty-start")
     else:
-        path = tmp_path / ("start-scene.npz" if startup == "default" else "alternate.npz")
+        path = tmp_path / ("start-scene.npz" if startup == "autoregressive" else "alternate.npz")
         np.savez_compressed(path, frames=np.full((2, 3, 21, 17), 50, np.uint8))
         if startup == "explicit":
             argv.extend(["--start-scene", str(path)])
+        else:
+            argv.append("--autoregressive")
     play.main(argv)
     player, options = seen[0]
     assert not spy.calls and not player.continuous
     assert options["port"] == 0 and not options["open_browser"]
     if startup != "empty":
         assert player.frame.eq(50 / 255).all()
+
+
+@pytest.mark.parametrize("catalog", [False, True])
+@pytest.mark.parametrize("flags", [[], ["--teacher-forcing"], ["--episode-id", "2"]])
+def test_cli_defaults_to_paused_teacher_forcing(monkeypatch, tmp_path, snapshot, catalog, flags):
+    from gymemu.commands import play
+
+    spy = Spy()
+    cfg = {**config(), "dataset": {"dataset": str(snapshot)}}
+    monkeypatch.setattr(play, "load_model", lambda *_: (spy, cfg))
+    checkpoint = tmp_path / "model.pt"  # No start-scene needed for replay.
+    seen = []
+    monkeypatch.setattr("gymemu.web_player.serve", lambda player, **_: seen.append(player))
+
+    def serve_catalog(catalog, factory, **options):
+        seen.append(factory(checkpoint).player)
+
+    monkeypatch.setattr("gymemu.web_player.serve_catalog", serve_catalog)
+    argv = [] if catalog else [str(checkpoint)]
+    play.main([*argv, "--local-only", "--device", "cpu", "--no-browser", *flags])
+    player = seen[0]
+    assert isinstance(player, ReplayPlayer)
+    assert player.episode.episode_id == 2
+    assert not player.continuous and not spy.calls
+    player.advance()
+    assert len(spy.calls) == 1 and player.steps == 1
 
 
 def test_modes_reset_context_and_reuse_loaded_datasets(snapshot):
@@ -330,3 +358,113 @@ def test_slow_mode_loading_keeps_transport_and_lease_responsive(running_server, 
     with s.changed:
         assert s.changed.wait_for(lambda: s.current["mode"] == "teacher-forcing", timeout=3)
     assert s.current["loading"] is None and not s.current["playing"]
+
+
+class OrderSensitiveSpy(Spy):
+    def forward(self, history, action):
+        self.calls.append((history.clone(), action.clone()))
+        return history[:, -1] * 0.8 + history[:, 0] * 0.2
+
+    def predict_step(self, history, action, states):
+        result = self(history, action)
+        self.calls[-1] += (states.clone(),)
+        return result, states[:, -1]
+
+
+def reorder(s, order):
+    s.control(
+        {
+            "type": "reorder_history",
+            "order": order,
+            "history_revision": s.snapshot()["history_revision"],
+        }
+    )
+    return s.snapshot()
+
+
+@pytest.mark.parametrize("with_states", [False, True])
+def test_history_shuffle_is_temporary_and_preserves_other_inputs(snapshot, with_states):
+    from gymemu.data import Frames, read_episodes
+    from gymemu.replay import ReplayPlayer
+
+    cfg = {**config(), "action_history": 4}
+    episodes = read_episodes(snapshot, "train")
+    if with_states:
+        cfg["state_fields"] = ["ball_x", "ball_y"]
+        for episode in episodes:
+            episode.states = np.array(
+                [[0, 0, 0]] + [[0.2, 0.3, 1]] * len(episode.actions), dtype=np.float32
+            )
+    spy = OrderSensitiveSpy()
+    player = ReplayPlayer(spy, cfg, torch.device("cpu"), Frames(snapshot), episodes)
+    s = PlaybackSession(player, "model.pt", {})
+    with pytest.raises(ValueError, match="Predict a frame"):
+        reorder(s, [3, 0, 1, 2])
+    s.control({"type": "seek", "position": 2})
+    baseline = s.snapshot()
+    baseline_inputs = spy.calls[-1]
+    baseline_frame = player.frame.clone()
+    shuffled = reorder(s, [3, 0, 1, 2])
+    assert shuffled["step"] == baseline["step"] == 2
+    assert len(spy.calls) == 2
+    assert torch.equal(spy.calls[-1][0], baseline_inputs[0][:, [3, 0, 1, 2]])
+    for actual, expected in zip(spy.calls[-1][1:], baseline_inputs[1:]):
+        assert torch.equal(actual, expected)
+    assert shuffled["images"]["prediction"] != baseline["images"]["prediction"]
+    assert shuffled["images"]["original"] == baseline["images"]["original"]
+    assert shuffled["mse"] != baseline["mse"]
+    assert shuffled["history"] == baseline["history"]
+    assert torch.equal(player.frame, baseline_frame)
+    assert shuffled["history_reordered"] and not shuffled["playing"]
+    # Subsequent orders refer to original frame identities, not the previous permutation.
+    reorder(s, [2, 3, 0, 1])
+    assert torch.equal(spy.calls[-1][0], baseline_inputs[0][:, [2, 3, 0, 1]])
+    s.control({"type": "seek", "position": 1})
+    assert not s.snapshot()["history_reordered"]
+    s.control({"type": "seek", "position": 2})
+    restored = s.snapshot()
+    assert restored["images"] == baseline["images"]
+    assert restored["mse"] == baseline["mse"]
+    assert restored["history_order"] == [0, 1, 2, 3]
+    with pytest.raises(ValueError, match="history has changed"):
+        s.control(
+            {
+                "type": "reorder_history",
+                "order": [3, 0, 1, 2],
+                "history_revision": shuffled["history_revision"],
+            }
+        )
+    for invalid in ([0, 0, 1, 2], [0, 1, 2], [0, 1, 2, True], [0, 1, 2, 4], "0123"):
+        with pytest.raises(ValueError, match="each frame exactly once"):
+            reorder(s, invalid)
+
+
+@pytest.mark.parametrize("with_states", [False, True])
+def test_autoregressive_shuffle_does_not_change_rollout(with_states):
+    from gymemu.scenes import SceneHistory
+
+    cfg = {**config(), "action_history": 3}
+    frames = [torch.full((3, 21, 17), value) for value in [0.1, 0.2, 0.3, 0.4]]
+    kwargs = {}
+    if with_states:
+        cfg["state_fields"] = ["ball_x", "ball_y"]
+        kwargs["states"] = torch.tensor([[0.2, 0.3, 1.0]] * 4)
+    initial = SceneHistory(frames, actions=[0, 1, 2], **kwargs)
+    player = Player(OrderSensitiveSpy(), cfg, torch.device("cpu"), initial)
+    s = PlaybackSession(player, "model.pt", {})
+    s.control({"type": "step", "action": 1})
+    baseline = s.snapshot()
+    inputs = player.model.calls[-1]
+    history = torch.stack(list(player.history))
+    past_actions = list(player.past_actions)
+    shuffled = reorder(s, [3, 0, 1, 2])
+    assert shuffled["images"]["prediction"] != baseline["images"]["prediction"]
+    assert torch.equal(torch.stack(list(player.history)), history)
+    assert list(player.past_actions) == past_actions
+    for actual, expected in zip(player.model.calls[-1][1:], inputs[1:]):
+        assert torch.equal(actual, expected)
+    s.control({"type": "step", "action": 2})
+    assert not s.snapshot()["history_reordered"]
+    assert torch.equal(player.model.calls[-1][0][0], history)
+    s.control({"type": "reset"})
+    assert not s.snapshot()["history_reordered"]

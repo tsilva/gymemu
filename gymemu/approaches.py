@@ -14,6 +14,7 @@ class Approach(nn.Module):
     action_history = 1
     state_fields = ()
     training_rollout_steps = 0
+    training_future_steps = 0
     objectives = ()
     predictive_objectives = ()
 
@@ -128,7 +129,7 @@ class BallRegionApproach(ActionHistoryApproach):
             "ball_region_mse": region / max(samples, 1),
         }
 
-    def joint_loss(self, prediction, target):
+    def joint_loss(self, prediction, target, *, valid=None, reduction="mean"):
         mask, available = ball_region_mask(
             target,
             sprite_height=self.sprite_height,
@@ -140,18 +141,23 @@ class BallRegionApproach(ActionHistoryApproach):
         # Each detected region gets its own mean, including clipped edge regions.
         # Undetected samples contribute zero; full-batch averaging is partition invariant.
         region = (error * mask).flatten(1).sum(dim=1) / mask.flatten(1).sum(dim=1).clamp_min(1)
+        if valid is None:
+            valid = torch.ones_like(rgb)
+        else:
+            valid = valid.to(rgb.dtype)
         with torch.no_grad():
             self._region_totals.add_(
                 torch.stack(
                     (
-                        rgb.new_full((), len(target)),
-                        available.sum().float(),
-                        rgb.detach().sum(),
-                        region.detach().sum(),
+                        valid.sum(),
+                        (available * valid).sum().float(),
+                        (rgb.detach() * valid).sum(),
+                        (region.detach() * valid).sum(),
                     )
                 )
             )
-        return (rgb + self.ball_region_weight * region).mean()
+        losses = (rgb + self.ball_region_weight * region) * valid
+        return losses if reduction == "none" else losses.sum() / valid.sum().clamp_min(1)
 
     def loss(self, history, action, target):
         return self.joint_loss(self(history, action), target)
@@ -365,6 +371,55 @@ class ScheduledBallRegionApproach(ScheduledSamplingApproach, BallRegionApproach)
         return self.joint_loss(prediction, target)
 
 
+class AutoregressiveBallRegionApproach(BallRegionApproach):
+    """Supervise every future frame, differentiating through RGB feedback."""
+
+    def __init__(
+        self, spec, history, actions, shape, *, rollout_steps, rollout_schedule=None, **options
+    ):
+        super().__init__(spec, history, actions, shape, **options)
+        if type(rollout_steps) is not int or rollout_steps < 1:
+            raise ValueError("rollout_steps must be a positive integer")
+        schedule = list(rollout_schedule) if rollout_schedule is not None else [rollout_steps]
+        if (
+            not schedule
+            or any(type(n) is not int or not 1 <= n <= rollout_steps for n in schedule)
+            or schedule != sorted(schedule)
+            or schedule[-1] != rollout_steps
+        ):
+            raise ValueError(
+                "rollout_schedule must increase to rollout_steps with positive lengths"
+            )
+        self.training_future_steps = rollout_steps
+        self.rollout_schedule = schedule
+        self.active_steps = schedule[0]
+
+    def begin_epoch(self, epoch):
+        self.active_steps = self.rollout_schedule[
+            min(max(epoch - 1, 0), len(self.rollout_schedule) - 1)
+        ]
+        return {"rollout_steps": self.active_steps, "prediction_probability": 1.0}
+
+    def loss(self, history, action, target):
+        context = history
+        total = history.new_zeros(len(history), dtype=torch.float32)
+        counts = torch.zeros_like(total)
+        for step in range(self.active_steps):
+            tokens = action[:, step]
+            valid = tokens[:, -1] >= 0
+            tokens = tokens.clamp_min(0)
+            model_action = tokens[:, 0] if self.action_history == 1 else tokens
+            prediction = self(context, model_action)
+            total = total + self.joint_loss(
+                prediction, target[:, step], valid=valid, reduction="none"
+            )
+            counts = counts + valid
+            # No detach: later losses differentiate through all earlier predictions.
+            context = torch.cat((context[:, 1:], prediction[:, None].to(context.dtype)), dim=1)
+        # Each sampled start has equal weight, independent of its remaining episode length.
+        return (total / counts.clamp_min(1)).mean()
+
+
 class LatentApproach(Approach):
     objectives = ("reconstruction", "latent_prediction")
     predictive_objectives = ("latent_prediction",)
@@ -425,6 +480,7 @@ APPROACHES = {
     "latent": LatentApproach,
     "scheduled_actions": ScheduledSamplingApproach,
     "scheduled_ball_region": ScheduledBallRegionApproach,
+    "autoregressive_ball_region": AutoregressiveBallRegionApproach,
 }
 
 

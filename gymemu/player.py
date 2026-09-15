@@ -90,6 +90,8 @@ class Player:
         action = torch.tensor(context, dtype=torch.long, device=self.device)
         action = action if self.action_history == 1 else action.unsqueeze(0)
         inputs = stack.unsqueeze(0).to(self.device)
+        self.input_tokens = action
+        self.input_states = None
         if self.state_fields:
             states = (
                 frame_stack(
@@ -98,6 +100,7 @@ class Player:
                 .unsqueeze(0)
                 .to(self.device)
             )
+            self.input_states = states
             prediction, state = self.model.predict_step(inputs, action, states)
             result = prediction[0].cpu()
             self.state_history.append(state[0].cpu())

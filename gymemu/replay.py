@@ -4,7 +4,7 @@ import torch
 
 from gymemu.data import Frames, Windows, frame_stack, read_episodes, resolve_dataset
 
-COMPARISON_LABELS = ("Prediction", "Original", "Prediction - original")
+COMPARISON_LABELS = ("Prediction", "Original", "Diff")
 
 
 def load_replay(model, config, device, *, dataset=None, revision=None, split=None, episode_id=None):
@@ -85,9 +85,11 @@ class ReplayPlayer:
         history, token, target, *states = self.windows[offset + self.steps + 1]
         inputs = history.unsqueeze(0).to(self.device)
         tokens = torch.as_tensor(token, dtype=torch.long, device=self.device).unsqueeze(0)
+        self.input_tokens = tokens
+        self.input_states = states[0].unsqueeze(0).to(self.device) if states else None
         if states:
             prediction, _ = self.model.predict_step(
-                inputs, tokens, states[0].unsqueeze(0).to(self.device)
+                inputs, tokens, self.input_states
             )
         else:
             prediction = self.model(inputs, tokens)

@@ -1,0 +1,6 @@
+defaults:
+  - ball_region
+kind: autoregressive_ball_region
+options:
+  rollout_steps: 8
+  rollout_schedule: [1, 2, 4, 8]

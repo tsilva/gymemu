@@ -42,12 +42,14 @@ test('saved layouts drop the retired playback widget and preserve other widgets'
     const saved=defaultWorkspace();
     saved.version=version;
     saved.panels.controls={type:'controls',title:'Playback controls',config:{},placement:{x:8,y:14,w:4,h:10,visible:true}};
-    saved.panels.model.placement={x:8,y:24,w:4,h:7,visible:false,window:'main'};
+    saved.panels.model={type:'telemetry',title:'Model context',config:{view:'stats'},placement:{x:8,y:24,w:4,h:7,visible:false,window:'main'}};
+    saved.panels['panel-custom']={...saved.panels.model,title:'Custom stats'};
     saved.panels.prediction.title='My prediction';
     const restored=normalizeWorkspace(saved);
     assert.equal(restored.panels.controls,undefined);
     assert.equal(panelDefinition(restored,'controls'),null);
-    assert.deepEqual(restored.panels.model.placement,{...saved.panels.model.placement,y:10,window:'stats'});
+    assert.equal(restored.panels.model,undefined);
+    assert.deepEqual(restored.panels['panel-custom'].placement,{...saved.panels.model.placement,y:10,window:'stats'});
     assert.equal(restored.panels.prediction.title,'My prediction');
     assert.deepEqual(normalizeWorkspace(restored),restored);
   }
@@ -56,7 +58,7 @@ test('saved layouts drop the retired playback widget and preserve other widgets'
 test('paired workspace puts frames in the player and diagnostic widgets in stats',()=>{
   const workspace=defaultWorkspace();
   assert.deepEqual(Object.entries(workspace.panels).filter(([,p])=>p.placement.window==='main').map(([id])=>id),['original','prediction','difference']);
-  assert.deepEqual(Object.entries(workspace.panels).filter(([,p])=>p.placement.window==='stats').map(([id])=>id),['history','metrics','model']);
+  assert.deepEqual(Object.entries(workspace.panels).filter(([,p])=>p.placement.window==='stats').map(([id])=>id),['history','metrics']);
   workspace.panels.original.placement.window='stats';
   workspace.panels['panel-custom']={type:'telemetry',title:'Latency',config:{metrics:['inference_ms']},placement:{x:0,y:3,w:4,h:6,window:'main'}};
   const restored=normalizeWorkspace(workspace);
@@ -109,15 +111,29 @@ test('old default diagnostics migrate to full-width history and an aligned lower
   const saved=defaultWorkspace();
   Object.assign(saved.panels.history.placement,{x:0,y:0,w:8,h:10});
   Object.assign(saved.panels.metrics.placement,{x:0,y:10,w:8,h:7});
-  Object.assign(saved.panels.model.placement,{x:8,y:0,w:4,h:7});
+  saved.panels.model={type:'telemetry',title:'Model context',placement:{x:8,y:0,w:4,h:7}};
   saved.panels.history.enabled=false;
   saved.panels.difference.config.gain=8;
   const restored=normalizeWorkspace(saved),defaults=defaultWorkspace();
-  for(const id of ['history','metrics','model'])
+  for(const id of ['history','metrics'])
     assert.deepEqual(restored.panels[id].placement,defaults.panels[id].placement);
   assert.equal(restored.panels.history.enabled,false);
   assert.equal(restored.panels.difference.config.gain,8);
   assert.deepEqual(normalizeWorkspace(restored),restored);
   saved.panels.history.placement.h=12;
   assert.equal(normalizeWorkspace(saved).panels.history.placement.h,12);
+});
+
+
+test('Model context is removed from saved layouts and the former default chart fills its row',()=>{
+  const saved=defaultWorkspace();
+  saved.panels.metrics.placement.w=8;
+  saved.panels.model={type:'telemetry',title:'Model context',placement:{x:8,y:16,w:4,h:11}};
+  const restored=normalizeWorkspace(saved);
+  assert.equal(restored.panels.model,undefined);
+  assert.equal(restored.panels.metrics.placement.w,12);
+  assert.equal(panelDefinition(restored,'model'),null);
+  assert.deepEqual(normalizeWorkspace(restored),restored);
+  saved.panels.metrics.placement.y=25;
+  assert.equal(normalizeWorkspace(saved).panels.metrics.placement.w,8);
 });

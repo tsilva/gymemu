@@ -33,7 +33,7 @@ let workspace = loadWorkspace(), snapshot = null, bitmaps = {}, active = true, s
 let runtime, grid, toastTimer, saveTimer, chartRange = null, scrubbing = false;
 let rangeRevision = {clock:0,writer:''};
 const RANGE_KEY = 'gymemu-chart-range';
-const chartIdentity = s => s ? [s.mode,s.selection,s.history_epoch].join(':') : null;
+const chartIdentity = s => s ? [s.checkpoint,s.generation || 0,s.mode,s.selection,s.history_epoch].join(':') : null;
 const headers = { 'X-Player-Token': token || '', 'Content-Type': 'application/json' };
 const showToast = message => {
   $('#toast').textContent = message; $('#toast').hidden = false;
@@ -46,8 +46,8 @@ async function request(path, options={}) {
   return result;
 }
 function command(value) {
-  if (!isPlayer && value.type !== 'seek') return Promise.resolve();
-  pendingCommand = pendingCommand.then(() => request('/api/command',{method:'POST',body:JSON.stringify(value)})).catch(error => showToast(error.message));
+  if (!isPlayer && !['seek','reorder_history','edit_history','revert_history','pause'].includes(value.type)) return Promise.resolve();
+  pendingCommand = pendingCommand.then(() => request('/api/command',{method:'POST',body:JSON.stringify(value)})).catch(error => { showToast(error.message); return {error:error.message}; });
   return pendingCommand;
 }
 function renderChartRange() {
@@ -197,7 +197,7 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden) blur();});
 window.addEventListener('pagehide',()=>{if(saveTimer) persist(true);active=false;workspaceChannel?.close();if(isPlayer) fetch('/api/command',{method:'POST',headers,body:JSON.stringify({type:'blur'}),keepalive:true}).catch(()=>{});});
 setInterval(()=>{if(isPlayer && active && !document.hidden) request('/api/command',{method:'POST',body:JSON.stringify({type:'heartbeat'})}).catch(()=>{});},400);
 function chrome(s) {
-  $('#checkpoint').textContent=s.checkpoint.split('/').slice(-2).join('/');$('#checkpoint').title=s.checkpoint;
+  $('#checkpoint').textContent=s.checkpoint_label || s.checkpoint.split('/').slice(-2).join('/');$('#checkpoint').title=s.checkpoint;
   $('#mode').value=s.mode;$('#mode').disabled=!s.available_modes?.length||Boolean(s.loading);
   $('#position').textContent=timelinePosition(s);
   $('#inspection-position').textContent=timelinePosition(s);
@@ -255,6 +255,19 @@ async function boot() {
   while(active) {
     try {
       const next=await request(`/api/state?after=${revision}`);
+      if(next.catalog && !next.checkpoint) { location.href=`/browse#${new URLSearchParams({token})}`; return; }
+      if(next.catalog) {
+        const browse=$('#browse-checkpoints'); browse.hidden=false;
+        const saved=sessionStorage.getItem('gymemu-catalog-route');
+        const destination=new URL(saved || '/browse',location.href);
+        if(destination.origin!==location.origin) destination.href=new URL('/browse',location.href).href;
+        destination.hash=new URLSearchParams({token}).toString();
+        browse.href=destination.href;
+        browse.onclick=async event=>{event.preventDefault();await command({type:'pause'});location.href=browse.href;};
+        if(!isPlayer) companionUrl.pathname='/player';
+        companion.href=companionUrl.href;
+      }
+      if(snapshot && next.generation!==snapshot.generation) { location.reload(); return; }
       if(next.revision!==revision) {
         const decoded=await decode(next.images);
         const changed=chartIdentity(snapshot)!==chartIdentity(next);
@@ -268,11 +281,10 @@ async function boot() {
         document.body.dataset.revision=String(next.revision);
         if(next.error) showToast(next.error);
       }
-      $('#connection').textContent=snapshot?.loading?'Loading':snapshot?.playing?'Playing':'Paused';$('#connection').classList.remove('error');
     } catch(error) {
-      $('#connection').textContent='Disconnected';$('#connection').classList.add('error');showToast(error.message);
+      showToast(error.message);
       await new Promise(resolve=>setTimeout(resolve,1000));
     }
   }
 }
-boot().catch(error=>{$('#connection').textContent='Connection failed';$('#connection').classList.add('error');showToast(error.message);});
+boot().catch(error=>showToast(error.message));
