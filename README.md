@@ -91,6 +91,9 @@ uv run gymemu train output=runs/breakout-tracked
 Projects use `gymemu-<canonical-env-id>`, so Breakout logs to
 `gymemu-Breakout-Atari2600-v0`. Each run records stage losses, held-out RGB MSE,
 throughput, learning rates, curriculum values, configuration, and the final summary.
+Frequent gradient health checks and fixed held-out rollouts expose saturation,
+dead gradients, and ball loss during an epoch. See the [diagnostic metrics and
+project view](docs/metrics.md) for chart meanings and configuration.
 Use `wandb.mode=offline` to collect logs locally or `wandb.mode=disabled` to turn tracking off.
 See [tracking options](docs/training.md#weights--biases) for teams and custom environments.
 
@@ -333,6 +336,13 @@ transfers. It retains the direct CNN, full RGB frames, eight-frame history, and 
 MSE. Compilation adds startup time; checkpoints also load on CPUs without compilation
 or a frame cache. See [performance measurements](docs/performance.md) for results,
 reproduction commands, and the synchronization tradeoff.
+
+For differentiable eight-step training, `recipe=breakout_autoregressive_fast`
+selects the measured CUDA variant with compiled loss, bf16 feedback histories,
+and a tuned batch size. It retains the full rollout loss
+and diagnostics. The larger batch changes the number of optimizer updates per
+epoch; this is a throughput recipe, not a demonstrated improvement in rollout
+quality. See [autoregressive measurements](docs/performance.md#autoregressive-training).
 
 ## Other games
 

@@ -181,3 +181,146 @@ MSE 1.97e-14, with a maximum of 2.8e-4 at individual pixels; a four-example floa
 check agreed within 3.1e-15. This separates arithmetic/recurrence rounding from
 dependency-order correctness. The numerical check is retained as `verify.py` and
 `verify.log` in the remote diagnostic directory, with a local diagnostic copy.
+
+## Autoregressive training
+
+The September 16 investigation stopped `gymemu-ar-diag-20260916-105712` on Beast-3
+and preserved its source and latest inference checkpoint. The benchmark uses the
+same RTX 4090, PyTorch 2.14.0+cu130, full-resolution Breakout data, width-32 CNN,
+eight RGB/action history slots, and Adam at 0.001. The speech service remains
+running and reserves about 2.3 GiB of GPU memory. GPU benchmark jobs run serially.
+
+The original recipe uses batch size 8, bf16 convolutions, float32 feedback history,
+eager loss computation, two cache-loading threads, and overlapping CUDA transfers.
+It supervises every valid future frame, retaining gradients through the full
+rollout. The measured eight-step phase is materially more expensive than the
+two-step phase that was active when the run was stopped.
+
+`recipe=breakout_autoregressive_fast` explicitly selects compilation, bf16 feedback
+history and the tuned batch size. The original recipe
+remains available. These execution options do not shorten rollouts, detach
+predictions, crop images, remove targets, or disable diagnostics. Float32 playback
+uses the original action-history CNN arithmetic and tensor names. Mixed-precision
+regrouping changes numerical rounding; a larger batch also changes Adam's update
+count and optimization trajectory. Throughput alone is not evidence of better
+trained rollouts.
+
+The shared health collector reuses parameter gradient norms and transfers scalar
+statistics together when reporting. Every-update gradient coverage, maximum spikes,
+weight-gradient collapse signals, and sampled activation/update statistics remain.
+Sampled activation hooks execute on the eager loss path so their installation does
+not trigger compiled-graph variants or record hooks on ordinary updates.
+
+### Numerical checks and rejected variants
+
+On 32 real training windows from the stopped checkpoint, including bootstrap and
+episode-tail cases, bf16 feedback alone matched the reference loss and gave gradient
+cosine similarity 0.999950, with relative gradient L2 difference 1.01%. Adding
+compilation while disabling automatic layout optimization gave cosine 0.999975,
+relative gradient difference 0.78%, and loss 0.002807224 versus reference 0.002807802.
+This is one diagnostic batch, not a training-quality equivalence result.
+
+Factored action inputs produced cosine approximately -0.35 on that batch despite
+only a 0.11% loss difference. The compiler's default automatic layout conversion
+also changed the gradient substantially, with cosine 0.61. The fast recipe therefore
+keeps the original action-plane implementation and sets
+`trainer.compile_layout_optimization=false`. Neither faster pilot variant is counted
+as an adopted speedup. Float32 inference differences were at most 1.2e-7, the same
+scale observed between repeated reference forwards. A separate 110-update CUDA
+check found exactly equal health metrics and weights before/after the diagnostic
+collector optimization.
+
+The `max-autotune-no-cudagraphs` pilot was stopped after 7.5 minutes of compilation
+without a timed trial. It was not adopted. Compiler children were stopped before
+subsequent timing runs. Increasing loader workers from one to four had less than
+1% effect in the exploratory action-factoring variant; the final sweep keeps two.
+
+### Final matched results
+
+The eight-step comparisons each use a 2,048-sequence warmup followed by three
+32,768-sequence trials, totaling 98,304 timed sequence starts per configuration.
+All three comparisons have the same complete sample-order SHA-256:
+`c602bb9a3dc7ed485ef00f54a62e01c4c55928c0b98e1121bcdab99ce4353511`.
+
+| Eight-step training path | Batch size | Median sequences/sec | Speedup |
+| --- | ---: | ---: | ---: |
+| Stopped run's original code and settings | 8 | 461.45 | 1.00× |
+| Optimized execution, original batch size | 8 | 798.33 | 1.73× |
+| `breakout_autoregressive_fast` | 32 | 1,069.31 | **2.32×** |
+
+The adopted batch-32 recipe's three trials measured 1,069.31 / 1,069.22 / 1,069.35
+sequences/sec. Final batch-size pilots without action factoring or automatic
+layout conversion measured 1,064 / 1,055 / 971 sequences/sec at batches 32 / 64 /
+128, respectively. These pilots used 16,384 timed starts each. Batch 32 was the
+best measured setting and also requires fewer activation buffers than the larger
+candidates. Keeping batch size 8 retains the original number of optimizer updates
+per epoch while still providing the measured 1.73× execution gain.
+
+The two-step phase active at interruption was also checked with one matched
+32,768-sequence trial per configuration: 1,452.95 sequences/sec originally and
+3,613.00 with the batch-32 fast recipe, a **2.49×** gain. These shorter checks are
+separate from the three-trial eight-step result. All final timing runs exceeded
+the original 1,000 sequences/sec target when using the tuned batch-32 recipe.
+
+A 25-second GPU sample during the optimized eight-step trials averaged 95.8%
+utilization, 364 W, and 74.6°C, including probe-related dips. Total device memory
+usage was approximately 5.5 GiB including the speech service and CUDA reservations.
+These values describe the measured workload; unused VRAM does not imply that larger
+batches will improve throughput. This is the best tested configuration within the
+numerical constraints above, not a proof of the hardware's absolute throughput limit.
+
+Validation passed 241 tests and `ruff check .`. Bounded direct and two-stage latent
+CPU train/checkpoint/play smokes passed. The final fast recipe also passed a real-data
+CUDA smoke with eight differentiable rollout steps, compiled ordinary updates,
+diagnostics, float32 validation, checkpoint save/load, teacher-forcing replay, and
+autoregressive playback from its saved starting scene. The original training run
+remains stopped; these checks did not restart a full experiment.
+
+### Measurement method
+
+`benchmark_autoregressive.py` invokes the production loader, loss, optimizer,
+health collector, and `run_epoch`. Seed 47 controls initialization; seed 123 fixes
+sample order. A sample means a sequence start, not an individual predicted frame.
+The resolved config and sample-order hash accompany every result. Input windows
+never cross episodes, and probes only observe fixed held-out trajectories.
+
+Measurements include loading, host-to-device transfer, forward/backward, Adam,
+health reporting, and local probe images/JSON. They exclude dataset/cache
+verification, warmup/compilation, full-epoch validation, checkpoints, W&B upload,
+and R2 upload. Thus these are training-loop measurements, not full-job wall time.
+CUDA synchronizes at timing boundaries. The existing health cadence remains every
+100 updates, with eight 32-step probes every 1,000 updates and at measurement end.
+The first ten updates in each measured segment also retain startup diagnostics;
+short segments therefore underestimate sustained throughput, especially for large
+batches. Compilation requires more than ten warmup batches to reach the ordinary
+compiled path before timing.
+
+Raw results and diagnostic scripts are under `logs/autoregressive-tuning/` locally
+and `/home/tsilva/.local/share/gymemu/container-workspace/throughput-20260916/` on
+Beast-3. The remote `baseline/` is the stopped run's immutable source copy;
+`feedback/` contains the optimized execution code. `stopped-latest.pt` preserves
+the pre-stop inference bundle. It does not contain Adam state for exact training
+continuation.
+
+### Reproduce
+
+Run on a CUDA host with a verified frame cache. The benchmark does not create a
+W&B run, upload artifacts, or save trained checkpoints.
+
+```bash
+uv run python benchmark_autoregressive.py \
+  --override trainer.frame_cache=data/breakout-676ff638-lz4 \
+  --epoch 4 --samples 32768 --warmup-samples 2048 --repeats 3 \
+  --out logs/ar-reference.json
+
+uv run python benchmark_autoregressive.py \
+  --override recipe=breakout_autoregressive_fast \
+  --override trainer.frame_cache=data/breakout-676ff638-lz4 \
+  --epoch 4 --samples 32768 --warmup-samples 2048 --repeats 3 \
+  --minimum-sps 1000 --out logs/ar-fast.json
+```
+
+Use the preserved `baseline/` source to reproduce the original health collector
+exactly. A local snapshot can be selected with `--override game.dataset=/path/to/snapshot`.
+Use `--epoch 2` to measure the two-step phase, or override
+`trainer.batch_size=8` on the fast recipe to retain the original update batch size.

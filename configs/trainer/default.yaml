@@ -11,6 +11,15 @@ train_batches: null
 eval_batches: null
 frame_cache: null
 compile: false
+compile_layout_optimization: true
 prefetch: false
 sync_batches: 1
 loader: standard
+
+# Read-only diagnostics; fixed probes use held-out data and never change the loss.
+diagnostics:
+  enabled: true
+  log_every: 100
+  probe_every: 1000
+  samples: 8
+  horizon: 32

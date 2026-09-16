@@ -1,0 +1,331 @@
+{
+  "name": "Training diagnostics",
+  "sections": [
+    {
+      "title": "Primary metrics",
+      "panels": [
+        {
+          "metrics": [
+            "eval/mse"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/mse/h1",
+            "probe/mse/h8",
+            "probe/mse/h32"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/ball/mse"
+          ]
+        },
+        {
+          "metrics": [
+            "train/grad/norm/max"
+          ]
+        },
+        {
+          "metrics": [
+            "train/grad/weights/zero/fraction"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/pixel/wrong_sat/fraction"
+          ]
+        },
+        {
+          "metrics": [
+            "train/horizon"
+          ]
+        },
+        {
+          "metrics": [
+            "train/loss/mean",
+            "train/loss/max"
+          ]
+        }
+      ],
+      "open": true,
+      "pinned": true
+    },
+    {
+      "title": "Rollouts",
+      "panels": [
+        {
+          "metrics": [
+            "probe/mse/h{horizon}"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/teacher/mse",
+            "probe/mse/mean"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/drift/ratio"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/early/mse",
+            "probe/regular/mse"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/fg/mse"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/motion/mse"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/motion/pred",
+            "probe/motion/target"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/count/h{horizon}"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Ball tracking",
+      "panels": [
+        {
+          "metrics": [
+            "probe/ball/mse/h{horizon}"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/ball/coverage"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/ball/count"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/ball/reappear/mse"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/ball/reappear/count"
+          ]
+        },
+        {
+          "metrics": [
+            "train/rgb/mse",
+            "train/ball/mse"
+          ]
+        },
+        {
+          "metrics": [
+            "train/ball/coverage"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Gradients",
+      "panels": [
+        {
+          "metrics": [
+            "train/grad/norm/mean",
+            "train/grad/norm/max"
+          ]
+        },
+        {
+          "metrics": [
+            "train/grad/weights/norm/min"
+          ]
+        },
+        {
+          "metrics": [
+            "train/grad/{layer}/norm"
+          ]
+        },
+        {
+          "metrics": [
+            "train/grad/{layer}/nonzero/fraction"
+          ]
+        },
+        {
+          "metrics": [
+            "train/grad/{layer}/missing"
+          ]
+        },
+        {
+          "metrics": [
+            "train/grad/norm/nonfinite/fraction"
+          ]
+        },
+        {
+          "metrics": [
+            "train/grad/{layer}/nonfinite/fraction"
+          ]
+        },
+        {
+          "metrics": [
+            "train/grad/peak/step"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Activations",
+      "panels": [
+        {
+          "metrics": [
+            "train/act/{layer}/abs/max"
+          ]
+        },
+        {
+          "metrics": [
+            "train/act/{layer}/sat/fraction"
+          ]
+        },
+        {
+          "metrics": [
+            "train/act/{layer}/nonfinite/fraction"
+          ]
+        },
+        {
+          "metrics": [
+            "train/relu/{layer}/abs/max"
+          ]
+        },
+        {
+          "metrics": [
+            "train/relu/{layer}/zero/fraction"
+          ]
+        },
+        {
+          "metrics": [
+            "train/relu/{layer}/nonfinite/fraction"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/pixel/saturated/fraction"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/pixel/std"
+          ]
+        },
+        {
+          "metrics": [
+            "probe/pixel/nonfinite/fraction"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Optimizer",
+      "panels": [
+        {
+          "metrics": [
+            "train/update/{layer}/ratio"
+          ]
+        },
+        {
+          "metrics": [
+            "train/weight/{layer}/norm"
+          ]
+        },
+        {
+          "metrics": [
+            "train/lr"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Training",
+      "panels": [
+        {
+          "metrics": [
+            "train/{stage}/loss/epoch"
+          ]
+        },
+        {
+          "metrics": [
+            "eval/{stage}/loss"
+          ]
+        },
+        {
+          "metrics": [
+            "train/epoch"
+          ]
+        },
+        {
+          "metrics": [
+            "train/samples"
+          ]
+        },
+        {
+          "metrics": [
+            "train/rate"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Prediction examples",
+      "panels": [
+        {
+          "kind": "media",
+          "metrics": [
+            "probe/frames"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Legacy runs",
+      "panels": [
+        {
+          "metrics": [
+            "evaluation/next_frame_rgb_mse"
+          ],
+          "axis": "optimizer_steps"
+        },
+        {
+          "metrics": [
+            "stages/prediction/curriculum/rollout_steps"
+          ],
+          "axis": "optimizer_steps"
+        },
+        {
+          "metrics": [
+            "stages/prediction/train/loss"
+          ],
+          "axis": "optimizer_steps"
+        },
+        {
+          "metrics": [
+            "stages/prediction/validation/loss"
+          ],
+          "axis": "optimizer_steps"
+        }
+      ],
+      "legacy": true
+    }
+  ]
+}

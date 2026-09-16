@@ -100,6 +100,54 @@ def test_rollout_feedback_gradients_and_mask_normalization():
     assert [model.begin_epoch(i)["rollout_steps"] for i in range(1, 7)] == [1, 2, 4, 8, 8, 8]
 
 
+def test_autocast_feedback_preserves_recurrence_gradients_and_float32_path():
+    cfg = configured("+approach.options.feedback_dtype=autocast")
+    model = model_for(cfg)
+    model.begin_epoch(2)
+    history = torch.rand(2, 2, 3, 21, 17)
+    actions = torch.zeros(2, 2, 2, dtype=torch.long)
+    target = torch.rand(2, 2, 3, 21, 17)
+    seen = []
+    outputs = []
+
+    def observe(module, inputs, output):
+        seen.append(inputs[0].dtype)
+        output.retain_grad()
+        outputs.append(output)
+
+    handle = model.predictor.register_forward_hook(observe)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        loss = model.loss(history, actions, target)
+    loss.backward()
+    assert seen == [torch.bfloat16, torch.bfloat16]
+    assert all(output.grad is not None and output.grad.abs().sum() > 0 for output in outputs)
+    handle.remove()
+    # Playback/evaluation and old recipes retain their original float32 arithmetic.
+    reference = model_for(configured())
+    reference.load_state_dict(model.state_dict())
+    assert torch.equal(model(history, actions[:, 0]), reference(history, actions[:, 0]))
+
+
+def test_invalid_autoregressive_feedback_dtype():
+    with pytest.raises(ValueError, match="feedback_dtype"):
+        model_for(configured("+approach.options.feedback_dtype=int8"))
+
+
+def test_fast_recipe_preserves_objective_and_exposes_execution_changes():
+    base = compose_config(["recipe=breakout_autoregressive_ball_region"])
+    fast = compose_config(["recipe=breakout_autoregressive_fast"])
+    assert base.trainer.batch_size == 8 and not base.trainer.compile
+    assert fast.trainer.compile
+    assert not fast.trainer.compile_layout_optimization
+    assert not fast.approach.models.predictor.get("factor_actions", False)
+    assert fast.approach.options.feedback_dtype == "autocast"
+    for key, value in base.approach.options.items():
+        assert fast.approach.options[key] == value
+    assert fast.approach.stages == base.approach.stages
+    assert fast.game == base.game and fast.history == base.history
+    assert fast.trainer.diagnostics == base.trainer.diagnostics
+
+
 @pytest.mark.parametrize("cached", [False, True])
 def test_train_checkpoint_and_play(snapshot, tmp_path, cached):
     cfg = configured(

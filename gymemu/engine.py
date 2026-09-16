@@ -7,6 +7,7 @@ import json
 import math
 import random
 import time
+from contextlib import nullcontext
 from itertools import islice
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from gymemu.approaches import build_approach
 from gymemu.batches import CachedBatchLoader
 from gymemu.checkpoints import load_model, save_model
 from gymemu.data import Frames, Windows, read_episodes, resolve_dataset
+from gymemu.diagnostics import Health, RolloutProbe
 from gymemu.optimizers import build_optimizer, validate_optimizer
 from gymemu.recipes import save_reproduction
 from gymemu.runtime import device_for
@@ -50,6 +52,8 @@ def validate(config):
         raise ValueError("workers must be nonnegative")
     if trainer["precision"] not in ("fp32", "bf16"):
         raise ValueError("precision must be fp32 or bf16")
+    if type(trainer.get("compile_layout_optimization", True)) is not bool:
+        raise ValueError("compile_layout_optimization must be boolean")
     if trainer["device"] not in ("auto", "cpu", "cuda", "mps"):
         raise ValueError("device must be auto, cpu, cuda, or mps")
     if config["game"]["train_split"] == config["game"]["eval_split"]:
@@ -58,6 +62,10 @@ def validate(config):
         raise ValueError("loader must be standard or cached")
     if trainer["loader"] == "cached" and not trainer["frame_cache"]:
         raise ValueError("cached loader requires trainer.frame_cache")
+    diagnostics = trainer.get("diagnostics", {})
+    if diagnostics.get("enabled", False):
+        for name in ("log_every", "probe_every", "samples", "horizon"):
+            _positive(diagnostics[name], f"diagnostics.{name}")
     stages = config["approach"]["stages"]
     if not stages or len({s["name"] for s in stages}) != len(stages):
         raise ValueError("Stages must be nonempty with unique names")
@@ -124,7 +132,12 @@ def run_epoch(
     checkpoint_seconds=60,
     prefetch=False,
     loss_function=batch_loss,
+    diagnostic_loss_function=None,
     sync_batches=1,
+    health=None,
+    report=None,
+    log_every=100,
+    probe_every=1000,
 ):
     model.train(optimizer is not None)
     model.reset_epoch_metrics()
@@ -134,9 +147,16 @@ def run_epoch(
     started = last_checkpoint = time.monotonic()
     count = min(len(loader), max_batches) if max_batches else len(loader)
     for history, action, target, *auxiliary in device_batches(loader, count, device, prefetch):
-        with torch.set_grad_enabled(optimizer is not None):
+        detailed = health is not None and (batches < 10 or (batches + 1) % log_every == 0)
+        capture = health.capture(detailed) if health is not None else nullcontext()
+        # Sampled activation hooks stay outside the compiled graph. Changing hooks
+        # must not cause recompilation or make regular updates collect activations.
+        compute_loss = (
+            diagnostic_loss_function if detailed and diagnostic_loss_function else loss_function
+        )
+        with torch.set_grad_enabled(optimizer is not None), capture:
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
-                loss, mse = loss_function(
+                loss, mse = compute_loss(
                     model,
                     history,
                     action,
@@ -150,11 +170,24 @@ def run_epoch(
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
+                if health is not None:
+                    health.backward(loss, len(target))
                 optimizer.step()
+                if health is not None:
+                    health.updated()
         total_loss += loss.detach().double() * len(target)
         total_mse += mse.detach().double() * len(target)
         samples += len(target)
         batches += 1
+        if health is not None and (
+            batches <= 10
+            or batches % log_every == 0
+            or batches % probe_every == 0
+            or batches == count
+        ):
+            report(
+                health.metrics(), batches, samples, batches % probe_every == 0 or batches == count
+            )
         save = checkpoint and time.monotonic() - last_checkpoint >= checkpoint_seconds
         if batches % sync_batches == 0 or batches == count or save:
             # Check before every checkpoint; CUDA runs may defer host synchronization.
@@ -311,7 +344,14 @@ def train(cfg):
         **input_options,
     )
     evaluation = Windows(frames, eval_episodes, config["history"], actions, **input_options)
-    loss_function = torch.compile(batch_loss) if trainer["compile"] else batch_loss
+    loss_function = (
+        torch.compile(
+            batch_loss,
+            options={"layout_optimization": trainer.get("compile_layout_optimization", True)},
+        )
+        if trainer["compile"]
+        else batch_loss
+    )
     identity = _dataset_identity(root, provenance)
     if config.get("expected_dataset") is not None and config["expected_dataset"] != identity:
         raise ValueError(
@@ -367,6 +407,16 @@ def train(cfg):
     else:
         train_loader = DataLoader(training, shuffle=True, **options)
         eval_loader = DataLoader(evaluation, shuffle=False, **options)
+    diagnostics = trainer.get("diagnostics", {})
+    probe = None
+    if diagnostics.get("enabled", False):
+        probe = RolloutProbe(
+            evaluation,
+            samples=diagnostics["samples"],
+            horizon=diagnostics["horizon"],
+            sprite=game.get("ball_sprite"),
+        )
+        (output / "probe.json").write_text(json.dumps(probe.manifest(), indent=2) + "\n")
     parameters = sum(p.numel() for p in model.parameters())
     print(
         json.dumps(
@@ -419,6 +469,29 @@ def train(cfg):
                         save_model(output / "latest.pt", model, info)
                     storage.sync()
 
+                def report_health(metrics, batches, samples, include_probe):
+                    step = total_updates + batches
+                    if batches:
+                        metrics.update(model.interval_metrics())
+                    metrics.update(
+                        {
+                            "train/step": step,
+                            "train/samples": total_train_samples + samples,
+                            "train/stage": stage["name"],
+                            "train/epoch": epoch,
+                            "train/lr": optimizer.param_groups[0]["lr"],
+                            "train/horizon": curriculum.get("rollout_steps", 1),
+                        }
+                    )
+                    media_path = None
+                    if include_probe and stage["objective"] in model.predictive_objectives:
+                        media_path = output / "diagnostics" / f"{stage['name']}-{epoch}-{step}.png"
+                        metrics.update(probe.run(model, device, media_path))
+                    tracker.log_diagnostics(metrics, output, media_path)
+
+                if probe is not None:
+                    report_health({}, 0, 0, True)
+                health = Health(model, start_step=total_updates) if probe is not None else None
                 result = run_epoch(
                     model,
                     train_loader,
@@ -426,12 +499,17 @@ def train(cfg):
                     optimizer,
                     trainer["train_batches"],
                     loss_function=loss_function,
+                    diagnostic_loss_function=batch_loss,
                     prefetch=trainer["prefetch"],
                     sync_batches=trainer["sync_batches"],
                     precision=trainer["precision"],
                     label=f"{stage['name']} epoch={epoch}",
                     checkpoint=snapshot,
                     checkpoint_seconds=trainer["checkpoint_seconds"],
+                    health=health,
+                    report=report_health,
+                    log_every=diagnostics.get("log_every", 100),
+                    probe_every=diagnostics.get("probe_every", 1000),
                 )
                 total_train_samples += result["samples"]
                 total_updates += result["batches"]
