@@ -32,6 +32,10 @@ class Approach(nn.Module):
         """Return optional scalar diagnostics, separate from comparison metrics."""
         return {}
 
+    def interval_metrics(self):
+        """Optional objective diagnostics since the last logging interval."""
+        return {}
+
     def validate_stages(self, stages):
         for stage in stages:
             if stage["objective"] not in self.objectives:
@@ -117,9 +121,11 @@ class BallRegionApproach(ActionHistoryApproach):
         self.sprite_height, self.sprite_width = sprite_height, sprite_width
         self.padding, self.ball_region_weight = padding, ball_region_weight
         self.register_buffer("_region_totals", torch.zeros(4), persistent=False)
+        self.register_buffer("_region_previous", torch.zeros(4), persistent=False)
 
     def reset_epoch_metrics(self):
         self._region_totals.zero_()
+        self._region_previous.zero_()
 
     def epoch_metrics(self):
         samples, detected, rgb, region = self._region_totals.tolist()
@@ -127,6 +133,17 @@ class BallRegionApproach(ActionHistoryApproach):
             "ball_detection_coverage": detected / max(samples, 1),
             "rgb_mse": rgb / max(samples, 1),
             "ball_region_mse": region / max(samples, 1),
+        }
+
+    def interval_metrics(self):
+        samples, detected, rgb, region = (self._region_totals - self._region_previous).tolist()
+        self._region_previous.copy_(self._region_totals)
+        if not samples:
+            return {}
+        return {
+            "train/rgb/mse": rgb / samples,
+            "train/ball/mse": region / samples,
+            "train/ball/coverage": detected / samples,
         }
 
     def joint_loss(self, prediction, target, *, valid=None, reduction="mean"):
@@ -375,9 +392,21 @@ class AutoregressiveBallRegionApproach(BallRegionApproach):
     """Supervise every future frame, differentiating through RGB feedback."""
 
     def __init__(
-        self, spec, history, actions, shape, *, rollout_steps, rollout_schedule=None, **options
+        self,
+        spec,
+        history,
+        actions,
+        shape,
+        *,
+        rollout_steps,
+        rollout_schedule=None,
+        feedback_dtype="fp32",
+        **options,
     ):
         super().__init__(spec, history, actions, shape, **options)
+        if feedback_dtype not in ("fp32", "autocast"):
+            raise ValueError("feedback_dtype must be fp32 or autocast")
+        self.feedback_dtype = feedback_dtype
         if type(rollout_steps) is not int or rollout_steps < 1:
             raise ValueError("rollout_steps must be a positive integer")
         schedule = list(rollout_schedule) if rollout_schedule is not None else [rollout_steps]
@@ -402,6 +431,8 @@ class AutoregressiveBallRegionApproach(BallRegionApproach):
 
     def loss(self, history, action, target):
         context = history
+        if self.feedback_dtype == "autocast" and torch.is_autocast_enabled(history.device.type):
+            context = history.to(torch.get_autocast_dtype(history.device.type))
         total = history.new_zeros(len(history), dtype=torch.float32)
         counts = torch.zeros_like(total)
         for step in range(self.active_steps):

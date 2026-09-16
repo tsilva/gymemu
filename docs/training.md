@@ -250,8 +250,48 @@ Charts use cumulative optimizer steps, so the axis continues when stage epochs r
 Validation retains the shared float32 held-out evaluation path. The run configuration
 includes resolved settings, pinned dataset identity, evaluation identity, parameter
 count, and recipe hash. The W&B summary mirrors `summary.json`, including `best_mse`
-and training budget. Logging happens once per epoch and adds no per-batch device
-synchronization. W&B also collects its standard system metrics.
+and training budget. The legacy aliases above remain available for existing charts.
+New runs also use metrics schema v2, with short `train/`, `eval/`, and `probe/` names
+and latest-value summaries. `eval/mse` uses `eval/step`; training and fixed probes
+use `train/step`. Both axes count cumulative optimizer updates. W&B also collects
+its standard system metrics.
+
+Read-only diagnostics are enabled by default. Global gradient norms are measured
+on every update and the window maximum preserves single-update spikes. Layer
+gradients, actual relative parameter updates, ReLU activity, and pre-sigmoid
+statistics are sampled on the first ten updates of each epoch and every 100 batches.
+A fixed held-out probe runs before each epoch, every 1,000 batches, and at epoch end.
+It compares up to 32 recursive predictions against episode-local recorded targets,
+with recorded actions and no correction of predicted history. It also evaluates
+clean histories against those targets. Stateful approaches feed back predicted
+state and omit the clean-history aggregate. Representation-only stages omit
+predictive probes. Probes preserve module modes, buffers, and Torch RNG state,
+and never call the training objective or alter gradients.
+
+Settings live under `trainer.diagnostics`: `enabled`, `log_every`, `probe_every`,
+`samples`, and `horizon`. Diagnostics add compute and sampled device synchronization;
+set `trainer.diagnostics.enabled=false` for an explicit uninstrumented benchmark.
+Saved recipes without this block preserve their old behavior. Scalars are saved
+to `diagnostics.jsonl` even with W&B disabled; `probe.json` identifies fixed starts
+and target frame IDs; `diagnostics/*.png` contains target/prediction comparisons.
+W&B receives the same scalars and images. These probes are monitoring subsets,
+not replacements for full held-out evaluation or checkpoint selection.
+
+See [the metric reference](metrics.md) for interpretation and the managed project
+view. The view follows GradLab conventions: a pinned, open primary accordion;
+separate closed diagnostic accordions; unsmoothed plots; explicit axes; registry-
+validated selectors; stable view identity; and no automatic panel generation.
+To create or update it after authenticating:
+
+```bash
+uv sync --frozen --extra monitoring
+uv run --frozen --extra monitoring python -m gymemu.workspace \
+  --entity tsilva --project gymemu-Breakout-Atari2600-v0
+```
+
+The declaration is `configs/monitoring/workspace.json`. Re-running updates the same
+managed view. Existing personal views are separate. Old runs retain their original
+metrics in the Legacy runs accordion; they cannot gain new diagnostics retroactively.
 
 W&B files live in `<output>/wandb/`. To upload an offline run later, use
 `uv run wandb sync <output>/wandb/offline-run-...` with its actual directory name.
@@ -727,7 +767,13 @@ training objective when remaining sequence lengths differ. Bootstrap has zero RG
 history and no game action. Both standard and cached loaders preserve this alignment.
 
 This recipe uses batch size 8 and disables compilation initially to limit rollout
-memory and compilation costs. These settings have not been benchmarked for throughput.
+memory and compilation costs. `recipe=breakout_autoregressive_fast` is the explicit
+throughput variant, using compilation, a tuned larger batch, and bf16 feedback
+histories. Both retain the same full-resolution targets, rollout
+curriculum, objective, and diagnostic frequency. The larger batch changes the
+optimization trajectory and number of updates per epoch. See
+[performance measurements](performance.md#autoregressive-training) before comparing
+throughput or training quality.
 Training loss is a sequence objective; checkpoint selection and held-out comparison
 remain float32 one-step RGB MSE on the same recorded targets as other approaches.
 The ordinary player and checkpoint contract remain unchanged. Better collision
@@ -735,4 +781,21 @@ recovery must be checked in held-out recursive playback; it is not guaranteed.
 
 ```bash
 uv run python train.py recipe=breakout_autoregressive_ball_region r2.enabled=false
+```
+
+Use `approach.options.feedback_dtype=autocast` in the fast recipe to retain generated
+history in the active mixed-precision dtype. Loss reduction remains float32, and
+feedback remains differentiable. Float32 evaluation/playback use the original model
+arithmetic. Old recipes default to float32 history. Compilation may change numerical
+rounding; sampled activation diagnostics run eagerly to avoid recompiling whenever
+hooks are installed. Scalar health statistics transfer together at reporting time;
+every-update gradient norms and the existing collapse signals remain enabled.
+The fast recipe sets `trainer.compile_layout_optimization=false` to retain the
+reference convolution layouts. Automatic layout conversion and factored action
+inputs were faster in pilot tests but changed gradients substantially on a trained
+eight-step diagnostic batch; neither is enabled in this recipe.
+
+```bash
+uv run python train.py recipe=breakout_autoregressive_fast \
+  trainer.frame_cache=data/breakout-676ff638-lz4
 ```

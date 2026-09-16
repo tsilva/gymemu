@@ -19,6 +19,7 @@ def tracking_config(snapshot, output, approach="direct"):
     cfg.output = str(output)
     cfg.wandb.mode = "offline"
     cfg.r2.enabled = False
+    cfg.trainer.diagnostics.enabled = False
     return cfg
 
 
@@ -148,3 +149,14 @@ def test_real_offline_sdk_handles_sequential_direct_and_latent_runs(
         output = train(tracking_config(snapshot, tmp_path / approach, approach))
         assert len(list((output / "wandb").glob("offline-run-*/run-*.wandb"))) == 1
         assert (output / "summary.json").is_file()
+
+
+def test_real_offline_diagnostics_have_explicit_axes_and_media(snapshot, tmp_path):
+    cfg = tracking_config(snapshot, tmp_path / "diagnostics", "latent")
+    cfg.trainer.diagnostics.enabled = True
+    cfg.trainer.diagnostics.horizon = 4
+    output = train(cfg)
+    records = [json.loads(line) for line in (output / "diagnostics.jsonl").read_text().splitlines()]
+    assert {record["train/stage"] for record in records} == {"representation", "dynamics"}
+    assert any("probe/mse/h1" in record for record in records)
+    assert list((output / "wandb").glob("offline-run-*/files/media/images/probe/*"))

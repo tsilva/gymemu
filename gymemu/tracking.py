@@ -1,7 +1,10 @@
 """Optional W&B logging for the shared runner, with one run across all stages."""
 
+import json
 import re
 from contextlib import contextmanager
+
+from gymemu.metrics import SCHEMA_VERSION, validate_metrics
 
 
 def project_name(config):
@@ -27,6 +30,24 @@ class Tracker:
     def __init__(self, run=None):
         self.run = run
 
+    def log_diagnostics(self, metrics, output, media_path=None):
+        validate_metrics(metrics)
+        # Keep the same scalar evidence when W&B is disabled.
+        with (output / "diagnostics.jsonl").open("a") as stream:
+            stream.write(json.dumps(metrics) + "\n")
+        if self.run is not None:
+            payload = dict(metrics)
+            if media_path is not None and media_path.exists():
+                import wandb
+
+                payload["probe/frames"] = wandb.Image(
+                    str(media_path),
+                    caption=(
+                        "Target above prediction. Rows are fixed starts; columns advance in time."
+                    ),
+                )
+            self.run.log(payload)
+
     def log_epoch(self, record, *, optimizer_steps, train_samples_seen, learning_rate, final):
         if self.run is None:
             return
@@ -46,7 +67,17 @@ class Tracker:
         metrics.update(
             {f"{prefix}/curriculum/{key}": value for key, value in record["curriculum"].items()}
         )
+        metrics.update(
+            {
+                "train/step": optimizer_steps,
+                "eval/step": optimizer_steps,
+                f"train/{record['stage']}/loss/epoch": record["train"]["loss"],
+                f"eval/{record['stage']}/loss": record["validation"]["loss"],
+                "train/rate": record["train"]["samples"] / record["train"]["seconds"],
+            }
+        )
         if final:
+            metrics["eval/mse"] = record["validation"]["mse"]
             metrics["evaluation/next_frame_rgb_mse"] = record["validation"]["mse"]
         self.run.log(metrics)
 
@@ -78,12 +109,18 @@ def track_run(config, output, *, evaluation, parameters, training_examples, reci
     try:
         run.config.update(
             {
+                "metrics_schema_version": SCHEMA_VERSION,
                 "evaluation": evaluation,
                 "parameters": parameters,
                 "training_examples": training_examples,
                 "recipe_sha256": recipe_sha256,
             }
         )
+        run.define_metric("train/step")
+        run.define_metric("eval/step")
+        run.define_metric("train/*", step_metric="train/step", summary="last")
+        run.define_metric("probe/*", step_metric="train/step", summary="last")
+        run.define_metric("eval/*", step_metric="eval/step", summary="last")
         run.define_metric("optimizer_steps")
         run.define_metric("stages/*", step_metric="optimizer_steps")
         run.define_metric(
