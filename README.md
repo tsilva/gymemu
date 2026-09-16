@@ -67,7 +67,8 @@ Omitting the checkpoint opens a navigator for local runs under `runs/` and publi
 R2 runs. Select an
 environment ID, a training run, and a checkpoint to open the paused player. Use
 `--runs-dir /path/to/runs` to browse another directory. The navigator supports
-filtering, breadcrumbs, browser Back, and Refresh for newly saved checkpoints.
+expandable Search with a clear-and-close button, breadcrumbs, browser Back, and
+a Refresh icon for newly saved checkpoints.
 R2 checkpoints download with their saved starting scene when selected; retained
 versions appear in the checkpoint list. Use `--local-only` to browse offline.
 The player's **Checkpoints** link returns to the selected run. Runs without saved
@@ -167,9 +168,10 @@ The gear contains play/pause, reset, step navigation, and action controls. Playb
 controls live in settings rather than a dashboard widget, including in saved layouts.
 All three frame panels reserve the same footer height to keep the images aligned.
 The difference footer shows current RGB MSE, independent of display gain. Diagnostics
-charts every measured transition in the current episode: hover for a vertical cursor
-and value, click to select that step in the player, drag to zoom, or double-click to
-reset zoom. The playbar shows the shared zoom range with adjustable handles. While zoomed,
+charts every measured transition on a labeled Step X axis. Hover moves a shared
+cursor across all charts and shows tooltips with the nearest recorded step, metric
+label, and value. Drag to zoom; a single click resets an active zoom. When fully
+zoomed out, click a point to select that step in the player. The playbar shows the shared zoom range with adjustable handles. While zoomed,
 Diagnostics also shows the segment selector beneath the charts. Drag either bracket
 or use its arrow keys to resize the range without moving the playback cursor.
 Seeking preserves measurements;
@@ -193,7 +195,7 @@ from left to right. The signed RGB difference uses gray for zero,
 brighter channels for positive differences, and darker channels for negative ones.
 Every step uses recorded RGB history, executed actions, and any required auxiliary
 state. Space steps, Tab plays or pauses, R restarts the episode, and C selects the
-next episode. Replay pauses at episode end. The timeline shows the frame position; the metrics widgets show
+next episode. Replay pauses at episode end. The timeline ends at the furthest generated frame, keeping the scrubber at the end as new frames arrive. Scrubbing backward preserves that range. The metrics widgets show
 recorded action and float32 RGB MSE. The Input history widget shows the recorded inputs.
 Replay starts with the real initial frame and predicts transitions only.
 
@@ -413,3 +415,9 @@ and auxiliary ball-region loss at every valid step. Gradients flow through predi
 frames. Episode endings mask unavailable targets; the direct baseline and held-out
 one-step RGB metric are unchanged. See [the training guide](docs/training.md#differentiable-autoregressive-training)
 for configuration and memory costs.
+
+For generated rollouts with gradients limited to each prediction, use
+`recipe=breakout_detached`. It keeps the per-step losses and detaches the entire history
+before each forward pass. `recipe=breakout_detached_fast` selects the measured Beast-3
+execution settings. See [detached rollout training](docs/training.md#detached-rollout-training)
+for the full experiment and [throughput measurements](docs/performance.md#detached-rollout-training).

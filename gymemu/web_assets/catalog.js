@@ -80,7 +80,8 @@ function render() {
   $('#catalog-title').textContent = title;
   document.title = `${title} · Gymemu`;
   $('#catalog-description').textContent = run ? `${run.name} · ${run.approach}` : env ? env.id : 'Choose an environment to browse its training runs.';
-  $('#search').placeholder = `Filter ${title.toLowerCase()}…`;
+  $('#search').placeholder = `Search ${title.toLowerCase()}`;
+  $('#search').setAttribute('aria-label', $('#search').placeholder);
   const columns = run ? ['Checkpoint', 'Source', 'Size', 'Saved'] : env ? ['Training run', 'Source', 'Approach', 'Checkpoints', 'Latest save'] : ['Environment ID', 'Training runs', 'Checkpoints'];
   const heading = document.createElement('tr');
   for (const label of columns) { const th = document.createElement('th'); th.scope = 'col'; th.textContent = label; heading.append(th); }
@@ -112,11 +113,19 @@ function render() {
   const warnings = $('#catalog-warnings ul'); warnings.replaceChildren();
   for (const warning of catalog.warnings) { const li = document.createElement('li'); li.textContent = warning; warnings.append(li); }
 }
+function setRefreshing(refreshing) {
+  const button = $('#refresh');
+  button.disabled = refreshing || loading;
+  button.classList.toggle('refreshing', refreshing);
+  button.setAttribute('aria-label', refreshing ? 'Refreshing' : 'Refresh');
+  button.setAttribute('aria-busy', String(refreshing));
+  button.title = refreshing ? 'Refreshing this list' : 'Refresh this list';
+}
 let requestId = 0;
 async function refresh(reload = true) {
   const currentRequest = ++requestId;
   if (loading) return;
-  $('#refresh').disabled = true;
+  setRefreshing(true);
   $('#catalog-status').hidden = false; $('#catalog-status').textContent = 'Loading runs…';
   showError('');
   try {
@@ -129,10 +138,19 @@ async function refresh(reload = true) {
     catalog = result; render();
   }
   catch (error) { if(currentRequest === requestId) { showError(error.message); $('#catalog-status').hidden = true; } }
-  finally { if(currentRequest === requestId) $('#refresh').disabled = false; }
+  finally { if(currentRequest === requestId) setRefreshing(false); }
 }
 $('.app-wordmark').href = route();
 $('#search').oninput = render;
+$('#search-disclosure').addEventListener('toggle', () => {
+  if ($('#search-disclosure').open) requestAnimationFrame(() => $('#search').focus({ preventScroll: true }));
+});
+$('#search-close').onclick = () => {
+  $('#search-disclosure').open = false;
+  $('#search').value = '';
+  render();
+  $('#search-disclosure summary').focus();
+};
 $('#refresh').onclick = () => refresh(true);
 window.addEventListener('popstate', () => { $('#search').value = ''; refresh(false); });
 if (!token) { $('#catalog-status').hidden = true; showError('Open the complete navigator URL printed in your terminal.'); }

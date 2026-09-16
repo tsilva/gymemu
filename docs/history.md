@@ -106,3 +106,111 @@ that the paper's results transfer to Breakout or that missing state becomes obse
 The 80% ceiling, two-epoch warmup, and six-epoch ramp are tunable starting choices.
 Evaluate recorded-context prediction and generated rollouts separately; lower held-out
 pixel MSE alone cannot establish improved ball survival or collision behavior.
+
+## Gradient clipping at the horizon-8 transition, 2026-09-16
+
+A bounded experiment started from the completed horizon-4 checkpoint of
+`gymemu-ar-fast-20260916-125818`. The checkpoint contains weights but no optimizer state,
+so each arm used fresh Adam at learning rate 0.001. This was a matched weight restart,
+not an exact continuation of the original optimizer trajectory.
+
+The six arms compared no clipping with global L2 caps of 1.0 and 0.1 on two matched
+training-batch sequences, seeds 47 and 48. Each ran 1,000 horizon-8 updates with batch
+size 32 and CUDA bf16. All arms used eager execution and the same frozen source as
+the original run. Evaluation used float32 on 512 fixed held-out one-step targets and
+31 fixed held-out starts with up to 32 autoregressive predictions each. This diagnostic
+subset does not replace full held-out evaluation. The repeats share one trained
+checkpoint; they are not independent model-training seeds.
+
+Final rollout RGB MSE changes relative to each matched no-clipping control:
+
+| Global norm cap | Batch seed 47 | Batch seed 48 |
+| --- | ---: | ---: |
+| 1.0 | +7.1% | +879.9% |
+| 0.1 | +558.2% | -85.5% |
+
+Positive changes mean worse predictions. All six final models had worse rollout MSE
+than the starting checkpoint. Cap 1.0 clipped 1.5% and 28.2% of updates; cap 0.1 clipped
+14.1% and 6.1%. Raw gradients were measured before clipping, and every clipped update
+passed its post-clipping norm bound. Initial losses, raw gradients, and Adam update
+norms matched exactly across arms sharing a batch sequence.
+
+Clipping alone did not reliably stabilize this short weight-restart experiment.
+The result does not rule out another threshold or clipping combined with a lower
+learning rate, and does not establish why a clipped trajectory deteriorated.
+Fresh optimizer state and the short horizon-8 training budget limit transfer to the
+original run. A lower-learning-rate comparison from the same checkpoint is a next
+experiment, not a validated remedy.
+
+The [W&B report](https://wandb.ai/tsilva/gymemu-Breakout-Atari2600-v0/reports/Horizon-changes-and-gradient-instability---AR-fast--VmlldzoxNzk0NjQ4Nw==)
+contains all six runs and their evaluation curves. Local artifacts are under
+`runs/clip-ablation-20260916/`, including the harness, source archive, fixed sample
+indices, metrics, optimizer states, and checkpoints. The source checkpoint SHA-256 is
+`9a563ae1eccc435c91caf314843730fcdb7d8312f00bfc0537140a7bcbac69e9`.
+The original run was stopped with explicit user approval after preserving its latest
+checkpoint separately; neither original checkpoint was modified by the experiment.
+
+## Detached feedback at the horizon-8 transition, 2026-09-16
+
+A subsequent matched experiment changed only whether gradients crossed generated
+feedback. Both arms used fully generated histories, the same per-step RGB and
+ball-region losses averaged over valid steps, and horizon 8. The detached arm detached
+the entire history before every forward pass; each current prediction retained its own
+loss graph. No clipping was applied. This differs from the scheduled-sampling recipe,
+which mixes recorded and generated history and supervises only the final prediction.
+
+The same completed horizon-4 checkpoint, fresh Adam at 0.001, batch size 32, CUDA bf16,
+eager execution, paired batch sequences 47 and 48, and 1,000-update budget were used.
+Evaluation reused the clipping study's fixed held-out targets and float32 metrics.
+These are two batch-sequence repeats from one checkpoint, not independent training seeds.
+
+Before any updates, four training batches were tested at horizons 1, 2, 4 and 8 in bf16
+and float32. Predicted frames and losses were exactly identical between full and detached
+feedback within each precision. Horizon-1 gradients matched exactly. The full-loss
+harness also matched native loss and gradients on the first batch at every horizon.
+At horizon 8, full/detached gradient-norm ratios ranged from 2.64–22.60 in bf16 and
+3.36–35.11 in float32. This isolates gradient amplification through feedback on those
+batches; it does not show that every instability comes from that mechanism.
+
+| Batch seed | Feedback gradients | Final rollout RGB MSE | Final one-step MSE | Peak gradient norm |
+| --- | --- | ---: | ---: | ---: |
+| 47 | Full | 0.00334863 | 0.00074026 | 10.4588 |
+| 47 | Detached | 0.00198216 | 0.00014035 | 0.01335 |
+| 48 | Full | 0.01726577 | 0.00895711 | 356.3761 |
+| 48 | Detached | 0.00198282 | 0.00013461 | 0.01391 |
+
+Detached feedback reduced final rollout MSE by 40.8% and 88.5% versus its matched
+controls. Both detached models improved about 9.5% over the starting rollout MSE
+of 0.00219142. Ball-region rollout MSE also improved, to about 0.00821 in both repeats.
+The result supports detached feedback for a longer follow-up experiment; it does not
+establish long-run stability, full-held-out superiority, or playable ball dynamics.
+Cutting feedback gradients also removes credit assignment from later losses to earlier
+predictions. Fresh optimizer state remains a limitation of this weight-restart study.
+
+The existing W&B report includes the four runs. Artifacts are preserved under
+`runs/detach-ablation-20260916/`: the harness, frozen-gradient comparisons, sample indices,
+runtime provenance, metrics, checkpoints and optimizer states. The production training
+implementation and direct baseline were not changed.
+
+## Detached execution recipe qualification, 2026-09-16
+
+The detached objective is now available as `recipe=breakout_detached`, with full
+generated history and an explicit saved `detach_feedback` setting. Its full-run
+curriculum is 1, 2, 4, then 8 steps over ten epochs. Existing autoregressive recipes
+retain full feedback gradients, and the direct reference remains unchanged.
+
+`recipe=breakout_detached_fast` selects batch 64, automatic compiler layout optimization,
+and factored action inputs. A Beast-3 RTX 4090 benchmark measured 1,795 windows/s at
+horizon 8, versus 1,251 for the compiled batch-32 reference. All seven long benchmark
+variants used the same sample order and retained health/probe instrumentation. See
+[performance details](performance.md#detached-rollout-training) for the full matrix,
+numerical differences, memory use, and timing exclusions.
+
+A matched continuation check processed 32,000 training windows per arm from the same
+horizon-4 checkpoint with fresh Adam. Across two batch sequences, fast rollout MSE was
+1.5% lower and 2.4% higher than eager detached training; peak gradient norms stayed below
+0.005 in all four arms. These are short stability checks, not evidence of long-run
+quality equivalence. The compiled CUDA train/save/reload/playback smoke passed all four
+curriculum horizons. The full ten-epoch run was prepared but not started during this
+qualification. Artifacts and the staged-source launch manifest are under
+`runs/detached-throughput-20260916/`.

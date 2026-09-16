@@ -76,7 +76,9 @@ Stage checkpoints use `start-scene.npz` from the run directory. Selecting a
 checkpoint loads it into the existing player in paused mode; the **Checkpoints**
 link returns to the catalog. Only one checkpoint is active per navigator server.
 
-Use the filter at each level or the breadcrumbs and browser Back to navigate.
+Open Search at each level to filter the list. The field focuses automatically;
+the × button clears and closes it. Use the breadcrumbs and browser Back to navigate.
+The Refresh icon spins and stays disabled while the list reloads.
 Refresh discovers new files. Runs without checkpoints display an empty state;
 unreadable runs display a notice. Older runs missing `config.json` use safely loaded
 checkpoint metadata for their environment ID, with **Unknown environment** when no
@@ -573,14 +575,16 @@ Original and Prediction show frames without footer labels or expand buttons; the
 difference widget retains its gain control, current RGB MSE, and legend. Add widget creates a metric widget;
 its menu supports editing the title, selecting metrics, duplicating, and deleting
 custom instances. The error chart keeps all measured transitions in the current episode, sorted by
-timestep. Hover shows a vertical cursor and MSE; clicking a point pauses and selects
-the same target in both tabs and the playbar. Drag horizontally to zoom and double-click
-to reset, or use Reset zoom in the playbar. While zoomed, Diagnostics also shows a segment selector beneath the charts.
+timestep, with labeled Step X axes. Hover moves a synchronized cursor across every
+chart; tooltips show the nearest recorded step, metric label, and value. Drag
+horizontally to zoom. A single click resets an active zoom without seeking. When
+fully zoomed out, clicking a point pauses and selects the same target in both tabs
+and the playbar. Double-click or Reset zoom also resets the range. While zoomed, Diagnostics also shows a segment selector beneath the charts.
 The playbar in both tabs highlights the shared zoom range, with handles
 that can be dragged or adjusted with arrow keys (Shift moves ten steps), Home, and End.
 On a focused chart, arrow keys or Home/End inspect points; Enter or Space selects.
 Unvisited steps remain unscored, with gaps
-rather than interpolated errors. The purple line marks the selected step; the amber
+rather than interpolated errors. The chart cursor marks the selected step until hover takes over; the amber
 line marks the hovered step. Reset, episode changes, and mode changes clear the series
 and zoom. Stale chart selections from a previous episode or reset are rejected.
 
@@ -606,8 +610,10 @@ a missing scene remains an error. Episode and starting-scene selection are in
 the playback settings panel opened by the bottom bar's gear. Play/pause, reset,
 step navigation, action buttons, and keyboard help are also in settings. Saved layouts
 automatically drop the former Playback controls widget while preserving other widgets.
-The timeline slider seeks teacher-forced targets directly using
-the aligned dataset window. Seeking pauses and preserves measured errors, replacing the value if a step is measured again.
+The timeline slider spans the initial frame through the furthest generated frame,
+so the scrubber stays at the end while generating new frames. Scrubbing backward
+preserves that range; resetting or selecting another episode clears it. The slider
+seeks teacher-forced targets directly using the aligned dataset window. Seeking pauses and preserves measured errors, replacing the value if a step is measured again.
 
 Frame images, input history, and metrics are committed together from one inference
 revision. The browser only controls and visualizes playback; Python owns all model
@@ -799,3 +805,43 @@ eight-step diagnostic batch; neither is enabled in this recipe.
 uv run python train.py recipe=breakout_autoregressive_fast \
   trainer.frame_cache=data/breakout-676ff638-lz4
 ```
+
+## Detached rollout training
+
+`recipe=breakout_detached` trains from initialization for ten epochs on the pinned
+Breakout revision `676ff6388f4218d3c3a3ce9f2f33e075fa7314a3`. It uses eight RGB history
+frames, eight action tokens, width 32, Adam at 0.001, batch size 32, and a horizon
+curriculum of 1, 2, 4, 8 in epochs 1 through 4, retaining 8 afterward. Its ball-region
+weight is 0.03. The model generates all feedback frames. It detaches the entire input
+history before each next-frame prediction and averages the losses over valid steps
+within each example, then over examples. The runner applies one optimizer update per
+batch. No gradient clipping is enabled.
+
+The recipe retains cached input loading, bf16 feedback, CUDA prefetch, compiled loss
+with the reference convolution layout, two loader workers, and two PyTorch threads.
+`recipe=breakout_detached_fast` uses batch size 64, automatic compiler layout
+optimization, and factored action inputs. It retains the same horizon curriculum,
+optimizer, loss weights, and diagnostic cadence. Consult
+[performance results](performance.md#detached-rollout-training) for its execution
+differences and limits. Compilation and alternative convolution arithmetic can change
+rounding; a larger batch also changes updates per epoch and the optimization trajectory.
+
+```bash
+uv run python train.py recipe=breakout_detached_fast --cfg job --resolve
+uv run python train.py recipe=breakout_detached_fast \
+  trainer.frame_cache=data/breakout-676ff638-lz4
+```
+
+These commands start a new full training run, not a continuation of the diagnostic
+checkpoint. Keep the recorded-context float32 held-out evaluation and generated-rollout
+probes enabled. The default diagnostics record health every 100 updates and held-out
+32-frame probes every 1,000 updates. `best.pt` is still selected by held-out one-step
+RGB MSE, so inspect rollout and ball-region metrics before choosing a playback model.
+The short detached-feedback comparison improved both batch-sequence repeats, but does
+not establish the quality or stability of this full ten-epoch experiment. See
+[the experiment evidence](history.md#detached-feedback-at-the-horizon-8-transition-2026-09-16).
+
+Checkpoint metadata and saved recipes preserve `detach_feedback`. Weights checkpoints
+do not contain Adam state; replaying a recipe restarts training and is not an exact
+optimizer resume. Use a source snapshot or image containing the new recipe when
+launching remotely; the earlier verified container image alone does not contain it.

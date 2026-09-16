@@ -1,0 +1,9 @@
+# @package _global_
+# Generated feedback, per-step losses, and no gradients through earlier predictions.
+defaults:
+  - breakout_autoregressive_fast
+  - _self_
+name: breakout-detached
+approach:
+  options:
+    detach_feedback: true

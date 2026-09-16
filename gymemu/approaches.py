@@ -389,7 +389,7 @@ class ScheduledBallRegionApproach(ScheduledSamplingApproach, BallRegionApproach)
 
 
 class AutoregressiveBallRegionApproach(BallRegionApproach):
-    """Supervise every future frame, differentiating through RGB feedback."""
+    """Supervise every future frame with optional gradients through RGB feedback."""
 
     def __init__(
         self,
@@ -401,12 +401,16 @@ class AutoregressiveBallRegionApproach(BallRegionApproach):
         rollout_steps,
         rollout_schedule=None,
         feedback_dtype="fp32",
+        detach_feedback=False,
         **options,
     ):
         super().__init__(spec, history, actions, shape, **options)
         if feedback_dtype not in ("fp32", "autocast"):
             raise ValueError("feedback_dtype must be fp32 or autocast")
         self.feedback_dtype = feedback_dtype
+        if type(detach_feedback) is not bool:
+            raise ValueError("detach_feedback must be boolean")
+        self.detach_feedback = detach_feedback
         if type(rollout_steps) is not int or rollout_steps < 1:
             raise ValueError("rollout_steps must be a positive integer")
         schedule = list(rollout_schedule) if rollout_schedule is not None else [rollout_steps]
@@ -436,6 +440,9 @@ class AutoregressiveBallRegionApproach(BallRegionApproach):
         total = history.new_zeros(len(history), dtype=torch.float32)
         counts = torch.zeros_like(total)
         for step in range(self.active_steps):
+            if self.detach_feedback:
+                # Keep generated values, but cut every earlier prediction's graph.
+                context = context.detach()
             tokens = action[:, step]
             valid = tokens[:, -1] >= 0
             tokens = tokens.clamp_min(0)
@@ -445,7 +452,7 @@ class AutoregressiveBallRegionApproach(BallRegionApproach):
                 prediction, target[:, step], valid=valid, reduction="none"
             )
             counts = counts + valid
-            # No detach: later losses differentiate through all earlier predictions.
+            # The next iteration decides whether later losses cross this feedback.
             context = torch.cat((context[:, 1:], prediction[:, None].to(context.dtype)), dim=1)
         # Each sampled start has equal weight, independent of its remaining episode length.
         return (total / counts.clamp_min(1)).mean()

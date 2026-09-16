@@ -33,7 +33,8 @@ export function mount({ definition, services }) {
     grid.querySelectorAll('figure').forEach(figure => figure.classList.remove('history-dragging', 'history-drop-target'));
   }
   function updateControls() {
-    note.textContent = !supported() ? 'Restart the player to enable history reordering.' : pending ? 'Predicting reordered history…' : !current.has_prediction ? 'Predict a frame to edit its history.' : current.playing ? 'Pause to edit or reorder history.' : current.history_reordered || current.history_edited_frames?.length ? 'Modified RGB history · Scrubbing or stepping restores the original.' : 'Drag to reorder · Use the pencil to paint pixels · Alt + arrows move frames.';
+    note.textContent = !supported() ? 'Restart the player to enable history reordering.' : pending ? 'Predicting reordered history…' : !current.has_prediction ? 'Predict a frame to edit its history.' : current.playing ? 'Pause to edit or reorder history.' : current.history_reordered || current.history_edited_frames?.length ? 'Modified RGB history · Scrubbing or stepping restores the original.' : '';
+    note.hidden = !note.textContent;
     grid.querySelectorAll('figure').forEach(figure => {
       figure.tabIndex = enabled() ? 0 : -1;
       figure.dataset.reorderEnabled = String(enabled());
