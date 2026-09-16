@@ -895,3 +895,47 @@ do not contain Adam state; replaying a recipe restarts training and is not an ex
 optimizer resume; use `--resume resume.pt` for new runs with full training checkpoints.
 Use a source snapshot or image containing the new recipe when
 launching remotely; the earlier verified container image alone does not contain it.
+
+## Linear ball-position probes
+
+`probe_ball_latents.py` fits two independent affine readouts of a frozen
+checkpoint's complete final encoder feature map: current ball position (last
+recorded input frame) and next ball position (the prediction target). The input
+includes the checkpoint's action history. It uses recorded native state labels,
+not coordinates inferred from predicted images. Missing reset labels and the
+native `ball_y=0` sentinel are excluded from fitting and scoring; occluded balls
+with recorded coordinates remain included.
+
+```bash
+uv run python probe_ball_latents.py CHECKPOINT \
+  --dataset /path/to/pinned/dataset/snapshot \
+  --frame-cache /path/to/verified/frame-cache \
+  --output logs/ball-position-probe --device cuda
+```
+
+The default experiment streams every training window twice and every held-out
+window once; features are not retained as a large matrix. Train-only feature
+normalization is fixed before fitting. The two output pairs share an inference
+pass but have independent linear coefficients and target masks. Encoder weights
+remain frozen in evaluation mode, and extraction uses float32 inference. Saved
+artifacts include the checkpoint hash, episode IDs, normalization, readout weights,
+training curve, and held-out MAE, RMSE, R², distance quantiles and baseline scores.
+
+Errors use native coordinate units: normalized X multiplied by 160 and normalized
+Y multiplied by 255. These are not claimed to be rendered sprite-center errors.
+Mean-position baselines use training labels only. Persistence and constant-velocity
+baselines use ground-truth past positions, so they are privileged references, not
+image-only competitors; comparisons use matching valid subsets. The script uses a
+fixed Adam schedule, not a closed-form least-squares optimum. Weak results can
+reflect optimization or nonlinear encoding; good results establish linear
+decodability, not causal use of ball information by the original decoder. These
+are recorded-history probes; they do not establish decodability from corrupted
+autoregressive histories.
+
+`--resume PATH` continues after the last completed probe pass, keeping the saved
+feature normalization and linear weights. New probe bundles also save optimizer
+state. Continuing an older weights-only bundle initializes a fresh optimizer and
+records that fact in the manifest. Incomplete passes are repeated. Checkpoint
+writes are atomic. The report also compares next-position predictions against
+reusing the current readout, and scores the displacement obtained by subtracting
+the two readouts.
