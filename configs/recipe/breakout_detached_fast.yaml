@@ -1,0 +1,11 @@
+# @package _global_
+# Beast-3 throughput variant; measured settings are documented in docs/performance.md.
+defaults:
+  - breakout_detached
+  - _self_
+name: breakout-detached-fast
+model:
+  factor_actions: true
+trainer:
+  batch_size: 64
+  compile_layout_optimization: true

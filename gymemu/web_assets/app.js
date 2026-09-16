@@ -30,7 +30,7 @@ $('.timeline').hidden = !isPlayer;
 $('.timeline-actions').hidden = !isPlayer;
 const workspaceChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('gymemu-player-workspace') : null;
 let workspace = loadWorkspace(), snapshot = null, bitmaps = {}, active = true, syncing = false, pendingCommand = Promise.resolve();
-let runtime, grid, toastTimer, saveTimer, chartRange = null, scrubbing = false;
+let runtime, grid, toastTimer, saveTimer, chartRange = null, chartHoverStep = null, scrubbing = false;
 let rangeRevision = {clock:0,writer:''};
 const RANGE_KEY = 'gymemu-chart-range';
 const chartIdentity = s => s ? [s.checkpoint,s.generation || 0,s.mode,s.selection,s.history_epoch].join(':') : null;
@@ -50,25 +50,29 @@ function command(value) {
   pendingCommand = pendingCommand.then(() => request('/api/command',{method:'POST',body:JSON.stringify(value)})).catch(error => { showToast(error.message); return {error:error.message}; });
   return pendingCommand;
 }
+function setChartHoverStep(step) {
+  chartHoverStep = Number.isFinite(step) ? step : null;
+  if(snapshot) runtime?.renderSnapshot(snapshot,{bitmaps,chartRange,chartHoverStep});
+}
 function renderChartRange() {
   const band=$('#timeline-zoom-band'), label=$('#timeline-zoom');
   $('.timeline').hidden = !isPlayer && !chartRange;
   document.body.classList.toggle('has-chart-range',Boolean(chartRange));
   band.hidden=label.hidden=!chartRange;
   if(chartRange && snapshot) {
-    const total=Math.max(1,snapshot.total_steps);
+    const total=Math.max(1,timelineEnd(snapshot));
     band.style.left=(100*chartRange.first/total)+'%';
     band.style.width=(100*(chartRange.last-chartRange.first)/total)+'%';
     label.textContent='Steps '+chartRange.first+'–'+chartRange.last+' · Reset zoom';
     for(const handle of band.querySelectorAll('.timeline-range-handle')) {
       const first=handle.dataset.edge==='first';
       handle.setAttribute('aria-valuemin',first?0:chartRange.first+1);
-      handle.setAttribute('aria-valuemax',first?chartRange.last-1:snapshot.total_steps);
+      handle.setAttribute('aria-valuemax',first?chartRange.last-1:timelineEnd(snapshot));
       handle.setAttribute('aria-valuenow',chartRange[handle.dataset.edge]);
       handle.setAttribute('aria-valuetext','Step '+chartRange[handle.dataset.edge]);
     }
   }
-  if(snapshot) runtime?.renderSnapshot(snapshot,{bitmaps,chartRange});
+  if(snapshot) runtime?.renderSnapshot(snapshot,{bitmaps,chartRange,chartHoverStep});
 }
 function rangeMessage() {return {type:'chart-range',identity:chartIdentity(snapshot),range:chartRange,revision:rangeRevision};}
 function setChartRange(range) {
@@ -81,7 +85,7 @@ function setChartRange(range) {
 function receiveRange(message) {
   if(message.identity!==chartIdentity(snapshot) || compareWorkspaceRevisions(message.revision,rangeRevision)<=0) return;
   const range=message.range;
-  if(range && (!Number.isInteger(range.first)||!Number.isInteger(range.last)||range.first<0||range.last>snapshot.total_steps||range.first>=range.last)) return;
+  if(range && (!Number.isInteger(range.first)||!Number.isInteger(range.last)||range.first<0||range.last>timelineEnd(snapshot)||range.first>=range.last)) return;
   rangeRevision=message.revision;chartRange=range;renderChartRange();
 }
 function inspectStep(step, episodeId, historyEpoch) {
@@ -115,7 +119,7 @@ async function syncWorkspace() {
   try { await runtime.sync(workspace,windowId); }
   finally { syncing=false; }
   shelf();
-  if(snapshot) runtime.renderSnapshot(snapshot,{bitmaps,chartRange});
+  if(snapshot) runtime.renderSnapshot(snapshot,{bitmaps,chartRange,chartHoverStep});
 }
 async function updatePanel(id,value) {
   Object.assign(workspace.panels[id],value); await syncWorkspace(); persist();
@@ -168,6 +172,9 @@ const settingsDialog=$('#playback-settings'), settingsToggle=$('#playback-settin
 settingsToggle.onclick=()=>{settingsDialog.showModal();settingsToggle.setAttribute('aria-expanded','true');};
 $('#playback-settings-close').onclick=()=>settingsDialog.close();
 settingsDialog.addEventListener('close',()=>{settingsToggle.setAttribute('aria-expanded','false');settingsToggle.focus();});
+function timelineEnd(s) {
+  return (s.history || []).reduce((last, point) => Math.max(last, point.step), s.step || 0);
+}
 function timelinePosition(s, step=s.step) {
   const name=s.mode==='teacher-forcing' ? `EPISODE ${s.selection}` : s.name.toUpperCase();
   return `${name} · STEP ${step}${s.finished&&step===s.step?' · END':''}`;
@@ -176,7 +183,7 @@ function updateScrubberProgress(slider) {
   slider.style.setProperty('--timeline-progress',`${Number(slider.max)>0?100*Number(slider.value)/Number(slider.max):0}%`);
 }
 $('#timeline-zoom').onclick=()=>setChartRange(null);
-bindTimelineRange($('#timeline-zoom-band'),()=>snapshot?{first:0,last:snapshot.total_steps}:null,()=>chartRange,setChartRange);
+bindTimelineRange($('#timeline-zoom-band'),()=>snapshot?{first:0,last:timelineEnd(snapshot)}:null,()=>chartRange,setChartRange);
 $('#timeline-scrubber').addEventListener('pointerdown',()=>{scrubbing=true;});
 for(const name of ['pointerup','pointercancel']) document.addEventListener(name,()=>{scrubbing=false;});
 $('#timeline-scrubber').oninput=()=>{ $('#position').textContent=timelinePosition(snapshot,Number($('#timeline-scrubber').value));updateScrubberProgress($('#timeline-scrubber')); };
@@ -208,7 +215,7 @@ function chrome(s) {
   $('#reset-playback').disabled=Boolean(s.loading);settingsToggle.disabled=Boolean(s.loading);
   previousStep.disabled=s.mode!=='teacher-forcing'||s.step===0||Boolean(s.loading);
   playbackSettings.render(s);
-  const slider=$('#timeline-scrubber');slider.disabled=s.mode!=='teacher-forcing'||Boolean(s.loading);slider.max=s.total_steps||0;if(!scrubbing) slider.value=s.step;
+  const slider=$('#timeline-scrubber');slider.disabled=s.mode!=='teacher-forcing'||Boolean(s.loading);slider.max=timelineEnd(s);if(!scrubbing) slider.value=s.step;
   updateScrubberProgress(slider);
 }
 async function decode(images) {
@@ -223,7 +230,7 @@ async function boot() {
     grid=window.GridStack.init({alwaysShowResizeHandle:true,animate:false,cellHeight:32,column:12,columnOpts:{breakpointForWindow:true,breakpoints:[{w:640,c:1},{w:960,c:6}]},draggable:{handle:'.panel-drag',scroll:true},float:false,margin:5,maxRow:240,resizable:{handles:'se'}},$('#dashboard'));
     grid.on('change',(_event,nodes)=>{if(syncing)return;nodes.forEach(node=>{const p=workspace.panels[node.id];if(p && grid.getColumn()===12) for(const key of ['x','y','w','h']) p.placement[key]=node[key];});persist();});
   }
-  runtime=new PanelRuntime({definitionFor:panelDefinition,container:$('#dashboard'),services:{getState:()=>snapshot,command,inspectStep,setChartRange,showToast,updatePanel},
+  runtime=new PanelRuntime({definitionFor:panelDefinition,container:$('#dashboard'),services:{getState:()=>snapshot,command,inspectStep,setChartRange,setChartHoverStep,showToast,updatePanel},
     onMount:(element,id,_definition,item)=>{
       if(grid) grid.makeWidget(item,placement(id));
       else {item.style.order=['original','prediction','difference'].indexOf(id);element.querySelector('.panel-drag').remove();}
@@ -273,11 +280,11 @@ async function boot() {
         const changed=chartIdentity(snapshot)!==chartIdentity(next);
         bitmaps=decoded;snapshot=next;revision=next.revision;
         if(changed) {
-          chartRange=null;rangeRevision={clock:0,writer:''};renderChartRange();
+          chartHoverStep=null;chartRange=null;rangeRevision={clock:0,writer:''};renderChartRange();
           try {const saved=JSON.parse(localStorage.getItem(RANGE_KEY));if(saved)receiveRange(saved);} catch { /* Ignore unavailable storage. */ }
           workspaceChannel?.postMessage({type:'request-chart-range'});
         }
-        chrome(next);runtime.renderSnapshot(next,{bitmaps,chartRange});
+        chrome(next);runtime.renderSnapshot(next,{bitmaps,chartRange,chartHoverStep});
         document.body.dataset.revision=String(next.revision);
         if(next.error) showToast(next.error);
       }

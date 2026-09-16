@@ -31,8 +31,9 @@ test('timeline zoom handles cannot cross or leave the episode',()=>{
   assert.deepEqual(resizeChartRange(range,episode,'last',200),{first:10,last:100});
 });
 
-test('zoom drag suppresses seeking and double-click resets the range',()=>{
+test('zoom drag suppresses seeking and a single click resets the range',()=>{
   const listeners=new Map(),ranges=[];
+  let chartRange=null;
   const oldDocument=globalThis.document;
   globalThis.document={createElement:()=>({style:{},hidden:false})};
   const canvas={style:{},clientWidth:200,offsetLeft:0,offsetTop:0,
@@ -42,7 +43,7 @@ test('zoom drag suppresses seeking and double-click resets the range',()=>{
     addEventListener(name,handler){listeners.set(name,handler);}};
   try {
     bindChartRange(canvas,()=>({plot:{left:0,right:200,top:0,bottom:100}}),
-      ()=>({history:[{step:1},{step:101}]}),{setChartRange:range=>ranges.push(range)});
+      ()=>({history:[{step:1},{step:101}],view:{chartRange}}),{setChartRange:range=>{chartRange=range;ranges.push(range);}});
     const event=x=>({clientX:x,button:0,pointerId:1,preventDefault(){}});
     listeners.get('pointerdown')(event(20));
     listeners.get('pointermove')(event(140));
@@ -51,7 +52,9 @@ test('zoom drag suppresses seeking and double-click resets the range',()=>{
     let suppressed=false;
     listeners.get('click')({stopImmediatePropagation(){suppressed=true;}});
     assert.equal(suppressed,true);
-    listeners.get('dblclick')(event(80));
+    suppressed=false;
+    listeners.get('click')({...event(80),stopImmediatePropagation(){suppressed=true;}});
+    assert.equal(suppressed,true);
     assert.equal(ranges.at(-1),null);
     suppressed=false;
     listeners.get('pointerdown')(event(40));

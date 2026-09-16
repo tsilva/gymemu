@@ -324,3 +324,97 @@ Use the preserved `baseline/` source to reproduce the original health collector
 exactly. A local snapshot can be selected with `--override game.dataset=/path/to/snapshot`.
 Use `--epoch 2` to measure the two-step phase, or override
 `trainer.batch_size=8` on the fast recipe to retain the original update batch size.
+
+## Detached rollout training
+
+The September 16 detached-feedback benchmark used Beast-3's RTX 4090, the pinned
+Breakout dataset and existing verified container runtime. GPU jobs ran serially;
+desktop services occupied about 2.3 GiB. Every variant used full-resolution RGB,
+history 8, horizon 8, per-step RGB and ball-region losses, and detached generated
+history. Model initialization used seed 47 and sample ordering used seed 123.
+Health statistics, activation samples, and held-out rollout probes remained enabled.
+
+An initial screen used 2,048 warmup windows and three trials of 4,096 windows each.
+Median windows per second were:
+
+| Execution | Batch size | Windows/s |
+| --- | ---: | ---: |
+| Eager, reference layout | 32 | 843 |
+| Compiled, reference layout | 32 | 1,101 |
+| Compiled, reference layout | 64 | 1,058 |
+| Compiled, reference layout | 128 | 878 |
+| Compiled, automatic layout | 32 | 1,377 |
+| Compiled, factored action inputs | 32 | 1,303 |
+| Compiled, automatic layout and factored action inputs | 32 | 1,415 |
+| Compiled, reference layout, four loader workers | 32 | 1,103 |
+
+Short trials penalize larger batches because each segment repeats ten detailed
+startup updates and an ending rollout probe. Use the longer measurements below to
+choose a batch size. Four loader workers offered no material gain over two.
+
+The longer comparison used 4,096 warmup windows and three trials of 32,768 windows
+each. All seven variants used identical sample sequences, SHA-256
+`b20a3b6dd40ef297f498dab8fbf013c5f3853c814e7bf2deef94b66ac25dbc3a`.
+
+| Execution | Batch size | Windows/s | Peak allocated GiB |
+| --- | ---: | ---: | ---: |
+| Compiled, reference layout | 32 | 1,251 | 1.95 |
+| Compiled, automatic layout | 32 | 1,657 | 1.95 |
+| Automatic layout and factored action inputs | 16 | 1,384 | 0.94 |
+| Automatic layout and factored action inputs | 32 | 1,677 | 1.80 |
+| Automatic layout and factored action inputs | 64 | **1,795** | 3.53 |
+| Automatic layout and factored action inputs | 128 | 1,750 | 6.98 |
+| Automatic layout and factored action inputs | 256 | 1,599 | 13.86 |
+
+`recipe=breakout_detached_fast` selects the fastest measured variant, batch 64 with
+automatic layout and factored inputs. It was 1.435 times as fast as the compiled
+batch-32 reference, with three trial speeds of 1,795, 1,792 and 1,797 windows/s.
+This is a measured choice among these settings, not a claim that every possible
+implementation has been exhausted. The batch change halves updates per full epoch;
+learning rate remains 0.001. Diagnostics still use their configured update cadence,
+so larger batches also process more windows between reports and probes.
+
+Reproduce the selected settings on Beast-3 with the verified cache:
+
+```bash
+uv run python benchmark_autoregressive.py \
+  --override recipe=breakout_detached_fast \
+  --override trainer.frame_cache=/workspace/frame-cache/676ff638-lz4 \
+  --epoch 4 --warmup-samples 4096 --samples 32768 --repeats 3 \
+  --out logs/detached-fast.json
+```
+
+The trained-checkpoint check used four fixed real training batches at horizon 8.
+Compared with eager detached training, compiled reference-layout loss changed by
+at most 0.33%, with minimum gradient cosine 0.984. Automatic layout changed loss
+by at most 0.68%, with minimum cosine 0.941. Factored inputs changed loss by at most
+1.05%, with minimum cosine 0.963. Combining layout conversion and factoring changed
+loss by at most 0.78%, with minimum cosine 0.943. Thus these paths preserve the
+mathematical objective but are not numerically identical. Float32 inference uses the
+original convolution path even when training factors the action inputs.
+
+A separate continuation check compared eager detached training at batch 32 with the
+selected fast recipe at batch 64. Each arm processed the same 32,000 sampled training
+windows per seed, giving 1,000 reference updates and 500 fast updates. All arms started
+from the completed horizon-4 checkpoint with fresh Adam at 0.001. Evaluation reused
+512 held-out one-step targets and 31 fixed starts with up to 32 generated steps.
+
+| Batch-sequence seed | Eager rollout MSE | Fast rollout MSE | Change |
+| --- | ---: | ---: | ---: |
+| 47 | 0.00199559 | 0.00196663 | -1.5% |
+| 48 | 0.00184779 | 0.00189265 | +2.4% |
+
+Peak gradient norms remained below 0.005 in all four arms. Fast one-step MSE improved
+in both repeats; ball-region rollout MSE changed by +4.1% and -10.1%. These small,
+mixed changes support a bounded stability check, not statistical equivalence or a
+guarantee of unchanged full-run quality. Batch size and execution arithmetic both
+changed, so this check measures the combined recipe. All repeats share one pretrained
+checkpoint. Raw quality results and the compiled CUDA curriculum/playback smoke are
+saved beside the throughput measurements.
+
+Benchmark timing includes loading, host-to-device transfer, forward/backward, Adam,
+health statistics, and local rollout probes. It excludes dataset/cache verification,
+compilation warmup, full validation, checkpoint writes, W&B and R2 uploads. Reports
+include resolved configs, sample-order hashes, peak allocated memory, runtime versions,
+and source hashes. Raw results are in `runs/detached-throughput-20260916/` locally and
+`/workspace/diagnostics/detached-throughput-20260916/` on Beast-3's persistent volume.

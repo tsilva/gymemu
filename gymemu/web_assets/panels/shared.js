@@ -201,7 +201,7 @@ export function lineCursorIndex(plot, x, pointCount) {
 }
 
 export function drawLines(canvas, series, { cursorIndex = null, steps = null, cursorStep = null, cursorLabel = null, referenceStep = null, dimBeforeStep = null, showStepTicks = false, connectGaps = true } = {}) {
-  if (steps?.length) canvas.setAttribute("aria-description", `Episode steps ${steps[0]}–${steps.at(-1)}. Drag to zoom; double-click to reset.`);
+  if (steps?.length) canvas.setAttribute("aria-description", `Episode steps ${steps[0]}–${steps.at(-1)}. Drag to zoom; click to reset zoom.`);
   const { context, ratio, width, height } = resizeCanvas(canvas);
   const chartSurface = themeColor("chartSurface");
   const chartGrid = themeColor("chartGrid");
@@ -227,7 +227,7 @@ export function drawLines(canvas, series, { cursorIndex = null, steps = null, cu
     left: Math.ceil(labelWidth) + 16,
     right: width - 12,
     top: 10,
-    bottom: height - (showStepTicks ? 28 : 10),
+    bottom: height - (showStepTicks ? 42 : 10),
   };
   context.strokeStyle = chartGrid;
   context.lineWidth = 1;
@@ -260,6 +260,12 @@ export function drawLines(canvas, series, { cursorIndex = null, steps = null, cu
       context.textAlign = index === 0 ? "left" : x > plot.right - 24 ? "right" : "center";
       context.fillText(String(tick), x, plot.bottom + 9);
     });
+  }
+  if (showStepTicks) {
+    context.strokeStyle = chartAxis;
+    context.beginPath(); context.moveTo(plot.left, plot.bottom); context.lineTo(plot.right, plot.bottom); context.stroke();
+    context.textAlign = "center"; context.textBaseline = "bottom";
+    context.fillText("Step", (plot.left + plot.right) / 2, height - 2);
   }
   const fraction = (index, count) => steps?.length > 1
     ? (steps[index] - steps[0]) / Math.max(1, steps.at(-1) - steps[0])
