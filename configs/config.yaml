@@ -12,6 +12,7 @@ name: ${game.name}-${approach.kind}
 history: 8
 seed: 47
 output: null
+resume: null
 # Saved run recipes fill this to detect changed dataset content on replay.
 expected_dataset: null
 

@@ -232,6 +232,8 @@ def test_training_replay_checkpoint_and_player(snapshot, tmp_path, cached, recip
 
 
 def test_compiled_loss_accepts_probability_updates_without_changing_contract(snapshot):
+    # Keep this gradient assertion independent of previous tests' RNG consumption.
+    torch.manual_seed(0)
     model = model_for(
         configured(
             "approach.options.schedule.warmup_epochs=0", "approach.options.schedule.ramp_epochs=2"

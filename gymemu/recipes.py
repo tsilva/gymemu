@@ -71,6 +71,7 @@ def write_recipe(path, config, template=None):
     raw = OmegaConf.to_container(template, resolve=False) if template is not None else config
     result = _freeze(raw, copy.deepcopy(config), set(config))
     result["output"] = None
+    result["resume"] = None
     result["game"]["dataset"] = config["game"]["dataset"]
     result["game"]["revision"] = config["game"]["revision"]
     # These are output-routing defaults, not inherited model/training settings.
