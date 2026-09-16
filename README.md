@@ -432,3 +432,8 @@ For generated rollouts with gradients limited to each prediction, use
 before each forward pass. `recipe=breakout_detached_fast` selects the measured Beast-3
 execution settings. See [detached rollout training](docs/training.md#detached-rollout-training)
 for the full experiment and [throughput measurements](docs/performance.md#detached-rollout-training).
+
+To measure whether ball position is linearly decodable from a frozen encoder, use
+[`probe_ball_latents.py`](probe_ball_latents.py). It fits current/next-position
+readouts on recorded training episodes and scores held-out episodes; see
+[linear ball-position probes](docs/training.md#linear-ball-position-probes).
