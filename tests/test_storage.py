@@ -77,6 +77,7 @@ def test_uploaded_checkpoint_and_scene_restore_playback(snapshot, tmp_path, fake
     assert all(bucket == "gymemu" for bucket in fake_s3.buckets)
     assert receipt["prefix"].startswith("runs/Fixture-v0/")
     assert {
+        "resume.pt",
         "best.pt",
         "last.pt",
         "latest.pt",

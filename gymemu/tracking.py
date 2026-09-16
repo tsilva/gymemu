@@ -5,6 +5,7 @@ import re
 from contextlib import contextmanager
 
 from gymemu.metrics import SCHEMA_VERSION, validate_metrics
+from gymemu.training_state import TrainingInterrupted
 
 
 def project_name(config):
@@ -127,6 +128,10 @@ def track_run(config, output, *, evaluation, parameters, training_examples, reci
             "evaluation/next_frame_rgb_mse", step_metric="optimizer_steps", summary="min"
         )
         yield Tracker(run)
+    except TrainingInterrupted:
+        run.summary.update({"status": "interrupted", "resume_checkpoint": "resume.pt"})
+        run.finish(exit_code=0)
+        raise
     except BaseException:
         run.finish(exit_code=1)
         raise

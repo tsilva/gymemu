@@ -30,6 +30,21 @@ from gymemu.runtime import device_for
 from gymemu.scenes import write_scene
 from gymemu.storage import CheckpointStore, validate_storage
 from gymemu.tracking import track_run, validate_tracking
+from gymemu.training_state import (
+    EpochSampler,
+    TrainingInterrupted,
+    cpu_state,
+    load_training,
+    restore_rng,
+    rng_state,
+    save_training,
+    stop_signals,
+    training_contract,
+)
+
+
+def checkpoint_due(started, seconds):
+    return time.monotonic() - started >= seconds
 
 
 def _positive(value, name):
@@ -138,6 +153,9 @@ def run_epoch(
     report=None,
     log_every=100,
     probe_every=1000,
+    resume_state=None,
+    state_checkpoint=None,
+    stop_requested=lambda: False,
 ):
     model.train(optimizer is not None)
     model.reset_epoch_metrics()
@@ -145,8 +163,33 @@ def run_epoch(
     total_loss = torch.zeros((), device=device, dtype=torch.float64)
     total_mse = torch.zeros_like(total_loss)
     started = last_checkpoint = time.monotonic()
-    count = min(len(loader), max_batches) if max_batches else len(loader)
-    for history, action, target, *auxiliary in device_batches(loader, count, device, prefetch):
+    elapsed = 0.0
+    if resume_state:
+        samples, batches = resume_state["samples"], resume_state["batches"]
+        total_loss.copy_(resume_state["total_loss"])
+        total_mse.copy_(resume_state["total_mse"])
+        elapsed = resume_state["seconds"]
+        for name, buffer in model.named_buffers():
+            buffer.copy_(resume_state["buffers"][name])
+        if health is not None:
+            health.load_state_dict(resume_state["health"], device)
+    count = len(loader) + batches
+    count = min(count, max_batches) if max_batches else count
+
+    def progress():
+        return {
+            "samples": samples,
+            "batches": batches,
+            "total_loss": total_loss,
+            "total_mse": total_mse,
+            "seconds": elapsed + time.monotonic() - started,
+            "buffers": dict(model.named_buffers()),
+            "health": health.state_dict() if health is not None else None,
+        }
+
+    for history, action, target, *auxiliary in device_batches(
+        loader, count - batches, device, prefetch
+    ):
         detailed = health is not None and (batches < 10 or (batches + 1) % log_every == 0)
         capture = health.capture(detailed) if health is not None else nullcontext()
         # Sampled activation hooks stay outside the compiled graph. Changing hooks
@@ -188,7 +231,10 @@ def run_epoch(
             report(
                 health.metrics(), batches, samples, batches % probe_every == 0 or batches == count
             )
-        save = checkpoint and time.monotonic() - last_checkpoint >= checkpoint_seconds
+        stopping = stop_requested()
+        save = (checkpoint or state_checkpoint) and (
+            stopping or checkpoint_due(last_checkpoint, checkpoint_seconds)
+        )
         if batches % sync_batches == 0 or batches == count or save:
             # Check before every checkpoint; CUDA runs may defer host synchronization.
             if not torch.isfinite(total_loss) or not torch.isfinite(total_mse):
@@ -197,19 +243,24 @@ def run_epoch(
             print(
                 f"{label} {'train' if optimizer else 'eval'} batches={batches}/{count} "
                 f"loss={total_loss.item() / samples:.6f} "
-                f"samples/s={samples / (time.monotonic() - started):.0f}",
+                f"samples/s={samples / (elapsed + time.monotonic() - started):.0f}",
                 flush=True,
             )
         if save:
-            checkpoint(batches, samples)
+            if checkpoint:
+                checkpoint(batches, samples)
+            if state_checkpoint:
+                state_checkpoint(progress())
             last_checkpoint = time.monotonic()
+        if stopping:
+            raise TrainingInterrupted("Training stopped; resume.pt saved after the last update")
     if not samples:
         raise ValueError("An epoch must contain at least one sample")
     result = {
         "loss": total_loss.item() / samples,
         "samples": samples,
         "batches": batches,
-        "seconds": time.monotonic() - started,
+        "seconds": elapsed + time.monotonic() - started,
     }
     if optimizer is None:
         result["mse"] = total_mse.item() / samples
@@ -217,6 +268,8 @@ def run_epoch(
     if result.keys() & diagnostics.keys():
         raise ValueError("Approach diagnostics must not replace shared epoch metrics")
     result.update(diagnostics)
+    if state_checkpoint:
+        state_checkpoint(progress())
     return result
 
 
@@ -283,8 +336,19 @@ def _output_directory(config):
 
 
 def train(cfg):
+    with stop_signals() as stop_requested:
+        try:
+            return _train(cfg, stop_requested)
+        except TrainingInterrupted as error:
+            print(str(error), flush=True)
+            output = cfg.output if cfg.output is not None else HydraConfig.get().runtime.output_dir
+            return Path(output).expanduser().resolve()
+
+
+def _train(cfg, stop_requested):
     config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
     validate(config)
+    recovery = load_training(config["resume"]) if config.get("resume") else None
     output = _output_directory(config)
     storage = CheckpointStore(config, output)
     trainer, game, spec = config["trainer"], config["game"], config["approach"]
@@ -294,6 +358,11 @@ def train(cfg):
     if trainer["threads"]:
         torch.set_num_threads(trainer["threads"])
     device = device_for(trainer["device"])
+    if recovery and (
+        recovery["device_type"] != device.type
+        or recovery["torch_version"] != str(torch.__version__)
+    ):
+        raise ValueError("Resume requires the original device type and PyTorch version")
     if trainer["precision"] == "bf16" and (
         device.type != "cuda" or not torch.cuda.is_bf16_supported()
     ):
@@ -358,6 +427,8 @@ def train(cfg):
             "Dataset differs from saved recipe; set expected_dataset=null for a new experiment"
         )
     config["expected_dataset"] = identity
+    if recovery and training_contract(config) != training_contract(recovery["training_config"]):
+        raise ValueError("Resume cannot change the model, dataset, optimizer, or training recipe")
     evaluation_contract = _evaluation_contract(identity, eval_episodes, evaluation, trainer)
     config["output"] = str(output)
     metadata = {
@@ -379,6 +450,9 @@ def train(cfg):
         "objective": "next_frame_rgb_mse",
         "evaluation": evaluation_contract,
     }
+    if recovery:
+        metadata["resumed_from"] = str(Path(config["resume"]).expanduser().resolve())
+        model.load_state_dict(recovery["state_dict"], strict=True)
     if (root / "manifest.json").exists():
         metadata["dataset_manifest"] = json.loads((root / "manifest.json").read_text())
     output.mkdir(parents=True, exist_ok=True)
@@ -393,7 +467,9 @@ def train(cfg):
         "batch_size": trainer["batch_size"],
         "num_workers": trainer["workers"],
         "pin_memory": device.type == "cuda",
+        "generator": torch.Generator().manual_seed(config["seed"]),
     }
+    sampler = EpochSampler(training, config["seed"])
     if trainer["workers"]:
         options.update(multiprocessing_context="spawn", persistent_workers=True, prefetch_factor=2)
     if trainer["loader"] == "cached":
@@ -402,10 +478,10 @@ def train(cfg):
             workers=trainer["workers"],
             pin_memory=device.type == "cuda",
         )
-        train_loader = CachedBatchLoader(training, shuffle=True, **cached_options)
+        train_loader = CachedBatchLoader(training, sampler=sampler, **cached_options)
         eval_loader = CachedBatchLoader(evaluation, shuffle=False, **cached_options)
     else:
-        train_loader = DataLoader(training, shuffle=True, **options)
+        train_loader = DataLoader(training, sampler=sampler, **options)
         eval_loader = DataLoader(evaluation, shuffle=False, **options)
     diagnostics = trainer.get("diagnostics", {})
     probe = None
@@ -436,19 +512,50 @@ def train(cfg):
         training_examples=len(training),
         recipe_sha256=recipe_sha256,
     ) as tracker:
+        if recovery:
+            save_training(
+                output / "resume.pt",
+                {
+                    **recovery,
+                    "training_config": config,
+                    "config": {**recovery["config"], "resumed_from": metadata["resumed_from"]},
+                },
+            )
         storage.sync()
-        best_rgb = None
-        total_train_samples = total_updates = 0
+        best_rgb = recovery["best_rgb"] if recovery else None
+        total_train_samples = recovery["total_train_samples"] if recovery else 0
+        total_updates = recovery["total_updates"] if recovery else 0
+        elapsed = recovery["elapsed_seconds"] if recovery else 0.0
         started = time.monotonic()
         for stage_index, stage in enumerate(spec["stages"]):
+            if recovery and stage_index < recovery["stage_index"]:
+                continue
+            continuing = recovery is not None and stage_index == recovery["stage_index"]
             final = stage_index == len(spec["stages"]) - 1
             stage_dir = output / "stages" / stage["name"]
             stage_dir.mkdir(parents=True)
             optimizer = build_optimizer(
                 model.prepare_stage(stage["objective"]), config["optimizer"], stage["learning_rate"]
             )
-            best = float("inf")
-            for epoch in range(1, stage["epochs"] + 1):
+            best = recovery["best"] if continuing else float("inf")
+            best_bundle = recovery["best_bundle"] if continuing else None
+            if continuing:
+                optimizer.load_state_dict(recovery["optimizer"])
+                if best_bundle is not None:
+                    # Carry forward the stage winner even if no resumed epoch improves it.
+                    torch.save(best_bundle, stage_dir / "best.pt")
+                    if final:
+                        torch.save(best_bundle, output / "best.pt")
+                restore_rng(recovery["rng"])
+            first_epoch = recovery["epoch"] + int(recovery["epoch_complete"]) if continuing else 1
+            for epoch in range(first_epoch, stage["epochs"] + 1):
+                partial = (
+                    recovery["progress"]
+                    if continuing and epoch == recovery["epoch"] and not recovery["epoch_complete"]
+                    else None
+                )
+                sampler.epoch = sum(s["epochs"] for s in spec["stages"][:stage_index]) + epoch
+                sampler.offset = partial["samples"] if partial else 0
                 curriculum = model.begin_epoch(epoch)
                 progress = {
                     **metadata,
@@ -467,6 +574,30 @@ def train(cfg):
                     save_model(stage_dir / "latest.pt", model, info)
                     if final:
                         save_model(output / "latest.pt", model, info)
+
+                def save_progress(state, epoch_complete=False):
+                    save_training(
+                        output / "resume.pt",
+                        {
+                            "config": progress,
+                            "state_dict": model.state_dict(),
+                            "training_config": config,
+                            "optimizer": optimizer.state_dict(),
+                            "rng": rng_state(device),
+                            "progress": state,
+                            "stage_index": stage_index,
+                            "epoch": epoch,
+                            "epoch_complete": epoch_complete,
+                            "total_updates": total_updates,
+                            "total_train_samples": total_train_samples,
+                            "best": best,
+                            "best_bundle": best_bundle,
+                            "best_rgb": best_rgb,
+                            "device_type": device.type,
+                            "torch_version": str(torch.__version__),
+                            "elapsed_seconds": elapsed + time.monotonic() - started,
+                        },
+                    )
                     storage.sync()
 
                 def report_health(metrics, batches, samples, include_probe):
@@ -489,9 +620,12 @@ def train(cfg):
                         metrics.update(probe.run(model, device, media_path))
                     tracker.log_diagnostics(metrics, output, media_path)
 
-                if probe is not None:
+                if probe is not None and partial is None:
                     report_health({}, 0, 0, True)
                 health = Health(model, start_step=total_updates) if probe is not None else None
+                if partial:
+                    # Construction, tracking and startup probes must not advance training RNG.
+                    restore_rng(recovery["rng"])
                 result = run_epoch(
                     model,
                     train_loader,
@@ -510,10 +644,13 @@ def train(cfg):
                     report=report_health,
                     log_every=diagnostics.get("log_every", 100),
                     probe_every=diagnostics.get("probe_every", 1000),
+                    resume_state=partial,
+                    state_checkpoint=save_progress,
+                    stop_requested=stop_requested,
                 )
-                total_train_samples += result["samples"]
-                total_updates += result["batches"]
                 snapshot(result["batches"], result["samples"])
+                if stop_requested():
+                    raise TrainingInterrupted("Training stopped; resume.pt saved before evaluation")
                 validation = run_epoch(
                     model,
                     eval_loader,
@@ -524,7 +661,10 @@ def train(cfg):
                     sync_batches=trainer["sync_batches"],
                     precision="fp32",
                     label=f"{stage['name']} epoch={epoch}",
+                    stop_requested=stop_requested,
                 )
+                total_train_samples += result["samples"]
+                total_updates += result["batches"]
                 record = {
                     "stage": stage["name"],
                     "objective": stage["objective"],
@@ -550,10 +690,13 @@ def train(cfg):
                 if metric < best:
                     best = metric
                     save_model(stage_dir / "best.pt", model, complete)
+                    best_bundle = {"config": complete, "state_dict": cpu_state(model.state_dict())}
                     if final:
                         best_rgb = metric
                         save_model(output / "best.pt", model, complete)
-                storage.sync()
+                save_progress(None, epoch_complete=True)
+                if stop_requested():
+                    raise TrainingInterrupted("Training stopped; resume.pt saved after evaluation")
             # The next stage starts from the previous stage's best validated weights.
             restored, _ = load_model(stage_dir / "best.pt", device)
             model.load_state_dict(restored.state_dict())
@@ -564,7 +707,7 @@ def train(cfg):
             "optimizer": config["optimizer"],
             "history": config["history"],
             "action_history": model.action_history,
-            "seconds": time.monotonic() - started,
+            "seconds": elapsed + time.monotonic() - started,
             "optimizer_steps": total_updates,
             "train_samples_seen": total_train_samples,
             "name": config["name"],

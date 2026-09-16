@@ -11,6 +11,7 @@ from uuid import uuid4
 from gymemu.credentials import CREDENTIAL_PREFIX, r2_credentials
 
 ARTIFACTS = (
+    "resume.pt",
     "best.pt",
     "last.pt",
     "latest.pt",

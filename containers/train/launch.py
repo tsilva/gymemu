@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def run(arguments):
     """Prepare the configured cache once, then execute the ordinary training CLI."""
+    if any(arg == "--resume" or arg.startswith("--resume=") for arg in arguments):
+        execute("train", arguments)
+
     import torch
 
     from gymemu.config import compose_config

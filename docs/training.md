@@ -390,8 +390,8 @@ At completion, the trainer requires a successful final upload before marking the
 run successful. A final upload failure raises an error while preserving the local
 training results for retry. `summary.json` and the W&B summary include
 `r2_manifest_uri` and `r2_run_id`. A later retry updates R2 and its local receipt; it
-does not reopen or backfill a finished W&B run. These are inference checkpoints, with
-the same playback and optimizer-resume limits as local files.
+does not reopen or backfill a finished W&B run. R2 also stores `resume.pt`, including
+the optimizer and progress required to continue training after a restart.
 
 ## Run artifacts
 
@@ -412,11 +412,60 @@ the same playback and optimizer-resume limits as local files.
 | `stages/<name>/last.pt` | Last completed epoch in this stage |
 | `stages/<name>/latest.pt` | Periodic stage snapshot, which may precede evaluation |
 | `best.pt`, `last.pt`, `latest.pt` | Corresponding checkpoints from the final predictive stage |
+| `resume.pt` | Full training state: weights, Adam state, stage/epoch/batch progress, RNG, metrics, and stage-best weights |
 
 `trainer.checkpoint_seconds` defaults to 60. Checkpoint replacement is atomic. An
 interrupted run can lose work after the latest snapshot and does not get a completed
-summary. All checkpoints contain model weights and configuration, not optimizer state.
+summary. The playable `best.pt`, `last.pt`, and `latest.pt` files contain weights and
+configuration. The separate `resume.pt` also includes training state.
 See [approaches.md](approaches.md) for stage selection and version compatibility.
+
+### Stop and resume training
+
+New runs save `resume.pt` every `trainer.checkpoint_seconds` (60 by default), before
+validation, and after each completed epoch. It contains all model weights, Adam
+moments and step counters, the active stage and curriculum epoch, completed batch
+and sample counts, accumulated metrics, stage-best weights, and Python/NumPy/PyTorch
+RNG state (including CUDA or MPS when used). The current bf16 path has no gradient
+scaler or learning-rate scheduler to restore.
+
+Ctrl+C or SIGTERM requests a stop at the next completed optimizer update, followed
+by a local checkpoint and an R2 upload attempt. During validation, the pre-validation
+checkpoint is already safe; stopping there repeats validation on resume. Wait for
+`Training stopped; resume.pt saved...` before shutting down. SIGKILL, power loss,
+or a forced scheduler timeout can only recover the last successfully saved checkpoint.
+Local checkpoint writes are flushed and atomically replaced. R2 failures leave the
+local file intact and can be retried with `gymemu upload-checkpoints`.
+
+```bash
+uv run gymemu train --resume runs/original/resume.pt output=runs/continued
+```
+
+The checkpoint supplies the resolved recipe. The continuation writes to a **new,
+empty output directory** and starts a new W&B/R2 run; `resumed_from` in `config.json`
+links it to the source checkpoint. Omit `output` for a timestamped directory. Keep
+both directories if you want the complete log history. Global optimizer/sample
+counters continue; old diagnostic and epoch log files are not copied or rewritten.
+The same syntax works with `python train.py` and `gymemu-container run`.
+
+The sampler reconstructs the saved epoch's deterministic shuffle and starts at the
+first unconsumed sample, independent of loader prefetch. This applies to both the
+standard and cached loaders and the built-in deterministic trajectory datasets.
+New runs use a dedicated epoch seed, so their shuffled order differs from versions
+that used the global RNG even with the same experiment seed.
+No already-completed optimizer updates are replayed. Resuming a completed stage
+restores its best weights before preparing the next stage, including its frozen models.
+
+Resume requires the same training recipe, dataset identity, device type and PyTorch
+version. Output/tracking/storage settings and loader workers, threads, cache path,
+and checkpoint interval may change. Use the saved source and locked environment
+for reproducibility. State restoration does not guarantee bitwise GPU equality when
+kernels are nondeterministic; CPU interruption tests compare weights and Adam state
+exactly, including scheduled sampling and multi-stage training.
+
+Older runs only saved inference weights. They **cannot** be converted into exact
+resumable checkpoints: their optimizer and RNG state were never stored. Passing
+`latest.pt` to `--resume` is rejected rather than silently restarting Adam.
 
 `compare.py` only includes runs with completed summaries. It sorts within groups with
 identical dataset identity, evaluated target sequence, RGB geometry, and metric.
@@ -843,5 +892,6 @@ not establish the quality or stability of this full ten-epoch experiment. See
 
 Checkpoint metadata and saved recipes preserve `detach_feedback`. Weights checkpoints
 do not contain Adam state; replaying a recipe restarts training and is not an exact
-optimizer resume. Use a source snapshot or image containing the new recipe when
+optimizer resume; use `--resume resume.pt` for new runs with full training checkpoints.
+Use a source snapshot or image containing the new recipe when
 launching remotely; the earlier verified container image alone does not contain it.

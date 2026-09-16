@@ -22,6 +22,19 @@ def hydra_main(cfg):
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if any(arg == "--resume" or arg.startswith("--resume=") for arg in arguments):
+        import argparse
+
+        from gymemu.training_state import resume_config
+
+        parser = argparse.ArgumentParser(description="Continue a saved training run")
+        parser.add_argument("--resume", required=True)
+        selected, overrides = parser.parse_known_args(arguments)
+        try:
+            cfg = resume_config(selected.resume, overrides)
+        except ValueError as error:
+            parser.error(str(error))
+        return train(cfg)
     # Keep existing --dataset/--output commands working. New runs use key=value overrides.
     legacy_flags = {
         "--dataset",

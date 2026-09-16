@@ -104,6 +104,17 @@ immutable objects and manifests retain successfully uploaded checkpoint versions
 Use `r2.enabled=false` to keep artifacts local. Retry interrupted uploads with
 `uv run gymemu upload-checkpoints runs/my-run`.
 
+New training runs also save `resume.pt`, including optimizer, RNG, and batch progress.
+Stop with Ctrl+C and wait for the checkpoint message before shutting down. Continue
+in a new output directory with:
+
+```bash
+uv run gymemu train --resume runs/my-run/resume.pt output=runs/continued
+```
+
+See [stop and resume training](docs/training.md#stop-and-resume-training) for recovery
+limits and compatibility. Older weights-only checkpoints cannot resume exactly.
+
 The player opens paused in **teacher forcing** mode, using recorded dataset history
 and actions. This is also the default when selecting a checkpoint in the navigator.
 Use the mode selector or `--autoregressive` to play with predicted frames feeding
@@ -377,7 +388,7 @@ budget does not produce a playable model. Add `approach=latent` to exercise both
 ## Notes
 
 - Every run saves resolved config, dataset provenance, stage metrics, all inference
-  weights, and a comparison summary. Checkpoints support playback, not optimizer resume.
+  weights, and a comparison summary. `resume.pt` also preserves optimizer and training state.
   Existing version-1 direct CNN checkpoints still load.
 - Representation fitting and prediction fitting use training episodes only. All
   approaches are evaluated in float32 using held-out next-frame RGB MSE. The comparison

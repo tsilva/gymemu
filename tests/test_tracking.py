@@ -160,3 +160,23 @@ def test_real_offline_diagnostics_have_explicit_axes_and_media(snapshot, tmp_pat
     assert {record["train/stage"] for record in records} == {"representation", "dynamics"}
     assert any("probe/mse/h1" in record for record in records)
     assert list((output / "wandb").glob("offline-run-*/files/media/images/probe/*"))
+
+
+def test_graceful_stop_is_recorded_as_interrupted(snapshot, tmp_path, monkeypatch, fake_wandb):
+    import os
+    import signal
+
+    import torch
+
+    original = torch.optim.Adam.step
+
+    def stop_after_update(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return result
+
+    monkeypatch.setattr(torch.optim.Adam, "step", stop_after_update)
+    output = train(tracking_config(snapshot, tmp_path / "stopped"))
+    assert (output / "resume.pt").exists()
+    assert fake_wandb[0][1].summary["status"] == "interrupted"
+    assert fake_wandb[0][1].exits == [0]

@@ -47,6 +47,33 @@ class Health:
         self.details = {}
         self.activations = {}
 
+    def state_dict(self):
+        return {
+            name: getattr(self, name)
+            for name in (
+                "step",
+                "losses",
+                "norms",
+                "weight_norms",
+                "raw_losses",
+                "samples",
+                "details",
+            )
+        }
+
+    def load_state_dict(self, state, device):
+        def move(value):
+            if isinstance(value, torch.Tensor):
+                return value.to(device)
+            if isinstance(value, list):
+                return [move(item) for item in value]
+            if isinstance(value, dict):
+                return {key: move(item) for key, item in value.items()}
+            return value
+
+        for name, value in state.items():
+            setattr(self, name, move(value))
+
     def begin(self, detailed):
         self.detailed = detailed
         self.activations = {}
