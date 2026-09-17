@@ -939,3 +939,20 @@ records that fact in the manifest. Incomplete passes are repeated. Checkpoint
 writes are atomic. The report also compares next-position predictions against
 reusing the current readout, and scores the displacement obtained by subtracting
 the two readouts.
+
+## Four-frame context and four-step rollouts
+
+```bash
+uv run gymemu train recipe=breakout_detached_h4_r4
+```
+
+This separate recipe inherits `breakout_detached_fast` and changes RGB history
+and action history to four slots, with `rollout_steps=4` and curriculum `[1, 2, 4]`.
+Epochs 3–10 use four-step detached rollouts. Dataset revision, model width, Adam,
+learning rate, full-resolution losses, float32 evaluation, and 32-step probes are
+inherited. New runs save full `resume.pt` training checkpoints.
+
+This jointly changes context and training horizon; it cannot identify which change
+caused any quality difference. Starting from recorded history, the fifth prediction
+is the first with entirely generated context, so retain longer playback probes when
+judging this variant. Training throughput settings are measured separately on Beast-3.
