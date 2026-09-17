@@ -437,3 +437,7 @@ To measure whether ball position is linearly decodable from a frozen encoder, us
 [`probe_ball_latents.py`](probe_ball_latents.py). It fits current/next-position
 readouts on recorded training episodes and scores held-out episodes; see
 [linear ball-position probes](docs/training.md#linear-ball-position-probes).
+
+For the four-frame context / four-step rollout variant, use
+`recipe=breakout_detached_h4_r4`. It keeps detached feedback, four action-history
+slots, and the same dataset and objective, with a 1 → 2 → 4-step curriculum.

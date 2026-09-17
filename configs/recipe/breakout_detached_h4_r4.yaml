@@ -1,0 +1,11 @@
+# @package _global_
+# Shorter context and rollout ablation of the detached-feedback experiment.
+defaults:
+  - breakout_detached_fast
+  - _self_
+name: breakout-detached-h4-r4
+history: 4
+approach:
+  options:
+    rollout_steps: 4
+    rollout_schedule: [1, 2, 4]
