@@ -418,3 +418,58 @@ compilation warmup, full validation, checkpoint writes, W&B and R2 uploads. Repo
 include resolved configs, sample-order hashes, peak allocated memory, runtime versions,
 and source hashes. Raw results are in `runs/detached-throughput-20260916/` locally and
 `/workspace/diagnostics/detached-throughput-20260916/` on Beast-3's persistent volume.
+
+## Four-frame context and four-step rollouts
+
+On September 17, `recipe=breakout_detached_h4_r4` was benchmarked on Beast-3's
+RTX 4090 with PyTorch 2.14.0+cu130, CUDA 13.0, and source commit `2c3c935`.
+It retains BF16, compiled training with automatic layout, factored action inputs,
+and detached feedback. The pinned dataset and verified LZ4 cache were unchanged;
+other services occupied about 2.3 GiB of GPU memory. GPU benchmarks ran serially.
+
+Every measurement used the epoch-3 curriculum (four rollout steps), 4,096 warmup
+windows, and 32,768 windows per timed trial. Initialization seed was 47 and sample
+order seed was 123, with the same sample-order hash as the preceding benchmark.
+Diagnostics and 32-step held-out probes stayed enabled. The initial single-trial
+batch screen gave:
+
+| Batch size | Windows/s | Peak allocated GiB |
+| ---: | ---: | ---: |
+| 32 | 3,332 | 0.87 |
+| 64 | 3,581 | 1.70 |
+| 128 | 3,465 | 3.38 |
+| 256 | 3,180 | 6.71 |
+
+Three longer trials confirmed batch 64 at a median **3,566 windows/s** (3,570,
+3,565, 3,566), versus 3,476 windows/s for batch 128. With batch 64, one loader
+worker gave 3,565 windows/s, four workers gave 3,562, and one CPU thread gave
+3,554. These single-trial differences do not establish a worker/thread advantage;
+the recipe keeps two workers and two CPU threads. This is the fastest tested
+configuration, not an exhaustive search of every implementation.
+
+The experimental `reduce-overhead` compiler mode failed during warmup because
+CUDA-graph output reuse invalidated tensors retained by the health collector.
+It was excluded; production retains the tested default compiler mode.
+
+Timing includes loading, transfer, forward/backward, Adam, health statistics and
+local probes/media. It excludes setup, compilation warmup, full validation,
+checkpoint writes, W&B and R2 uploads. The higher throughput than the eight-step
+recipe reflects less prediction work and a changed objective; it is not evidence
+of equal model quality. Raw JSON reports and logs are stored in
+`logs/h4r4-20260917/` locally and `/workspace/diagnostics/h4r4-20260917/` on Beast-3.
+
+A bounded compiled CUDA smoke traversed the 1→2→4 curriculum, interrupted at
+Adam update 14 in epoch 2, restored optimizer state and CUDA RNG, and completed
+at update 36 in epoch 3. Autoregressive playback and teacher-forcing playback
+both passed. This checks recovery on the production GPU/runtime; it does not
+establish full-run quality or bitwise equivalence to uninterrupted training.
+
+Reproduce the selected settings with:
+
+```bash
+uv run python benchmark_autoregressive.py \
+  --override recipe=breakout_detached_h4_r4 \
+  --override trainer.frame_cache=/workspace/frame-cache/676ff638-lz4 \
+  --epoch 3 --warmup-samples 4096 --samples 32768 --repeats 3 \
+  --out logs/h4r4-throughput.json
+```
