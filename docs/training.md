@@ -956,3 +956,9 @@ This jointly changes context and training horizon; it cannot identify which chan
 caused any quality difference. Starting from recorded history, the fifth prediction
 is the first with entirely generated context, so retain longer playback probes when
 judging this variant. Training throughput settings are measured separately on Beast-3.
+
+Beast-3 measurements retain batch 64, two loader workers and two CPU threads,
+with BF16 and compiled automatic layout: about 3,566 training windows/s at the
+four-step horizon, excluding full validation and remote uploads. See
+[performance measurements](performance.md#four-frame-context-and-four-step-rollouts)
+for the sweep and timing scope.
