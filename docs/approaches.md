@@ -337,3 +337,87 @@ values using the audited native rule, in RAM. This adds auxiliary supervision
 to the experiment. It is distinct from the recorded next-direction label and
 must be disclosed when comparing models. Native rules do not run during model
 inference. These diagnostic checkpoints do not yet implement recursive playback.
+
+`ball_horizontal_velocity` adds a learned speed head to a frozen
+`ball_direction_geometry`. Its nested `direction` specification contains the
+geometry model's constructor arguments, not an import target or checkpoint path.
+The checkpoint stores both networks and the intermediate paddle model. Calling
+`train()` keeps the complete direction component frozen and in evaluation mode.
+
+The speed head uses the same encoded current-state geometry and predicts four
+magnitudes, 0.5, 1, 1.5, and 2, with cross-entropy. `forward()` returns speed
+logits, `predict_speed()` returns magnitude, and `predict()` multiplies learned
+direction by learned magnitude to return signed horizontal velocity. Width,
+depth, and activation apply only to the speed network. This remains a
+descending near-paddle diagnostic; it does not establish full-game velocity
+accuracy or recursive state updates.
+
+`ball_horizontal_router` composes that frozen near-paddle predictor with a
+`ball_velocity_mlp` full-field classifier. Its input is the existing 118-value
+physical-state contract, including brick-contact memory and 108 brick cells.
+The near-paddle component receives only the first nine values. Routing depends
+only on current source state: integer RAM y in [160, 183] and vy > 0 selects the
+near-paddle component; all other sources select the full-field component.
+Neither successor state nor collision-event labels participate in routing.
+
+Both `forward()` and `predict()` return signed native horizontal velocity.
+For training, obtain logits through `global_model(source)` on sources outside
+the gate. Calling `train()` keeps all near-paddle parameters frozen and in
+evaluation mode. The nested `global_model` and `paddle_model` specifications
+contain constructor arguments for these two fixed registry classes, and the
+checkpoint stores every component's weights. This is a one-step vx diagnostic;
+it supplies no position, vertical-velocity, memory, or terminal-state updates.
+
+`ball_acceleration` wraps a frozen `ball_horizontal_router` with an isolated
+upper-field speed head. The source-only domain is integer RAM y <= 100 and
+incoming horizontal magnitude < 2. The observed target vocabulary there is
+retain the incoming magnitude or increase it to 2. The classifier learns which
+outcome occurs; its `forward()` returns two logits. `predict()` combines the
+chosen magnitude with the frozen parent's predicted sign, and preserves parent
+predictions outside that domain. It uses no successor/event inputs or native
+collision decisions. The domain and vocabulary are specific to this Breakout
+transition contract and require dataset auditing before reuse elsewhere.
+
+The head receives ball x, RAM y, vx, vy, fractional y, brick-contact memory,
+and the 108-cell brick layout. Scalar/binary encoding yields 149 features.
+Optional `geometry=True` adds current and constant-velocity proposed coordinates
+and their fractional/binary encodings, for 179 features. These are arithmetic
+features of current inputs, not collision rules. The complete frozen parent is
+stored in the checkpoint under the nested `base` constructor specification.
+Calling `train()` leaves the entire parent frozen and in evaluation mode.
+
+`ball_acceleration_spatial` uses the same frozen parent, gate, and two outcomes.
+Instead of a flat layout vector, it describes each of the 108 brick cells using
+13 features: ball-to-cell offsets now and after a constant-velocity proposal,
+vx/vy, contact memory, grid row/column, and fractional coordinates. A shared
+ReLU MLP processes every cell; absent cells are masked before max pooling. The
+pooled vector and six normalized current-state scalars feed a two-class head.
+`encode()` returns cell features, global scalars, and the occupancy mask;
+`forward_encoded()` supports caching that fixed encoding in RAM during training.
+
+Cell centers are fixed geometry of the 6×18 Breakout layout (x = 11.5 + 8c,
+RAM-coordinate y = 50.5 + 6r). This is an explicit spatial prior, not additional
+recorded state or native collision logic. The network still learns when speed
+changes. The constructor stores cell width/depth and head width in its registry
+specification; checkpoints contain all learned and frozen components.
+
+`ball_vertical_velocity` adds discrete next-vy prediction while preserving the
+complete frozen `ball_acceleration_spatial` horizontal model. It accepts the same
+118 current-state values. `forward()` returns logits over the training-derived
+signed-vy vocabulary; `predict()` decodes vy, and `predict_horizontal()` exposes
+the unchanged horizontal prediction. Neither method updates positions or memory.
+
+Routing uses only current RAM y and vy: y <= 100 selects the upper-field head;
+160 <= y <= 183 with vy > 0 selects the paddle head; remaining states select a
+small flight head. The audited nonterminal data has no vy changes in that last
+region. The flight network is nevertheless trained from observed training pairs.
+Event labels are used for evaluation and sampling, never inference routing.
+
+The upper head has a separately trainable copy of the spatial cell encoder,
+followed by masked max pooling and 71 global scalar/binary/geometric features.
+The paddle head combines the frozen direction model's 84 geometry features with
+charge as one scalar and 12 bits. This retains charge information even when the
+learned intermediate-paddle estimate errs. The nested `horizontal` specification
+contains constructor arguments for the fixed registry class. Checkpoints store
+every component; calling `train()` keeps the horizontal parent in evaluation
+mode with gradients disabled. This remains a one-step diagnostic model.

@@ -55,6 +55,17 @@ compares 128, 256, and 512 training episodes with fixed validation and update bu
 The [full-data geometry experiment](docs/training.md#full-data-direction-geometry-experiments)
 reaches 99.94% paddle-direction accuracy on an independent test after perfect
 development validation. This is a direction-only diagnostic, not recursive play.
+The [speed and direction combination](docs/training.md#isolated-horizontal-speed-and-frozen-direction)
+now predicts complete near-paddle horizontal velocity, with 99.72% exact accuracy
+on paddle hits in a fresh independent test.
+The [full-game vx integration](docs/training.md#full-game-horizontal-velocity-with-a-frozen-paddle-component)
+combines the frozen paddle component with a full-field predictor. The
+[spatial acceleration head](docs/training.md#isolated-brick-triggered-horizontal-acceleration)
+raises fresh-test horizontal-velocity accuracy to **99.9913%** and catches
+**47 / 48** actual brick-triggered speed increases. The
+[vertical-velocity model](docs/training.md#isolated-vertical-ball-velocity) reaches
+**99.9929%** on a separate fresh test, with 13 errors in 182,441 transitions,
+while preserving the horizontal predictor. These remain one-step results.
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)
