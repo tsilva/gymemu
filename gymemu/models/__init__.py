@@ -9,6 +9,7 @@ from gymemu.models.ball_position import BallPosition
 from gymemu.models.ball_state import BallStateAutoencoder
 from gymemu.models.ball_velocity import BallVelocityMLP
 from gymemu.models.ball_vertical_velocity import BallVerticalVelocity
+from gymemu.models.brick_layout import BrickLayout
 from gymemu.models.controller_history import ControllerHistoryMLP
 from gymemu.models.direct import Autoencoder
 from gymemu.models.latent import FrameCodec, LatentDynamics
@@ -29,6 +30,7 @@ MODELS = {
     "ball_acceleration_spatial": BallAccelerationSpatial,
     "ball_vertical_velocity": BallVerticalVelocity,
     "ball_position": BallPosition,
+    "brick_layout": BrickLayout,
     "frame_codec": FrameCodec,
     "latent_cnn": LatentDynamics,
     "paddle_state_cnn": PaddleStateCNN,

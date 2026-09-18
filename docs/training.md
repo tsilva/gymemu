@@ -2173,3 +2173,70 @@ Current collision memory, hit count, layout, width, and paddle state are still
 supplied. The next fractional-y value is now learned, but feedback across whole
 lives and the remaining state updates are separate work. Perfect validation
 here does not imply perfect fresh-test or recursive simulation performance.
+
+## Isolated next brick layout
+
+`brick_layout` predicts a categorical layout update: no change, or removal of
+one of the 108 occupied cells. The recorded successor layout supplies the labels;
+native replay is used only to audit source-state sufficiency. The full training
+set contains 5,271,950 nonterminal transitions from 1,824 episodes, including
+142,307 removals. Every changed layout removes exactly one brick. There are no
+additions, empty source layouts, or wall clears; the minimum source layout has
+three bricks. Validation has 88,590 sources from 32 episodes and 2,432 removals.
+
+The game code supports wall refills, but these audited records contain no refill
+examples. This model's output contract does not support additions, multiple
+removals, or refill timing. Do not generalize removal accuracy to wall completion.
+The dataset and its columns remain unchanged, and derived arrays stay in RAM.
+
+The head accepts the established 118-value source contract but uses only ball
+x, RAM y, vx, vy, fractional y, brick-contact memory, and the current brick cells.
+Paddle/controller fields do not affect its output. The complete selected y
+position model, including both velocity predictors, stays frozen. Its cell
+encoder initializes a separate trainable 13→64→64 ReLU network. Occupancy-masked
+max pooling supplies 64 global features, concatenated with 71 current-state
+features. A shared 199→64→64→1 ReLU scorer combines that context with each
+cell's 64 local features. A 135→128→128→1 ReLU head scores no change. Absent
+cells are masked from removal logits. The argmax selects one coherent update;
+no native collision rules or successor/event inputs run during inference.
+
+Compare seeds 91 and 2026 with 30,000 updates, batch size 512, and 25% actual
+removal samples. Cross-entropy trains all 109 outcomes together. AdamW uses
+learning rate 0.001, weight decay 0.0001, cosine decay to 0.00002, and gradient
+clipping at 5. Evaluate every 500 updates and keep the earliest checkpoint with
+minimum exact-layout validation errors. Because sampling changes the class
+prior, also compare each saved model with an analytical correction to its
+no-change bias, derived solely from training removal frequency and the 25%
+sampled frequency. No validation threshold sweep or extra fit is used.
+
+Reserve 16 previously unused held-out episodes with metadata seed 690918,
+excluding all six earlier test sets and preserving 64 untouched episodes for
+later full-state evaluation. Freeze and hash the selected checkpoint before
+reading these new transitions. Report exact-layout and changed-layout accuracy,
+false changes, missed changes, wrong-cell removals, and removal-cell precision,
+recall, and F1. A wrong-cell choice counts as both a false removal and a missed
+true removal. Whole-layout accuracy is stricter than per-cell accuracy.
+
+Checkpoints, development comparisons, audit receipts, and evaluation provenance
+are under `runs/brick-layout-20260918/` and `logs/brick-layout-20260918/`.
+
+Seed 91's best checkpoint has one false removal at update 18,000. Seed 2026
+reaches zero validation errors at update 20,000. The analytical no-change bias
+correction is +2.48619236: it replaces seed 91's false removal with one missed
+removal and leaves seed 2026 exact. Select the uncorrected seed-2026 checkpoint
+using minimum error then name; no correction is needed. The complete model has
+845,648 parameters: 789,518 frozen parent parameters and 56,130 fitted parameters.
+Every cell has between 877 and 1,800 removal examples in training.
+
+On the fresh 16-episode test, the model predicts all 45,245 complete layouts
+exactly. It removes the correct cell on all 1,184 changed layouts and makes no
+false removals on the 44,061 unchanged layouts: removal precision, recall, and
+F1 are all 1.0. An always-unchanged baseline scores 97.3831% aggregate exactness
+but misses every removal. No wall clears or refills occur in this test either;
+its smallest source layout contains six bricks.
+
+Reloaded CPU and CUDA predictions agree exactly, and the frozen y/velocity
+parent's weights and predictions remain unchanged. The separate x checkpoint
+is also unchanged. These are one-step results with current contact memory
+supplied; learning its next value and validating recursive full-state feedback
+remain separate work. No fitting follows fresh-test inspection.

@@ -22,7 +22,7 @@ is established. MLP means a fully connected neural network.
 | Next RAM ball y together with fractional y | 19 displacement classes for the combined coordinate, cross-entropy. Shared 13→64→64 cell encoder; upper head 135→128→128→19; paddle 97→256→256→256→19; flight 1→32→19. ReLU; 203,673 fitted parameters plus frozen velocity parent | Same current-state contract; y includes the supplied fractional eighth-pixel component. Flight uses current vy; no successor velocity inputs | **100% validation**, 0 / 88,590 in both seeds. **99.9963% fresh-test combined-y accuracy**, 7 / 187,251; MAE **0.000156 px**. Integer y: 7 errors; fractional component: 3 errors (**99.9984%**). Fraction labels derive from audited replay. |
 | Next vertical velocity, vy | Eight-class cross-entropy. Upper field: shared 13→64→64 cell encoder, max pooling, 135→128→128→8. Paddle: 97→256→256→256→8. Flight: 1→32→8. All ReLU; horizontal parent frozen; 199,064 fitted vertical parameters | Existing 118 current-state values; upper head uses ball state, fractional y, contact memory and bricks; paddle head uses the nine paddle-geometry inputs plus explicit charge encoding; flight uses current vy | **99.9989% validation**, 1 / 88,590 errors. **99.9929% fresh test**, 13 / 182,441 errors. Actual velocity changes: **10,437 / 10,441 correct**; paddle: 1 / 3,335 errors; brick: 3 / 4,895; ceiling: 0 / 2,211. One-step prediction; current hidden state still supplied. |
 | Next paddle width | Two 128-unit SiLU hidden layers; binary cross-entropy for narrow/full width | One or eight full state observations, seven prior actions and current action | Aggregate validation accuracy exceeds 99.95%, but **0 / 36 width changes correct** in both isolated probes. Not solved. |
-| Next brick layout | Two 128-unit SiLU hidden layers; 108 occupancy logits, change-weighted binary cross-entropy | Eight full state observations, seven prior actions and current action | Older isolated probe: **brick-removal validation F1 0.189**. Not solved; mostly unchanged cells make aggregate accuracy misleading. |
+| Next brick layout | 109-class cross-entropy: no change or one occupied cell removed. Shared 13→64→64 cell encoder; removal scorer 199→64→64→1; no-change head 135→128→128→1. ReLU; 56,130 fitted parameters plus frozen y/velocity parent | Current ball x, RAM y, vx, vy, fractional y, brick-contact memory, and 108 brick cells. No image/action history or successor inputs | **100% validation**, 0 / 88,590 complete-layout errors. **100% on a fresh 16-episode test**, 0 / 45,245 errors: all **1,184 removals** correct and **0 false removals** on 44,061 unchanged layouts. Removal precision/recall/F1 all 1.0. Wall clears/refills absent from audited data and unsupported by this output contract. |
 | Life-loss terminal flag | Two 128-unit SiLU hidden layers; weighted binary cross-entropy | One full state observation, seven prior actions and current action | Older isolated probe: **validation F1 0.299**. Dataset life boundaries are enforced, but accurate learned termination remains unresolved. |
 
 The older context contains eight full state observations, seven prior requested
@@ -61,9 +61,10 @@ collision rules. The source dataset was not modified for these experiments.
 Horizontal speed and direction are now combined and integrated across the full
 field in a saved model, with a learned spatial head correcting most missed
 brick-triggered speed increases. Remaining work includes rare ball-state errors,
-brick-layout changes, collision-memory and hit-count updates, paddle width, and
-termination. Both positions (including fractional y) and both velocities now have
-one-step learned predictors. The position heads preserve both velocity models.
+collision-memory and hit-count updates, paddle width, termination, and wall
+refills. Both positions (including fractional y), both velocities, and observed
+brick-layout updates now have one-step learned predictors. The brick model
+preserves the y/velocity parent, and the separate x model remains unchanged.
 High one-step accuracy with reconstructed current inputs does not yet establish
 an autonomous compact-state simulator.
 
@@ -76,7 +77,8 @@ Evidence is in [the experiment history](history.md), especially the sections on
 [full-game vx integration](history.md#2026-09-18-full-game-vx-integration-with-a-frozen-paddle-model),
 [spatial acceleration learning](history.md#2026-09-18-shared-spatial-brick-features-resolve-most-missed-accelerations),
 [vertical velocity](history.md#2026-09-18-discrete-vertical-velocity-with-a-frozen-horizontal-model),
-and [ball positions](history.md#2026-09-18-discrete-ball-displacements-and-coherent-fractional-y).
+[ball positions](history.md#2026-09-18-discrete-ball-displacements-and-coherent-fractional-y),
+and [brick layout](history.md#2026-09-18-coherent-brick-layout-prediction).
 
 
 The near-paddle test rows above use the same speed-stage set of 64 fresh held-out
@@ -98,3 +100,8 @@ of its 187,251 transitions (28 joint errors). Including the frozen vx/vy
 predictors, all four ball quantities are simultaneously exact on **99.9701%**
 (56 errors). These are one-step predictions with the other state inputs supplied;
 no complete learned-state rollout is established.
+
+The brick-layout test uses another **16 previously unused episodes**, separate
+from every earlier test, preserving **64 untouched held-out episodes** for later
+full-state evaluation. Current contact memory remains supplied. Zero errors on
+this finite test do not establish perfect recursive or wall-refill behavior.
