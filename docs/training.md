@@ -61,6 +61,42 @@ adaptive-pooling bins on MPS using equivalent regional means. Existing checkpoin
 weights load directly; no retraining or conversion is needed. CPU and CUDA retain
 PyTorch's native pooling operation.
 
+## Single-frame reconstruction
+
+```bash
+uv run gymemu train recipe=breakout_reconstruction
+uv run gymemu play /absolute/path/to/run/best.pt --reconstruction
+```
+
+The Breakout recipe uses CUDA, bfloat16 training, compilation, and the lossless
+frame cache. Set `trainer.frame_cache` to the existing cache directory. Validation
+always runs in float32. For other devices, start with `approach=reconstruction`
+instead of the CUDA-tuned Breakout recipe.
+
+This recipe trains only the existing convolutional frame codec, using ordinary
+float32 RGB MSE between each recorded image and its reconstruction. The codec
+receives one image, with no action, frame history, dynamics model, auxiliary loss,
+or latent regularizer. The width-32 codec produces a 32×27×20 latent map from a
+210×160 RGB image. Padding preserves the original image dimensions after decoding.
+
+Training uses frames referenced by training episodes, including their initial
+frames. Every epoch evaluates the held-out episode split without fitting it.
+The default recipe evaluates that full split. The lowest validation reconstruction
+MSE selects `best.pt`; `stages/representation/epoch-XXXX.pt` retains every evaluated
+epoch with its scores. `last.pt` is the last completed epoch, regardless of score.
+The evaluation contract names `reconstruction_rgb_mse`, so comparison never groups
+these scores with next-frame prediction scores. Train/validation loss curves can
+reveal a generalization gap; reconstruction quality alone does not establish that
+the latent map preserves every variable needed for future use.
+
+Reconstruction checkpoints open paused in reconstruction mode automatically.
+Original, Reconstruction, and Diff show the same recorded timestep, including
+frame zero. Space advances one recorded frame; Tab plays or pauses. Reset, episode
+selection, and seeking always reconstruct the newly displayed recorded frame.
+There is no generated-frame feedback. History editing and autoregressive playback
+are unavailable for these checkpoints. A latent-pipeline checkpoint can also use
+`--reconstruction` to inspect its codec independently.
+
 ## Browse saved checkpoints
 
 ```bash
@@ -237,26 +273,29 @@ or `--wandb-mode offline` to override it and `--env-id MyGame-v0` for a custom d
 Standalone recipes retain their saved mode; recipes created before tracking support
 remain disabled unless a `wandb` configuration is added.
 
-After each completed epoch, the run logs:
+New runs use metrics schema v3. After each completed epoch, W&B logs:
 
-- `stages/<name>/train/*` and `stages/<name>/validation/*`: losses, samples, batches,
-  elapsed seconds, throughput, and validation MSE, kept separate for each stage.
-- `stages/<name>/epoch`, `stages/<name>/learning_rate`, and
-  `stages/<name>/curriculum/*`, including scheduled feedback probability when present.
-- `optimizer_steps` and `train_samples_seen`, accumulated across all stages.
-- `evaluation/next_frame_rgb_mse` from the final predictive stage, with its minimum
-  tracked for comparison. Representation-stage reconstruction scores do not enter
-  this metric.
+- `eval/mse`: the final stage's full validation RGB MSE, published once.
+- `train/<stage>/loss/epoch` and `eval/<stage>/loss`: stage objectives. These remain
+  separate from the comparison score because an objective may include other losses.
+- `train/<stage>/<metric>/epoch` and `eval/<stage>/<metric>`: sample counts, batches,
+  elapsed seconds, and additional stage measurements, excluding duplicate loss/MSE aliases.
+- `train/<stage>/curriculum/*`: stage-specific curriculum settings.
+- `train/epoch`, `train/stage`, `train/objective`, `train/lr`, `train/samples`,
+  `train/rate`, and `eval/rate`: progress and throughput.
 
-Charts use cumulative optimizer steps, so the axis continues when stage epochs restart.
-Validation retains the shared float32 held-out evaluation path. The run configuration
-includes resolved settings, pinned dataset identity, evaluation identity, parameter
-count, and recipe hash. The W&B summary mirrors `summary.json`, including `best_mse`
-and training budget. The legacy aliases above remain available for existing charts.
-New runs also use metrics schema v2, with short `train/`, `eval/`, and `probe/` names
-and latest-value summaries. `eval/mse` uses `eval/step`; training and fixed probes
-use `train/step`. Both axes count cumulative optimizer updates. W&B also collects
-its standard system metrics.
+`eval/mse` uses `eval/step`; training and fixed probes use `train/step`.
+Both axes count cumulative optimizer updates across stages. New runs do not emit
+`evaluation/*`, `stages/*`, `optimizer_steps`, or `train_samples_seen` aliases.
+Historical runs retain their original charts and data. W&B also collects its
+standard system metrics.
+
+The run configuration records the score's meaning in `evaluation.metric`, such as
+`reconstruction_rgb_mse` or `next_frame_rgb_mse`. Filter by that field when comparing
+runs. Validation remains float32, and best-checkpoint selection is unchanged.
+The W&B summary mirrors `summary.json`, including `best_mse` and the training
+budget. Local `metrics.jsonl` and checkpoint metadata retain their full stage
+records independently of the W&B naming scheme.
 
 Read-only diagnostics are enabled by default. Global gradient norms are measured
 on every update and the window maximum preserves single-update spikes. Layer
@@ -410,19 +449,21 @@ the optimizer and progress required to continue training after a restart.
 | `start-scene.npz` | Recorded RGB history and the executed actions between frames for playback |
 | `stages/<name>/best.pt` | Selected checkpoint for this stage, including all models |
 | `stages/<name>/last.pt` | Last completed epoch in this stage |
+| `stages/<name>/epoch-XXXX.pt` | Every evaluated epoch, with its validation scores |
 | `stages/<name>/latest.pt` | Periodic stage snapshot, which may precede evaluation |
-| `best.pt`, `last.pt`, `latest.pt` | Corresponding checkpoints from the final predictive stage |
+| `best.pt`, `last.pt`, `latest.pt` | Corresponding checkpoints from the final stage |
 | `resume.pt` | Full training state: weights, Adam state, stage/epoch/batch progress, RNG, metrics, and stage-best weights |
 
-`trainer.checkpoint_seconds` defaults to 60. Checkpoint replacement is atomic. An
-interrupted run can lose work after the latest snapshot and does not get a completed
+`trainer.checkpoint_seconds` defaults to 600 seconds, or 10 minutes. Checkpoint
+replacement is atomic. An interrupted run can lose work after the latest snapshot
+and does not get a completed
 summary. The playable `best.pt`, `last.pt`, and `latest.pt` files contain weights and
 configuration. The separate `resume.pt` also includes training state.
 See [approaches.md](approaches.md) for stage selection and version compatibility.
 
 ### Stop and resume training
 
-New runs save `resume.pt` every `trainer.checkpoint_seconds` (60 by default), before
+New runs save `resume.pt` every `trainer.checkpoint_seconds` (600 by default), before
 validation, and after each completed epoch. It contains all model weights, Adam
 moments and step counters, the active stage and curriculum epoch, completed batch
 and sample counts, accumulated metrics, stage-best weights, and Python/NumPy/PyTorch
@@ -582,14 +623,14 @@ action/state inputs, or future rollout history.
 Edited tiles show a revert button in their bottom-right corner. It restores that
 frame's original float pixels and reruns inference for the same target. Other
 painted frames and the current frame order stay intact.
-Closing or leaving the browser pauses playback. Ctrl+C in the terminal stops the server.
+Switching tabs or windows keeps playback running and clears held keys. Closing the player page pauses playback. Ctrl+C in the terminal stops the server.
 
 The player starts in single-step mode. Tab toggles continuous playback, capped at
 30 predictions per second for the 60 Hz Atari simulation with frameskip 2. Held
 keys repeat on each tick; the most recently pressed held action key wins. With no
 held keys, playback uses action 0, or the first checkpoint action if 0 is absent.
-Slow inference lowers the effective rate without catch-up steps. R, C, or losing
-window focus pauses continuous playback and clears held keys. In empty-start mode,
+Slow inference lowers the effective rate without catch-up steps. R or C pauses continuous playback and clears held keys. Losing
+window focus clears held keys while playback continues. In empty-start mode,
 the first tick initializes the frame without executing a game action.
 
 ## Browser player workspace
@@ -601,7 +642,7 @@ manually or in Codex's in-app Browser. `--port auto`
 selects an unused port; `--port NUMBER` selects a specific port. Each server has one
 playback session and a random access token shared by its printed URLs. Both tabs
 read the same atomic frame/metric revisions from that session, without duplicate
-inference. Leaving or closing the player tab pauses playback; Diagnostics only sends explicit chart selections as seek commands; it sends no
+inference. Leaving the player tab keeps playback running; closing it pauses playback; Diagnostics only sends explicit chart selections as seek commands; it sends no
 keyboard, heartbeat, or blur commands. Ctrl+C stops the server.
 
 The UI reuses Gradlab's panel module lifecycle, registry, GridStack layout, fonts,
@@ -667,7 +708,7 @@ seeks teacher-forced targets directly using the aligned dataset window. Seeking 
 Frame images, input history, and metrics are committed together from one inference
 revision. The browser only controls and visualizes playback; Python owns all model
 inference and input history. Slow inference lowers playback rate without catch-up
-steps. A lost browser heartbeat pauses playback and clears held actions.
+steps. A lost browser heartbeat clears held actions while playback continues.
 
 ## Teacher-forced replay
 
@@ -689,7 +730,7 @@ The dashboard opens paused with the real initial frame in Original. Prediction a
 Diff show a pending message until the first prediction.
 Space predicts the next recorded transition, Tab toggles continuous
 play at 30 predictions per second, R restarts the current episode, and C selects
-the next episode. Reset, focus loss, and episode end pause replay. Keyboard presses
+the next episode. Reset and episode end pause replay. Focus loss keeps replay running. Keyboard presses
 never replace recorded actions. Start-scene options and action overrides cannot be
 combined with `--teacher-forcing`.
 
@@ -962,3 +1003,887 @@ with BF16 and compiled automatic layout: about 3,566 training windows/s at the
 four-step horizon, excluding full validation and remote uploads. See
 [performance measurements](performance.md#four-frame-context-and-four-step-rollouts)
 for the sweep and timing scope.
+## Brick-grid extraction prototype
+
+`prototype_brick_grid.py` extracts a 6-by-18 visible brick matrix from existing
+lossless Breakout RGB. It calibrates row colors and geometry on a training frame,
+then freezes them. A brick needs at least 75% matching pixels in its 8-by-6 cell;
+small patches fitting inside 2-by-4 pixels are treated as ball pixels. Other
+partial patches remain unknown. The detector uses RGB alone, not recorded counts.
+
+```bash
+uv run --frozen python prototype_brick_grid.py \
+  --dataset /path/to/pinned-dataset \
+  --cache /path/to/matching-lz4-cache \
+  --output logs/brick-grid-prototype/final
+```
+
+The default sample covers 64 consecutive transitions from each train shard and
+64 from each held-out shard starting at offset 64. The separate held-out prefix
+was used for initial exploration; the final offset sample checks the frozen rule.
+Outputs include `labels.parquet`, geometry/provenance JSON, a Markdown report, and
+RGB/matrix diagnostic images. Sources remain unchanged. `grid` and `state_grid`
+flatten in row-major order, top-to-bottom and left-to-right; values are 0 absent,
+1 present, and -1 unknown. Pixel-support fractions are not probabilities.
+
+Recorded successor-state brick counts check extracted matrices. If count or
+certainty checks fail, `state_grid` is entirely unknown while `grid` retains
+visible occupancy. Startup can show an incomplete wall despite 108 internal
+bricks; accepting those visible absences as true state labels would be incorrect.
+Temporal checks use adjacent steps within episodes and validate frame-ID joins.
+
+The September 17 prototype matched counts on all 10,624 fresh held-out examples
+and all 286 sampled single-brick destruction transitions. In 42,496 training
+examples, 318 startup frames failed the internal-state count check. This is
+sampled count/temporal validation, not independent per-brick ground truth. Later
+wall resets were not represented. No full dataset augmentation has been run.
+## Brick dataset annotations
+
+The complete annotated dataset is published at revision
+`9a22e4c0b6b9796a1358f36a6854f2569cbee0af` of
+`tsilva/gradlab-breakout-trajectories`. Existing recipe pins remain unchanged;
+select this revision explicitly when consuming the new columns.
+
+`augment_brick_dataset.py` applies the validated detector to all unique RGB frames,
+then joins results to each successor state and every episode's initial frame.
+It builds a separate output tree and validates every rewritten shard against all
+original columns. It does not change images, splits, rewards, actions, or training
+filters. The dataset's prior revisions remain usable.
+
+```bash
+uv run --frozen python augment_brick_dataset.py \
+  --dataset /path/to/pinned-dataset \
+  --cache /path/to/matching-lz4-cache \
+  --output logs/brick-grid-augmentation --workers 4
+```
+
+The output includes `dataset/transitions`, `dataset/episodes`, publication receipts
+under `dataset/annotations/breakout-bricks-v1`, and resumable scratch arrays. Resume
+requires unchanged code and source identity. Publication is a separate step after
+full validation, using the source Hub commit as the required parent.
+
+Transition columns describe the successor frame:
+
+| Column | Meaning |
+|---|---|
+| `brick_grid` | Six rows of 18 cells: 0 absent, 1 present, -1 unknown |
+| `brick_grid_suspect` | At least one quality flag is set |
+| `brick_grid_quality_flags` | Integer bitmask with the reasons below |
+| `brick_count_visible` | Confidently present cells |
+| `brick_count_mismatch` | Visible count differs from recorded native brick count |
+| `brick_grid_unknown_cells` | Number of unresolved cells |
+| `brick_grid_min_present_support` | Minimum matching pixels among present cells, out of 48; 48 if none |
+| `is_initial_brick_layout` | Frame belongs to the episode's initial wall animation |
+| `source_is_initial_brick_layout` | The input/source frame belongs to that animation |
+| `source_brick_grid_suspect` | Source state's grid has a quality issue |
+
+Episode tables have corresponding `initial_brick_*` columns and
+`initial_is_brick_layout`. Initial native counts are unavailable, so
+`initial_brick_count_mismatch` is null and the count-unavailable bit is set.
+Matrices retain their visual values even when suspect; flags never overwrite
+the inferred pattern to force agreement with a native count.
+
+Quality bits are: 1 unknown cell, 2 count mismatch, 4 unexpected wall color,
+8 partially supported present brick, 16 unexplained brick reappearance,
+32 unvalidated later-wall reset, 64 native count unavailable, 128 initial layout.
+Temporal reappearance checks mark both endpoints. Startup is the initial prefix
+of a fresh full-wall episode up to the first complete visible wall or evidence
+of gameplay. It can contain decreasing visible brick counts. It never restarts
+after life loss or on later walls. This is a documented visual/state heuristic,
+not a native animation flag.
+
+To exclude animation from next-frame pairs, reject rows where either source or
+target layout flag is true. For longer frame histories, check every included
+state's flag, including the episode's initial frame. No automatic exclusion is
+enabled by this annotation work.
+
+
+## Standalone paddle history experiment
+
+`probe_paddle_history.py` trains compact paddle position/native-velocity probes
+from RGB-derived paddle features and independently sized executed-action histories.
+It keeps training, validation, and official held-out episodes separate and writes
+standalone probe checkpoints, not emulator checkpoints for the player.
+
+```bash
+uv run python probe_paddle_history.py prepare
+uv run python probe_paddle_history.py train --categorical --samples 0 --epochs 80 --contexts 1:4,2:2,2:4
+uv run python probe_paddle_history.py evaluate --checkpoints logs/paddle-history-20260917/next-f1-a4-s47-n0-e80-w128-cat.pt
+```
+
+Defaults use the locally cached `676ff6388f4218d3c3a3ce9f2f33e075fa7314a3`
+recording and its verified LZ4 cache. Override `--dataset`, `--frame-cache`, and
+`--output` for other local paths. `--current` predicts the newest observed state;
+the default predicts the successor. Import `infer_rgb` from the script to run a
+saved probe on oldest-to-newest uint8 CHW RGB history and executed actions. Read
+[the experiment results](history.md#2026-09-17-trained-paddle-state-history-probes)
+for alignment, measured context tradeoffs, and the limits of the conclusion.
+
+### Full RGB paddle probe
+
+`probe_paddle_rgb.py` repeats the next-state experiment with the entire recorded
+210×160 RGB image. Its `paddle_state_cnn` model uses the exact `FrameCodec.encoder`
+architecture: three stride-2 convolutions with channels 3→32→64→32, kernel 4,
+padding 1, and ReLU after the first two. Images are divided by 255 and padded
+at the bottom to 216 pixels, as in the codec. Each historical image passes through
+the same encoder. The regression head combines their learned features and
+independently sized one-hot action histories.
+
+```bash
+uv run python probe_paddle_rgb.py prepare
+uv run python probe_paddle_rgb.py train --contexts 1:4,2:2,2:4 --samples 512 --validation-samples 1024 --epochs 80
+uv run python probe_paddle_rgb.py evaluate --checkpoints /path/to/probe.pt
+```
+
+Preparation reuses the feature study's episode and frame identities, then reads
+`paddle_x_normalized` and `paddle_vx_normalized` directly from the original
+recordings. Extracted paddle features are never inputs to this probe. The latest
+input image is frame t, the last included action is action t, and the target is
+state t+1. Native-unit reporting multiplies both normalized outputs by 160;
+velocity is pixels per native emulator tick, not captured-frame displacement.
+
+`--position-head` selects `paddle_position_cnn`, an explicit alternative readout
+with the same CNN. A learned 160-class position head receives auxiliary
+cross-entropy supervision from the recorded position of each observed frame.
+Those labels are training targets only. At inference, learned position
+probabilities and actions predict the next state. `heads --resume-checkpoints
+/path/to/position-probe.pt --head-epochs 80 --contexts 1:3,1:4,2:2,2:4` freezes this
+learned perception in evaluation mode and compares temporal heads efficiently
+using cached CNN probabilities. Every saved model still accepts full RGB.
+
+Training initializes from scratch unless `--resume-checkpoints` is explicit.
+It does not load the existing autoencoder weights, whose training episodes overlap
+this probe's validation set. `--fp32` disables encoder autocast and TF32; final
+evaluation always uses float32 without TF32. These are standalone state probes,
+not emulator checkpoints accepted by the player. Generated data, launch receipts,
+checkpoints, and metrics remain under `logs/paddle-rgb-20260917/`.
+
+### Direct current paddle state
+
+For state estimation, align the output with the newest observed image. This is a
+different objective from the successor-state experiment above. The plain
+`paddle_state_cnn` can output all three recorded normalized paddle variables
+directly, without a position-classification head or transition model:
+
+```bash
+uv run python probe_paddle_rgb.py prepare --include-width --output logs/paddle-current-rgb-20260917
+uv run python probe_paddle_rgb.py train --current --output logs/paddle-current-rgb-20260917 --contexts 1:0,1:4,2:0,2:1,2:4 --samples 256 --epochs 20
+```
+
+The output order is `paddle_x_normalized`, `paddle_vx_normalized`,
+`paddle_width_normalized`. The last input frame and the target describe state t;
+the action history ends at action t−1, which produced that frame. Recorded states
+serve only as targets. Current position and width are visible, while current
+native velocity may require temporal or action information.
+
+The dataset normalizes x and velocity by 160, but width by 16. In this recording,
+width targets are 1.0 and 0.75, corresponding to 16 and 12 pixels. Preparation
+checks this conversion against the recorded native width. The model outputs the
+original normalized values. Training weights squared normalized errors by their
+native scales, so each native-unit error contributes equally. Reports retain both
+normalized and native MAE, including separate results for each width.
+
+### Joint current paddle and ball state
+
+`--include-ball` prepares seven targets directly from the normalized dataset fields
+and includes paddle width automatically:
+
+```bash
+uv run python probe_paddle_rgb.py prepare --include-ball --output logs/paddle-ball-current-20260917
+uv run python probe_paddle_rgb.py train --current --contexts 2:1 --output logs/paddle-ball-current-20260917 --epochs 24
+```
+
+The output order is paddle x, paddle vx, paddle width, ball x, ball y, ball vx,
+and ball vy. Each uses the corresponding existing `_normalized` field. Preparation
+does not infer labels from RGB or calculate velocity labels from displacement.
+The native reporting scales are `[160, 160, 16, 160, 255, 2, 3.375]`; ball velocity
+scales differ from paddle velocity, and ball y uses 255 rather than image height.
+The source conversion is checked against native records while preserving the
+original normalized training targets.
+
+The same CNN and frame/action history feed a seven-output direct regression head.
+`--expand-outputs --resume-checkpoints /path/to/paddle-model.pt` retains existing
+paddle output rows and initializes new rows, then trains all weights jointly.
+It does not freeze the paddle encoder or add an auxiliary classifier.
+
+`--loss-weighting native` retains the earlier equal-native-unit residual weights.
+`normalized` uses unweighted MSE on the recorded normalized values. `standardized`
+weights each residual by the inverse standard deviation of that normalized target
+in the sampled training set. These options change loss weights, not stored labels
+or model output representations. Reports include each target's normalized/native
+MAE and tails. Evaluation also separates cases with changed recorded ball velocity,
+unchanged recorded ball position, and ball y outside the RGB canvas; these are
+diagnostic slices, never exclusions or model inputs.
+
+`--regression-loss huber` retains the same weighted quadratic loss for errors
+below one native unit and uses linear growth beyond that point. All labels and
+examples remain included. `--selection worst-native-mae` selects the checkpoint
+with the lowest maximum per-output native MAE, useful when the goal is accuracy
+on every variable and a few coordinate outliers dominate squared error. The
+default remains MSE training and native-MSE checkpoint selection for reproducing
+the earlier experiments. Each run records its loss and selection settings.
+
+## Single-ball state dynamics
+
+`gymemu dynamics` isolates dynamics from perception and rendering. The input is
+recorded normalized ball x/y/vx/vy, paddle x/width, a 6-by-18 binary brick grid,
+and requested policy actions. The outputs are the next state and a terminal
+probability. Lives, score, serve phase, RGB, frame IDs, and episode IDs are not model
+inputs. Lives are used only to identify loss boundaries. This experiment has its
+own state metrics and is not ranked against RGB approaches by pixel MSE.
+
+New configs set `model.predict_paddle_velocity=false`. Both MLP and GRU exclude
+that input and output, its training loss, and its reported prediction metrics.
+Context probes also exclude velocity from the retained paddle history. The cache
+keeps its original 115-slot layout for compatibility; slot 5 is a reserved zero in
+new generated states, not a velocity estimate. Recorded dataset columns remain
+unchanged. Older checkpoints without the option retain their original behavior.
+Use `model.predict_paddle_velocity=true` only to reproduce legacy dynamics fits.
+Isolated probes omit velocity from their default targets; an explicit legacy
+velocity target also requires `--legacy-paddle-velocity`.
+
+The read-only adapter uses annotated dataset revision
+`9a22e4c0b6b9796a1358f36a6854f2569cbee0af`. It joins successor labels to the next
+state and uses the following row's requested action for that state's outgoing
+transition. Missing reset labels never become fabricated states. The adapter
+validates the original frame chain using IDs, never treating IDs as offsets.
+
+A lives decrease or active-to-zero ball-y transition ends a logical single-ball
+segment. A loss followed by a serve inside one frameskip also ends the segment.
+The new active successor can independently begin another segment. Waiting/startup
+states and suspect brick annotations are excluded. Quality gaps and recording
+truncation censor segments but do not become death labels. No context or training
+rollout crosses a segment boundary. Split assignment happens at the original
+episode level, before segmentation. Training and validation come from disjoint
+original training episodes; the original held-out split supplies the reserved test.
+
+Prepare a reusable cache, without downloading or decoding image assets:
+
+```bash
+uv run gymemu dynamics prepare cache=data/state-dynamics
+# Or use the existing local annotated snapshot:
+uv run gymemu dynamics prepare \
+  dataset=/absolute/path/to/annotated-dataset cache=data/state-dynamics
+```
+
+Null episode counts select the available data, reserving 20% of original training
+episodes for validation. For a bounded experiment set `data.train_episodes=128`,
+`data.validation_episodes=32`, and `data.test_episodes=64`. The cache saves rules,
+original episode IDs, segment boundaries, and the dataset manifest hash. Its
+`manifest.json` is complete only after every split is written; incomplete caches
+cannot train. Cache and run destinations must be new directories.
+
+Train the one-state baseline, or run the context/capacity/memory search:
+
+```bash
+uv run gymemu dynamics train cache=data/state-dynamics output=runs/state-baseline
+uv run gymemu dynamics search cache=data/state-dynamics output=runs/state-search
+```
+
+Hydra composes `configs/state_dynamics.yaml` with the dataset identity and starting
+state selection in `configs/game/breakout_state.yaml`. Dotted overrides reject
+unknown keys. `model.history` counts observed states including the current one;
+`model.past_actions` counts prior requested actions and excludes the always-present
+current action. Histories are ordered oldest to newest and left-padded with explicit
+state validity and a separate non-action token. State and action lengths are
+independent. Each model receives the same eligible source/target identities.
+
+The search first fits all configured context combinations over the configured
+seeds. It selects contexts by mean validation score, then compares MLP widths and
+GRUs over the same seeds. Finalists include generated-state training. The winning
+configuration is selected by mean seed score, with parameter count breaking exact
+ties; the best validation seed supplies the final checkpoint. Only then does the
+search evaluate that checkpoint on the reserved test split. Results identify the
+best tested configuration within the saved budget, not a universal optimum.
+
+The MLP predicts residual motion. Brick/width heads start with a persistence bias;
+all transitions and collision effects remain learned. The GRU processes the warm-up
+context and then carries recurrent memory through generated steps. Brick and width
+feedback commits discrete values in both training and inference. Training uses a
+straight-through gradient for these decisions. Signed velocity outputs have no
+sigmoid or `[0,1]` clamp. Motion losses use documented native-unit tolerances,
+not an assumption that every normalized field has the same scale.
+
+Training begins with one-step supervision, then uses configured rollout horizons.
+Every valid generated step receives the corresponding recorded target. Ground-truth
+segment boundaries control masks: predicted termination never hides later training
+losses. Terminal transitions supervise only termination; next-state losses are
+masked. Brick change weighting supplements BCE on every cell, including false
+appearances. Termination BCE uses a training-only positive weight capped at 100.
+Rollout stages use half the initial learning rate and begin from the best validation
+checkpoint, including its matching optimizer state. Every evaluated epoch is saved.
+
+Validation reports native-unit per-field errors, collision and brick-change subsets,
+brick-removal precision/recall, spurious reappearances, and termination confusion
+counts. Collision subsets are label-derived velocity-change diagnostics, not native
+collision event annotations. Threshold selection maximizes validation terminal F1,
+then prefers fewer false positives. Test evaluation reuses the saved threshold.
+
+The fixed selection score is the mean across configured available rollout horizons
+of capped ball-position MAE, capped paddle-position MAE, and 20 times brick-cell
+error rate, plus 20 times early-terminal rollout fraction and 10 times terminal
+F1 error. Ball MAE is capped at 100 and paddle MAE at 50 only in this ranking score;
+unclipped errors remain in the report. Inspect event-specific results before calling
+a model playable. State rollout metrics deliberately continue diagnostic prediction
+after a predicted early stop so premature termination cannot conceal error.
+
+Each run saves resolved configuration, the data/segmentation manifest, per-epoch
+metrics and checkpoints, the selected checkpoint, and a summary. Checkpoints load
+with `weights_only=True` through the fixed state-model registry. No Python target
+from checkpoint metadata is executed. This experiment writes local artifacts; it
+does not start W&B sessions or upload checkpoints automatically.
+
+Evaluate or replay a state checkpoint:
+
+```bash
+uv run gymemu dynamics evaluate cache=data/state-dynamics \
+  checkpoint=runs/state-baseline/best.pt output=logs/state-validation
+uv run gymemu dynamics play cache=data/state-dynamics \
+  checkpoint=runs/state-baseline/best.pt output=logs/state-playback \
+  playback.start_index=0 playback.steps=128
+```
+
+Playback uses recorded requested actions with recursively generated state and stops
+on predicted termination. It also stops at the source segment/step limit because
+recorded actions beyond that segment are not part of this task. The JSON distinguishes
+those stop reasons and includes aligned reference states for diagnosis. It renders
+no images. `StatePlayer` can also be driven by fresh requested actions; it rejects
+steps after termination. There is no respawn, serve-phase estimator, or lives output.
+A new player instance starts a new scene. `checkpoint=...` on `train` initializes
+fine-tuning in a new directory; it is not an exact interrupted-run resume command.
+
+## Isolated state targets and input sufficiency
+
+Before combining state losses, audit identical inputs for contradictory next-state
+labels and train each target independently:
+
+```bash
+uv run state_observability.py --cache data/state-dynamics-20260917 \
+  --output logs/state-observability-new --contexts 1:7,8:7,16:15,32:31,full
+uv run state_probes.py --cache data/state-dynamics-20260917 \
+  --output runs/state-isolated-new --contexts 1:7,8:7 --epochs 20 --samples 100000
+```
+
+Context notation is observed states followed by past requested actions. The current
+action is always included. `full` hashes the entire observed prefix since the current
+virtual segment began. The audit reads training data only. It reports contradictions
+per target, explicit witness episode/step pairs, empirical error floors, and a
+separate count for examples with fully available context. A contradictory pair
+proves that exact prediction from those inputs is impossible. No matching
+counterexample does not prove that a finite history is sufficient.
+
+Each isolated run has independent weights, one selected loss, and no generated
+feedback. Scalar motion targets use their native-unit squared errors with the same
+per-field tolerance as the state experiment. Paddle width, brick occupancy, and
+terminal events use their respective BCE objectives. Brick occupancy is one target
+family with 108 output cells; this does not isolate its individual cells. Choose a
+subset with `--targets ball_y_normalized,terminal`. Every run saves its target,
+configuration, seed, cache/evaluation identities, checkpoint, training diagnostic,
+and validation metrics. The command does not evaluate the reserved test split.
+
+Checkpoints use `gymemu-state-probe-v1` and are diagnostics, not playable joint
+emulators. Scalar checkpoints minimize validation native RMSE. Terminal and brick
+checkpoints maximize validation terminal/removal F1; width uses validation BCE.
+The terminal threshold is chosen on validation only and reused for the training
+sample diagnostic. High width/cell accuracy is not sufficient: inspect width-change
+accuracy and brick-removal precision/recall. Failed isolated fits do not prove
+missing information; use exact conflicts and small training-set fit checks to
+separate that hypothesis from optimization and sampling problems.
+
+The optional retained paddle context addresses an input problem found in the audit:
+startup brick quality had excluded valid paddle observations from history. It reads
+paddle x/vx/width and requested actions from the original records, with explicit
+validity masks. It preserves history through brick-only quality gaps but clears it
+at life loss, a lifecycle reset, or missing paddle measurements. No reset labels are
+invented. It uses no future observations and does not change target eligibility:
+
+```bash
+uv run state_probes.py --cache data/state-dynamics-20260917 \
+  --output runs/state-retained-paddle-new --contexts 1:7 \
+  --targets paddle_x_normalized,paddle_vx_normalized \
+  --paddle-context 32 --epochs 20 --samples 100000
+```
+
+This explicitly selects the registered `state_paddle_context_probe` model. Its
+inputs combine the ordinary context with the additional paddle observations,
+validity flags, and actions. It verifies dataset-manifest provenance and equality
+between recovered current paddle values and the existing cache. The original
+state cache and joint training/playback contract remain unchanged. These probes
+run on CPU. Results and limitations are in
+[the experiment history](history.md#2026-09-17-loss-scaling-and-isolated-state-targets).
+
+
+### Event diagnostics and longer isolated fits
+
+Every isolated fit now saves `event_diagnostics` and `training_event_diagnostics`
+in `summary.json`. These compare native scalar errors with constant motion during
+ordinary flight, velocity changes, brick changes, inferred paddle/wall collisions,
+paddle reversals, and width changes. Event groups overlap. Wall/paddle labels are
+geometric proxies inferred from recorded transitions, not native collision flags.
+Terminal successor states remain excluded from all state-error groups. Terminal
+classification and brick-removal errors are reported separately. Event labels are
+used for evaluation or sampling, never as predictor inputs.
+
+To repeat the corrected-context convergence experiment:
+
+```bash
+uv run state_probes.py --cache data/state-dynamics-20260917 \
+  --output runs/state-convergence-new --contexts 8:7 --paddle-context 32 \
+  --targets paddle_x_normalized,ball_x_normalized,ball_y_normalized \
+  --epochs 60 --samples 100000
+```
+
+The command saves `best-through-020.pt`, then equivalent snapshots every twenty
+epochs, so a single run supports matched budget comparisons. Each snapshot is the
+lowest validation-score checkpoint reached by that budget, not necessarily the
+weights at its final epoch. `best.pt` remains the overall selected checkpoint.
+
+`--sampling balanced_events` draws half of each training epoch from transitions
+with a velocity change, brick change, or terminal event, and half from the rest.
+Rare events repeat when necessary. Nonterminal target models continue excluding
+terminal transitions. Validation sampling and its episode identities are unchanged.
+This deliberately changes the training objective's effective event weights; it is
+not importance-corrected sampling. Compare it with uniform sampling from the same
+initial checkpoint and budget before adopting it. The first experiment improved
+collision errors but worsened aggregate ball-y accuracy.
+
+`--learning-rate` controls AdamW's learning rate. For matched continuations, the
+Python `train_target(..., initial_checkpoint=path)` API checks target, model config,
+and cache identity, records the checkpoint hash, and initializes a fresh optimizer.
+This is fine-tuning, not exact optimizer-state resume. Development event diagnostics
+reject the reserved test split. See the
+[convergence investigation](history.md#2026-09-17-event-errors-and-isolated-convergence).
+
+
+### Reconstructed internal-state inputs
+
+The `state_hidden_probe` registry entry adds five inputs to the isolated context
+MLP: controller charge, controller measurement, input-repeat state, held-input
+state, and cumulative paddle-hit count. Each input describes the source state,
+before the action being predicted. These experiments measure whether known internal
+variables help an isolated predictor. They are not joint emulators and do not
+provide a way to obtain ground-truth internal values during learned playback.
+
+Build the separate input cache with the pinned native Rust source snapshot used
+by the audit:
+
+```bash
+uv run python -m gymemu.state_hidden_context \
+  --cache data/state-dynamics-20260917 \
+  --output data/state-hidden-new \
+  --native-source logs/state-event-diagnosis-20260917/native-source.rs
+uv run state_probes.py --cache data/state-dynamics-20260917 \
+  --output runs/state-hidden-new --contexts 8:7 --paddle-context 32 \
+  --targets paddle_x_normalized --hidden-inputs data/state-hidden-new \
+  --hidden-mode controller --epochs 60 --samples 100000
+```
+
+The builder reads training/validation episode metadata and actions. It reproduces
+the pinned controller from reset, verifies every recorded paddle position/velocity,
+and saves its state before each current action. Controller memory persists across
+life loss. The separate hit counter includes only earlier inferred paddle bounces,
+is capped at twelve, and resets at segment starts with verified initial-serve
+velocity. A non-serve segment start fails preparation instead of guessing the count.
+The original dataset and ordinary history boundaries stay unchanged.
+
+The input-cache manifest binds dataset/state-cache identities, source hash, feature
+scales, verification counts, and array checksums. Loading rejects changed arrays or
+an incompatible state cache. The fixed source snapshot hash prevents a different
+native version from silently receiving the same provenance label.
+
+`--hidden-mode none` supplies zeros in the same five positions, preserving model
+parameter count. `controller`, `hits`, and `both` enable the corresponding inputs.
+All modes receive the same history and action inputs. Use matched seeds, training
+samples, budgets, and validation targets for comparisons. Continuation experiments
+also copy the same prior weights and initialize added first-layer columns to zero,
+so predictions initially agree within float32 precision. New input weights remain
+trainable. Their initial equality does not imply equal behavior after training.
+
+See [the internal-state experiment](history.md#2026-09-17-known-internal-state-inputs)
+for the completed comparisons and the separate exact paddle-input sufficiency check.
+
+
+### Paddle controller dataset columns
+
+Build a dataset version containing the four reconstructed paddle controller values:
+
+```bash
+uv run python -m gymemu.augment_paddle_dataset \
+  --dataset logs/brick-grid-augmentation-20260917-v1/dataset \
+  --output data/breakout-paddle-controller-20260918 \
+  --native-source logs/state-event-diagnosis-20260917/native-source.rs
+```
+
+`--frames /path/to/existing/frames` optionally links unchanged image assets when
+the input is a local table-only dataset. The output must not exist. The build uses
+a `.incomplete` directory and renames it only after all validation passes. It does
+not upload to the Hub or modify the source dataset.
+
+Each transition has `paddle_charge`, `paddle_measure`, `paddle_repeat`, and
+`paddle_held` for its successor state, aligned with `record_json`. The same names
+with `source_` describe the state before its action. Episode tables include the
+four `initial_` values after reset no-ops and before the first recorded action.
+Charge, measurement, and repeat are int32; held is boolean. Divide by
+`[3856, 235, 60, 1]` when the existing normalized diagnostic input format is needed.
+
+Reconstruction starts from known reset values, reproduces the seeded reset no-ops,
+and applies recorded executed actions using the pinned native controller. It
+retains controller memory across life losses. The pinned final-life frame-stop
+rule uses preceding source labels; current successor labels only verify replay.
+This path requires the original fixed frameskip-2, sticky-0 collection contract.
+Every successor paddle position and velocity must match exactly. A missing,
+duplicate, out-of-order, or incomplete episode stops the build. Each output file
+is read back and compared against every original column and every new value.
+
+`annotations/breakout-paddle-controller-v1/` contains schema/timing information,
+source and output checksums, pinned code, and validation counts. Earlier brick
+receipts remain historical records of the input dataset; the new receipts describe
+the rewritten files. No paddle-hit count is added. Train and held-out memberships
+stay unchanged. Annotation is deterministic and fits no model on either split.
+Existing dynamics loaders ignore the new columns until an explicit input adapter
+uses them; creating this dataset does not change existing models or checkpoints.
+
+### Compact paddle learning with sufficient inputs
+
+`gymemu.paddle_transition_training` isolates next paddle x using only current x,
+controller charge/measurement/repeat/held values, and the current requested action.
+It uses the verified internal-input cache. Ball state, bricks, paddle velocity,
+width, and all history are omitted. Life-loss targets remain excluded. All eligible
+training transitions are visited once per epoch; complete validation episodes
+remain separate from training.
+
+```bash
+uv run python -m gymemu.paddle_transition_training \
+  --cache data/state-dynamics-20260917 \
+  --hidden data/state-hidden-inputs-20260917 \
+  --output runs/paddle-compact-new \
+  --encoding hybrid --objective classification --epochs 100 --seed 2026
+```
+
+The registered `paddle_transition_mlp` uses two SiLU hidden layers by default.
+`scalar` encoding scales the five state values and appends a one-hot action.
+`hybrid` also supplies ordinary binary digits of the same five integers. This adds
+no information or controller rules; it changes the input representation. The bit
+widths are 8, 12, 8, 6, and 1. The successful model has 43 input features and 25,111
+parameters with width 128 and two hidden layers.
+
+`regression` predicts a native-pixel displacement using MSE. `classification`
+selects an integer displacement with cross-entropy and argmax. Displacement classes
+are determined from training targets only; this cache contains -11 through +11.
+Validation classes outside that range cause an error, rather than clipping labels.
+Reported exact-pixel accuracy rounds regression output to the nearest integer;
+raw regression MAE and rounded MAE are saved separately. Classifier output is
+already integer-valued.
+
+Training uses AdamW without weight decay, native-unit losses, gradient clipping,
+and cosine learning-rate decay. The selected checkpoint minimizes validation
+integer errors, then raw RMSE. Run configs record all settings, input identities,
+and internal-state provenance. `best.pt` uses `gymemu-paddle-transition-v1` and is
+loaded through a fixed registry kind. It is not compatible with the joint player.
+Actual inference is `model.delta(model(source))`, followed by adding current x.
+It never executes the native controller calculation.
+
+`--controller-fields charge` restricts the predictor to current paddle x, charge,
+and requested action. `--controller-fields charge repeat held` removes only
+measurement. Omitting this option retains all four controller fields, including
+for older checkpoints. Input selection happens inside the registered model before
+scalar/binary encoding; omitted fields cannot affect its output. The checkpoint
+stores the selected fields. `repeat_unsaturated` evaluation separately reports
+cases where the repeat counter is below 60, which overall accuracy can obscure.
+For this pinned controller, reset no-op counts 1 through 30 and two native frames
+per executed action, exhaustive reachable-state checks confirm that x plus charge
+is sufficient to determine both next x and next charge. This includes startup
+under that contract. The position probe only learns next x; it still requires
+correct current charge. See [the minimum-input results](history.md#2026-09-18-minimum-controller-inputs-for-paddle-position).
+
+The default data-loading path permits train/validation only. After model selection
+is frozen, a separate internal cache can be prepared with
+`python -m gymemu.state_hidden_context ... --test-only`; explicit
+`load_data(..., 'test', allow_test=True)` enables final evaluation. These test values
+are correct source-time inputs, not model-predicted controller state. The native
+reconstruction accounts for a last-life action ending after one native frame, using
+only preceding source ball/life labels. Ordinary nonterminal predictions advance
+the configured two frames.
+
+The [sufficient-input experiment](history.md#2026-09-17-accurate-paddle-learning-from-sufficient-inputs)
+reports the controlled encoding/objective comparison, two classifier seeds, and
+frozen-checkpoint final-test results. This establishes accurate one-step paddle-x
+learning with known controller state; it does not train controller-state updates,
+ball dynamics, or an end-to-end emulator. The later charge experiment below tests
+the remaining paddle update separately.
+
+### Learning the paddle charge update
+
+The compact training path also supports `--target paddle_charge`. It reads source
+and successor charge directly from the annotated transition tables, joins by
+original episode ID and step, checks provenance and file hashes, and excludes the
+same life-loss targets as the position experiment. Current inputs are still x,
+charge, and requested action. No native controller code runs inside the predictor.
+
+```bash
+uv run python -m gymemu.paddle_transition_training \
+  --cache data/state-dynamics-20260917 \
+  --hidden data/state-hidden-inputs-20260917 \
+  --annotations data/breakout-paddle-controller-20260918 \
+  --target paddle_charge --controller-fields charge \
+  --encoding hybrid --objective classification \
+  --epochs 100 --seed 1591 --output runs/paddle-charge-new
+```
+
+The classifier predicts a charge change, which is added to current charge. Its
+ordered classes come from training targets only and are stored in the checkpoint
+as `delta_values`; an unseen validation class raises an error. This dataset has
+11 classes: -120, -60, -9, -5, -1, 0, 1, 5, 9, 60, and 120. Charge metrics use
+native charge units and exact-integer accuracy, not pixels. Checkpoint config
+stores the target and annotation provenance. Older contiguous position-class
+checkpoints remain supported.
+
+Both tested seeds achieved zero errors on all 88,590 validation transitions.
+The frozen position and charge models were then evaluated together from 256
+validation starts, feeding both outputs back for up to 128 steps. Each seed made
+zero charge errors across 30,909 scored predictions; the position model made one
+transient one-pixel error. Recorded actions and reference segment boundaries are
+used, with correct x/charge supplied only at initialization. This evaluates the
+paddle subsystem; it does not include learned ball, brick, or terminal dynamics.
+The full method and limits are in the [charge results](history.md#2026-09-18-learned-charge-updates-and-removal-of-paddle-velocity).
+
+### Discrete horizontal-velocity probes
+
+The registered `ball_velocity_mlp` predicts only the next horizontal ball
+velocity. Its source values are current ball position and velocity, paddle
+position and width, controller charge, previous paddle-hit count, fractional
+vertical position, brick-contact memory, and the brick layout. The eight
+nonterminal output classes are -2, -1.5, -1, -0.5, 0.5, 1, 1.5, and 2. A matched
+regression variant predicts an additive velocity change. Paddle velocity is not
+an input.
+
+The 2026-09-18 diagnostic campaign keeps reconstructed collision memory in RAM;
+it does not modify datasets or state caches. Reconstruction starts with the known
+integer ball position at episode reset. The fractional vertical position persists
+across life loss, even though training examples and model history still stop at
+each life boundary. Replay uses prior/current state, never the target to choose
+the current memory. Validation successors check the calculation and score the
+model. Both formerly ambiguous validation examples resolve to a 5/8-pixel
+fraction. This establishes input sufficiency on the checked train/validation
+transitions, not an accuracy guarantee for other environment configurations.
+
+The local experiment driver is
+`logs/ball-vx-discrete-20260918/train.py`; `prepare.py` in the same directory
+reconstructs source inputs without persisting feature arrays. The campaign uses
+the existing 128 training and 32 validation episodes, full training sampling,
+two hidden layers of 128 SiLU neurons, and 100 epochs per fit. It compares
+collision-memory masking, categorical versus regression targets, and scalar
+versus scalar-plus-bit inputs. Runs live under `runs/ball-vx-discrete-20260918/`.
+Best checkpoints minimize validation native-velocity MSE; the reserved test is
+not used. Do not run this driver over an existing output directory.
+
+Two follow-up drivers, `train_brick_augmentation.py` and `train_relative.py`, use
+the same splits, seeds, epoch budget, and checkpoint selection. The first replaces
+brick-layout inputs with randomly chosen training layouts only when source RAM y
+is above 100, too far below the bricks for a contact in two native frames. The
+native diagnostic verifies target invariance on both checked splits. This
+augmentation happens only in training RAM; validation uses the original inputs,
+and no dataset records are added or changed. Its separate random generator keeps
+the control's training order intact. The second adds an optional ball-to-paddle
+horizontal offset encoding to that same augmented fit. Hybrid offset models have
+195 encoded inputs and 42,632 parameters, compared with 182 and 40,968 without it.
+
+These are recorded-source, one-step probes. They do not predict the other game
+variables or establish recursive simulation accuracy. Reconstruction code is
+diagnostic preparation, not part of neural playback. Dataset additions still
+require the user's approval.
+
+### Focused paddle-region velocity probes
+
+The local drivers in `logs/ball-vx-paddle-focus-20260918/` select eligible
+nonterminal sources with RAM ball y between 160 and 183 inclusive and positive
+vertical velocity. Selection never uses whether the successor contains a hit.
+This retains all 6,336 training and 1,519 validation paddle hits, plus approaches
+without a hit: 30,204 training and 7,164 validation examples in total. The existing
+episode split and life boundaries remain unchanged; the reserved test is unused.
+
+Two model contracts use the same selected examples: the previous 118-value input
+with training-only brick-layout augmentation, and `paddle_only=True` with nine
+values (ball x/y/vx/vy, paddle x/width, charge, prior hit count, fractional y).
+Both use hybrid encoding, derived horizontal offset, two 128-unit SiLU layers,
+and eight velocity classes. Compact encoding has 85 inputs and 28,552 parameters;
+the full input has 195 and 42,632. Native diagnostics verify that removing bricks
+and contact memory cannot change the checked targets in this region. Native
+rules remain outside neural inference.
+
+`train.py` screens both contracts with seeds 91 and 2026 for 100 epochs. This
+provides only 3,000 optimizer updates, compared with the global probe's 35,100.
+`train_stepmatched.py` trains fresh models for 1,170 epochs to match that update
+count, stretching the cosine schedule accordingly. Matching updates does not
+match unique-example coverage or validation-selection opportunities. AdamW,
+learning rate 0.001, weight decay 0.0001, batch size at most 1,024, gradient clip
+5, and minimum-validation-MSE checkpoint selection are otherwise retained.
+
+Reports separate wrong direction, wrong absolute speed, and their intersection;
+these are diagnostics, not separate output heads. They also distinguish native
+frame timing and approaches that pass the paddle without a hit. Each saved
+checkpoint is reloaded and must reproduce its validation metrics. Source-memory
+reconstruction, augmentation, and feature removal happen in RAM without dataset
+or cache writes. Results are in the
+[research history](history.md#2026-09-18-focused-paddle-region-velocity-learning).
+These are one-step velocity probes restricted to the selected region, not complete
+state models or evidence of recursive accuracy.
+
+### Isolating horizontal direction
+
+`logs/ball-direction-20260918/train.py` compares the compact eight-class velocity
+model with `objective=direction`, a two-class left/right predictor. Both receive
+the same nine source values and 85 encoded inputs, two 128-unit SiLU layers,
+the same 30,204 training sources, seeds 91 and 2026, minibatch order, optimizer,
+and 35,100-update schedule. The direction model has 27,778 parameters versus
+28,552 for the velocity model. The output predicts the sign of next vx only.
+
+Both fresh fits select the checkpoint with the fewest direction errors over all
+7,164 selected validation sources, keeping the earliest tie. This removes the
+previous velocity-MSE selection difference. An additional eight-class decoding
+sums probabilities over the four leftward and four rightward velocities, with
+its own best checkpoint under the same criterion. The driver stores this decoding
+choice; ordinary model `predict()` still selects the most likely velocity class.
+The eight-class loss continues to distinguish speeds, whereas the binary loss
+does not. Native event labels are used only to report accuracy by event.
+
+The experiment also scores previous MSE-selected checkpoints and the baseline
+that preserves incoming direction. It checks source-index identity against the
+focused experiment, retains final-epoch metrics as well as selected checkpoints,
+and verifies identical metrics after checkpoint reload. Artifacts live under
+`logs/ball-direction-20260918/` and `runs/ball-direction-20260918/`. Dataset and
+cache files remain unchanged, and no reserved-test or recursive claim follows
+from validation direction accuracy.
+
+### Auditing direction-error coverage
+
+`logs/ball-direction-coverage-20260918/audit.py` evaluates both frozen direction
+checkpoints on the same selected validation sources. It compares exact source
+matches, distances to 1/5/25 training neighbors, and coarse source-geometry
+counts. The three distance representations are standardized nine-value state,
+standardized relative geometry with combined integer/fractional y, and the
+model's hybrid input encoding. All scaling uses training inputs only. Density
+thresholds come from 2,048 seeded training paddle-hit anchors, excluding their
+entire source episode when finding neighbors. Validation neighbors come only
+from the training split. Distances use float64 and check against direct norms.
+
+The audit separately uses the pinned native transition rules to perturb source
+ball x in eighth-pixel increments, up to two pixels in each direction. A change
+in next-vx sign identifies a local direction boundary. These are diagnostic
+counterfactual states, not new training examples or evidence that each perturbed
+state is reachable. The scan includes wall interactions and hit/miss changes;
+it is not limited to the paddle's direction-selection branch. Model inference
+still uses the original source inputs and no native transition rules.
+
+`unseen.py` repeats the density and boundary comparisons after excluding exact
+training-state duplicates. The reports include error counts, episode-bootstrap
+descriptive intervals, and source/nearest-neighbor witnesses. The same validation
+episodes selected the checkpoints, so these associations are exploratory, not
+causal proof or an independent test score. Both scripts write only diagnostic
+artifacts; dataset and cache files remain unchanged.
+
+### Direction learning with more training episodes
+
+`logs/ball-direction-scale-20260918/train.py` compares nested sets of 128, 256,
+and 512 original training episodes with two seeds each. The split seed and
+ordering come from the existing state-cache manifest. The first 128 training
+episodes and all 32 validation episodes remain identical; expansion uses only
+unused episodes from the original dataset's training partition. The held-out
+partition and reserved test records are not read.
+
+`prepare.py` reads the existing controller-annotated dataset and applies the
+same state adapter and life boundaries in RAM. Source charge comes from the
+existing `source_paddle_charge` column. Source hit count, fractional y, and
+collision memory use the prior diagnostic reconstruction. Native replay checks
+the successors; it does not select current memory using the target. Preparation
+requires exact equality of the old 128 episodes' focused inputs, targets, events,
+episode IDs, and steps. No dataset or feature-cache files are created or modified.
+
+Each fresh fit uses the compact 85→128→128→2 direction model, seeds 91 and 2026,
+35,100 updates, and batches of exactly 1,024 examples. Repeated shuffled passes
+span batch boundaries without dropping examples. Every fit therefore presents
+35,942,400 examples in total, with more unique examples and fewer repetitions
+at larger episode counts. AdamW settings and gradient clipping remain unchanged.
+The cosine schedule and validation checks advance every 30 updates for 1,170
+blocks. This replaces the previous approximately 1,007-example batches, so the
+new 128-episode controls are the primary comparison.
+
+Checkpoint selection minimizes direction errors across the unchanged 7,164
+validation sources. Reports include all 1,519 paddle hits and the fixed sparse,
+boundary, and previously unseen groups from the earlier coverage audit. Those
+groups are evaluation diagnostics and do not affect sampling or the loss.
+Checkpoints and reports live under `runs/ball-direction-scale-20260918/` and
+`logs/ball-direction-scale-20260918/`. Checkpoint reload must reproduce metrics.
+This experiment concerns recorded-source direction prediction; it does not
+evaluate speed or recursive simulation.
+
+### Inferring controller state from history
+
+`controller_history_mlp` is an isolated classifier for current charge or current
+measurement. Inputs contain H observed paddle positions, native-frame velocities,
+widths, validity flags, and the H preceding requested actions. The current action
+is excluded because the target is the current internal state. Startup observations
+remain available, but history never crosses a life boundary. Hidden values are
+supervision only. `gymemu/state_controller_history.py` owns this input construction.
+
+The model combines scaled scalars and binary digits of the same observed integers,
+then applies two 128-unit SiLU layers and a categorical output. Output values come
+only from the training split. Unseen validation values remain errors, not clipped
+labels. The experiment used 8 and 32 observations, 50 epochs, batch size 2048,
+AdamW at 0.001 with no weight decay, cosine decay to 0.00005, and seed 2026.
+Checkpoint selection minimizes validation exact-integer errors, then native MAE.
+
+The bounded experiment drivers and reports are retained locally under
+`logs/controller-history-20260918`: `audit.py`, `train.py`, `downstream.py`,
+`audit.json`, `training.json`, and `downstream.json`. Run directories are
+`runs/controller-history-{charge,measurement}-h{8,32}-20260918`. Driver output
+directories are intentionally new-only. Checkpoints use
+`gymemu-controller-history-probe-v1`, tensor-only loading, and the explicit model
+registry. No joint-player loader was added for these diagnostic checkpoints.
+
+The [history-inference experiment](history.md#2026-09-18-controller-state-from-history)
+separates input ambiguity, finite-budget learning accuracy, and downstream paddle
+error. A lack of duplicate-input contradictions does not prove a history sufficient.
+Complete executed-action history from a known native reset can reconstruct the
+controller, but this is a different information contract from an arbitrary finite
+paddle-history window. Life-loss boundaries clear model context while the native
+controller retains its state. These probes do not establish autonomous rollouts.
+
+
+### Full-data direction geometry experiments
+
+`logs/ball-direction-highaccuracy-20260918/` contains the continuation toward
+approximately 99.99% direction accuracy. `session.py` and `prepare_chunk.py`
+construct the full 1,824-training-episode input set in RAM, preserving the fixed
+32-episode development validation partition and life boundaries. Native checks
+cover 5,271,950 nonterminal transitions. The descending paddle-region selection
+contains 440,833 training examples and 93,389 paddle hits. No dataset or feature
+cache files are written.
+
+`ball_velocity_mlp(spatial_features=True)` is an optional 93-input baseline.
+`ball_direction_geometry` instead freezes a learned intermediate paddle model
+and trains a direction MLP on relative coordinates and motion proposals. The
+intermediate paddle auxiliary target comes from recorded controller values and
+the audited native rule. Only its labels use that rule; neural inference does
+not. The final geometry encoding includes absolute-position bits and has 84
+inputs. Its direction network has three 256-unit ReLU layers and two logits.
+The complete checkpoint includes the frozen 25→128→128→13 SiLU paddle model.
+See [model contracts](approaches.md) for the three geometry encodings.
+
+`transfer.py` streams compressed arrays directly from local RAM to remote RAM.
+`remote_train.py`, `remote_followup.py`, `remote_hard.py`, and
+`remote_absolute.py` preserve configs, metrics, checkpoints, and error witnesses.
+The GPU environment is recorded in `gpu-artifacts/frozen-selection.json` under
+`runs/ball-direction-highaccuracy-20260918/`. This is an isolated diagnostic
+workflow, not a new playable approach or a change to the shared runner.
+
+`freeze.py` chooses by development validation errors before `prepare_test.py`
+reads the reserved 64 test episodes. `remote_test.py` evaluates that choice once.
+`remote_test_audit.py` attributes remaining errors without fitting; `verify_local.py`
+checks the selected checkpoint through the production registry on CPU. Training
+and test arrays remain in RAM throughout. The selected seed-91 model has zero
+validation errors but six independent test direction errors, two on paddle hits.
+Paddle test accuracy is 99.9380%; all selected test approaches score 99.9602%.
+The inspected test episodes must not silently become a fresh independent test
+for subsequent development. Full results and limitations are in the
+[experiment history](history.md#2026-09-18-near-perfect-direction-development-accuracy-and-reserved-test).

@@ -1,0 +1,10 @@
+# @package _global_
+# State-only experiment identity and starting-state selection.
+game:
+  name: breakout
+  env_id: Breakout-Atari2600-v0
+dataset: tsilva/gradlab-breakout-trajectories
+revision: 9a22e4c0b6b9796a1358f36a6854f2569cbee0af
+playback:
+  split: validation
+  start_index: 0

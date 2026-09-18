@@ -10,7 +10,7 @@ export const METRICS = Object.freeze({
   action_history: { label: 'Action history', format: v => `${v} actions` },
 });
 export function measuredHistory(snapshot, range = null) {
-  if (snapshot?.mode !== 'teacher-forcing') return [];
+  if (!snapshot || snapshot.mode === 'autoregressive') return [];
   return (snapshot.history || []).filter(p => Number.isInteger(p.step) && Number.isFinite(p.mse)
     && (!range || (p.step >= range.first && p.step <= range.last)));
 }
@@ -38,7 +38,7 @@ export function mount({ definition, services }) {
     renderTooltip({steps,series,step:hoverStep,geometry});
     canvas.dataset.hoverStep = Number.isFinite(hoverStep) ? String(hoverStep) : '';
     canvas.dataset.selectedStep = String(latest.step);
-    element.querySelector('.chart-empty').textContent = latest.mode !== 'teacher-forcing' ? 'RGB MSE requires recorded targets.'
+    element.querySelector('.chart-empty').textContent = latest.mode === 'autoregressive' ? 'RGB MSE requires recorded targets.'
       : !all.length ? 'Step or play to measure prediction errors.' : !history.length ? 'No measured steps in this zoom range.' : '';
 
   };

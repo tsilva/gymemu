@@ -16,7 +16,8 @@ export function mountPlaybackControls({ services }) {
   let signature = '';
   return { element, render(s) {
     if (!s) return;
-    const replay = s.mode === 'teacher-forcing';
+    const replay = s.mode !== 'autoregressive';
+    const reconstruction = s.mode === 'reconstruction';
     element.querySelector('[data-play]').textContent = s.playing ? 'Pause' : 'Play';
     element.querySelector('[data-play]').disabled = s.finished || Boolean(s.loading);
     element.querySelector('[data-step]').disabled = s.finished || Boolean(s.loading);
@@ -35,7 +36,7 @@ export function mountPlaybackControls({ services }) {
     }
     select.value = s.selection;
     element.querySelector('.action-picker').hidden = replay;
-    element.querySelector('.control-help').textContent = replay ? 'Space steps the recorded action. Tab plays or pauses. R resets; C selects the next episode.' : 'Action keys step once. Hold keys during play; releasing uses the default action. Tab plays or pauses. R resets; C selects the next scene.';
-    element.querySelector('.context-note').textContent = replay ? 'Recorded RGB and action history on every step. Predictions never feed back.' : 'Generated frames feed the next prediction. No recorded-frame corrections.';
+    element.querySelector('.control-help').textContent = reconstruction ? 'Space steps recorded frames. Tab plays or pauses. R resets; C selects the next episode.' : replay ? 'Space steps the recorded action. Tab plays or pauses. R resets; C selects the next episode.' : 'Action keys step once. Hold keys during play; releasing uses the default action. Tab plays or pauses. R resets; C selects the next scene.';
+    element.querySelector('.context-note').textContent = reconstruction ? 'Each recorded frame is encoded and decoded independently. Original and reconstruction show the same timestep.' : replay ? 'Recorded RGB and action history on every step. Predictions never feed back.' : 'Generated frames feed the next prediction. No recorded-frame corrections.';
   }};
 }

@@ -11,6 +11,8 @@ from gymemu.models import build_model
 
 
 class Approach(nn.Module):
+    evaluation_metric = "next_frame_rgb_mse"
+    playback_modes = ("teacher-forcing", "autoregressive")
     action_history = 1
     state_fields = ()
     training_rollout_steps = 0
@@ -458,7 +460,37 @@ class AutoregressiveBallRegionApproach(BallRegionApproach):
         return (total / counts.clamp_min(1)).mean()
 
 
+class ReconstructionApproach(Approach):
+    """Fit a frame codec independently, without constructing temporal dynamics."""
+
+    objectives = ("reconstruction",)
+    evaluation_metric = "reconstruction_rgb_mse"
+    playback_modes = ("reconstruction",)
+
+    def __init__(self, spec, history, actions, shape):
+        super().__init__()
+        self.codec = build_model(spec["codec"], channels=shape[0])
+
+    def validate_stages(self, stages):
+        if [stage["objective"] for stage in stages] != ["reconstruction"]:
+            raise ValueError("The reconstruction approach requires one reconstruction stage")
+
+    def reconstruct(self, frames):
+        return self.codec(frames)
+
+    def forward(self, frames):
+        return self.reconstruct(frames)
+
+    def loss(self, history, action, target):
+        return F.mse_loss(self.reconstruct(target).float(), target.float())
+
+    def evaluate(self, history, action, target):
+        reconstruction = self.reconstruct(target)
+        return F.mse_loss(reconstruction.float(), target.float()), reconstruction
+
+
 class LatentApproach(Approach):
+    playback_modes = (*Approach.playback_modes, "reconstruction")
     objectives = ("reconstruction", "latent_prediction")
     predictive_objectives = ("latent_prediction",)
 
@@ -501,6 +533,9 @@ class LatentApproach(Approach):
     def forward(self, history, action):
         return self.codec.decode(self.predicted_latents(history, action), self.shape)
 
+    def reconstruct(self, frames):
+        return self.codec(frames)
+
     def loss(self, history, action, target):
         if self.objective == "reconstruction":
             # Only training targets enter representation fitting, never held-out images.
@@ -516,6 +551,7 @@ APPROACHES = {
     "ball_region": BallRegionApproach,
     "ball_state": BallStateApproach,
     "latent": LatentApproach,
+    "reconstruction": ReconstructionApproach,
     "scheduled_actions": ScheduledSamplingApproach,
     "scheduled_ball_region": ScheduledBallRegionApproach,
     "autoregressive_ball_region": AutoregressiveBallRegionApproach,

@@ -62,13 +62,21 @@ def test_shared_keyboard_fresh_presses_and_held_priority():
     handle_key(p, "left", s.keymap, down=False)
     s.tick()
     assert p.last_action == 0
-    for kind in ("pause", "blur", "reset", "next"):
+    for kind in ("pause", "reset", "next"):
         s.control({"type": "play"})
         s.control({"type": kind})
         assert not p.continuous and not p.held_keys
     s.control({"type": "play"})
+    handle_key(p, "left", s.keymap)
+    s.control({"type": "blur"})
+    assert p.continuous and not p.held_keys
+    before = len(p.model.calls)
+    assert s.tick() and len(p.model.calls) == before + 1
+    handle_key(p, "right", s.keymap)
+    before = len(p.model.calls)
     s.tick(now=s.last_heartbeat + 2)
-    assert not p.continuous  # Lost browser must not leave playback running.
+    assert p.continuous and not p.held_keys
+    assert len(p.model.calls) == before + 1 and p.last_action == 0
 
 
 def test_replay_seek_select_atomic_images_and_history(snapshot):

@@ -89,7 +89,7 @@ function receiveRange(message) {
   rangeRevision=message.revision;chartRange=range;renderChartRange();
 }
 function inspectStep(step, episodeId, historyEpoch) {
-  if(snapshot?.mode==='teacher-forcing' && !snapshot.loading)
+  if(snapshot && snapshot.mode!=='autoregressive' && !snapshot.loading)
     return command({type:'seek',position:step,episode_id:episodeId,history_epoch:historyEpoch});
 }
 function persist(immediate=false) {
@@ -176,7 +176,7 @@ function timelineEnd(s) {
   return (s.history || []).reduce((last, point) => Math.max(last, point.step), s.step || 0);
 }
 function timelinePosition(s, step=s.step) {
-  const name=s.mode==='teacher-forcing' ? `EPISODE ${s.selection}` : s.name.toUpperCase();
+  const name=s.mode!=='autoregressive' ? `EPISODE ${s.selection}` : s.name.toUpperCase();
   return `${name} · STEP ${step}${s.finished&&step===s.step?' · END':''}`;
 }
 function updateScrubberProgress(slider) {
@@ -201,10 +201,14 @@ document.addEventListener('keyup',event=>{const key=keyName(event);if(pressed.de
 const blur=()=>{scrubbing=false;pressed.clear();if(isPlayer) command({type:'blur'});};
 window.addEventListener('blur',blur);
 document.addEventListener('visibilitychange',()=>{if(document.hidden) blur();});
-window.addEventListener('pagehide',()=>{if(saveTimer) persist(true);active=false;workspaceChannel?.close();if(isPlayer) fetch('/api/command',{method:'POST',headers,body:JSON.stringify({type:'blur'}),keepalive:true}).catch(()=>{});});
+window.addEventListener('pagehide',()=>{if(saveTimer) persist(true);active=false;workspaceChannel?.close();if(isPlayer) fetch('/api/command',{method:'POST',headers,body:JSON.stringify({type:'pause'}),keepalive:true}).catch(()=>{});});
 setInterval(()=>{if(isPlayer && active && !document.hidden) request('/api/command',{method:'POST',body:JSON.stringify({type:'heartbeat'})}).catch(()=>{});},400);
 function chrome(s) {
   $('#checkpoint').textContent=s.checkpoint_label || s.checkpoint.split('/').slice(-2).join('/');$('#checkpoint').title=s.checkpoint;
+  const modes = s.available_modes?.length ? s.available_modes : [s.mode];
+  const labels = {'teacher-forcing':'Teacher forcing','autoregressive':'Autoregressive','reconstruction':'Reconstruction'};
+  if (JSON.stringify([...$('#mode').options].map(o=>o.value)) !== JSON.stringify(modes))
+    $('#mode').replaceChildren(...modes.map(mode=>new Option(labels[mode] || mode,mode)));
   $('#mode').value=s.mode;$('#mode').disabled=!s.available_modes?.length||Boolean(s.loading);
   $('#position').textContent=timelinePosition(s);
   $('#inspection-position').textContent=timelinePosition(s);
@@ -213,9 +217,9 @@ function chrome(s) {
   setSvgUseHref($('#play-toggle-icon'),`/assets/tabler-icons.svg#ti-player-${action}`);
   play.disabled=s.finished||Boolean(s.loading);
   $('#reset-playback').disabled=Boolean(s.loading);settingsToggle.disabled=Boolean(s.loading);
-  previousStep.disabled=s.mode!=='teacher-forcing'||s.step===0||Boolean(s.loading);
+  previousStep.disabled=s.mode==='autoregressive'||s.step===0||Boolean(s.loading);
   playbackSettings.render(s);
-  const slider=$('#timeline-scrubber');slider.disabled=s.mode!=='teacher-forcing'||Boolean(s.loading);slider.max=timelineEnd(s);if(!scrubbing) slider.value=s.step;
+  const slider=$('#timeline-scrubber');slider.disabled=s.mode==='autoregressive'||Boolean(s.loading);slider.max=timelineEnd(s);if(!scrubbing) slider.value=s.step;
   updateScrubberProgress(slider);
 }
 async function decode(images) {

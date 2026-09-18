@@ -26,7 +26,7 @@ runner owns stages, evaluation, and run artifacts. Root scripts are entry points
   actions. --autoregressive selects interactive play, which starts in single-step
   mode with inference on fresh action key presses.
   Tab toggles continuous play at 30 predictions/s for 60 Hz Atari with frameskip 2.
-  Reset and focus loss pause playback. Autoregressive play loads
+  Reset pauses playback. Focus loss clears held keys and keeps playback running. Autoregressive play loads
   start-scene.npz beside the checkpoint and restores it on reset. Breakout's config
   selects its existing full-wall scene after startup animation. --start-scene selects
   another scene; --empty-start explicitly tests learned initialization. Never silently
@@ -38,6 +38,10 @@ runner owns stages, evaluation, and run artifacts. Root scripts are entry points
 - Keep README.md and docs/training.md current. Put approach extension instructions in
   docs/approaches.md and research evidence in docs/history.md. Do not claim a finite
   frame history is fully observable or low pixel MSE guarantees playable rollouts.
+- For Medium research journey drafts, use
+  [draft-research-post-medium](/Users/tsilva/.codex/skills/draft-research-post-medium/SKILL.md).
+  Keep the article short, use simple English, and include a chronological table of
+  all relevant experiments, observed results, and supported conclusions.
 - Use uv sync --frozen, maintain uv.lock, and preserve the seven-day package age gate
   and bad-package constraints. Do not add alternate indexes.
 - Keep generated datasets, runs, checkpoints, and diagnostics ignored. Never commit credentials.

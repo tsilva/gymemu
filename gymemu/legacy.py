@@ -29,7 +29,7 @@ def main(argv=None):
     parser.add_argument(
         "--checkpoint-seconds",
         type=positive,
-        default=60,
+        default=600,
         help="Interval for atomic latest.pt inference snapshots",
     )
     parser.add_argument("--train-split", default="train")

@@ -144,7 +144,7 @@ def run_epoch(
     precision="fp32",
     label="",
     checkpoint=None,
-    checkpoint_seconds=60,
+    checkpoint_seconds=600,
     prefetch=False,
     loss_function=batch_loss,
     diagnostic_loss_function=None,
@@ -285,7 +285,7 @@ def _dataset_identity(root, provenance):
     return {"local_content_sha256": digest.hexdigest()}
 
 
-def _evaluation_contract(identity, episodes, dataset, trainer):
+def _evaluation_contract(identity, episodes, dataset, trainer, metric="next_frame_rgb_mse"):
     count = len(dataset)
     if trainer["eval_batches"] is not None:
         count = min(count, trainer["eval_batches"] * trainer["batch_size"])
@@ -309,7 +309,7 @@ def _evaluation_contract(identity, episodes, dataset, trainer):
         "dataset": identity,
         "targets_sha256": digest.hexdigest(),
         "samples": count,
-        "metric": "next_frame_rgb_mse",
+        "metric": metric,
         "normalization": "uint8/255",
         "bootstrap": "included",
         "shape": list(dataset.frames.shape),
@@ -429,7 +429,9 @@ def _train(cfg, stop_requested):
     config["expected_dataset"] = identity
     if recovery and training_contract(config) != training_contract(recovery["training_config"]):
         raise ValueError("Resume cannot change the model, dataset, optimizer, or training recipe")
-    evaluation_contract = _evaluation_contract(identity, eval_episodes, evaluation, trainer)
+    evaluation_contract = _evaluation_contract(
+        identity, eval_episodes, evaluation, trainer, model.evaluation_metric
+    )
     config["output"] = str(output)
     metadata = {
         "format_version": 2,
@@ -447,7 +449,7 @@ def _train(cfg, stop_requested):
         "seed": config["seed"],
         "padding": "left_zero",
         "bootstrap": "empty_history_and_start_action",
-        "objective": "next_frame_rgb_mse",
+        "objective": model.evaluation_metric,
         "evaluation": evaluation_contract,
     }
     if recovery:
@@ -485,7 +487,7 @@ def _train(cfg, stop_requested):
         eval_loader = DataLoader(evaluation, shuffle=False, **options)
     diagnostics = trainer.get("diagnostics", {})
     probe = None
-    if diagnostics.get("enabled", False):
+    if diagnostics.get("enabled", False) and model.predictive_objectives:
         probe = RolloutProbe(
             evaluation,
             samples=diagnostics["samples"],
@@ -615,14 +617,22 @@ def _train(cfg, stop_requested):
                         }
                     )
                     media_path = None
-                    if include_probe and stage["objective"] in model.predictive_objectives:
+                    if (
+                        probe is not None
+                        and include_probe
+                        and stage["objective"] in model.predictive_objectives
+                    ):
                         media_path = output / "diagnostics" / f"{stage['name']}-{epoch}-{step}.png"
                         metrics.update(probe.run(model, device, media_path))
                     tracker.log_diagnostics(metrics, output, media_path)
 
                 if probe is not None and partial is None:
                     report_health({}, 0, 0, True)
-                health = Health(model, start_step=total_updates) if probe is not None else None
+                health = (
+                    Health(model, start_step=total_updates)
+                    if diagnostics.get("enabled", False)
+                    else None
+                )
                 if partial:
                     # Construction, tracking and startup probes must not advance training RNG.
                     restore_rng(recovery["rng"])
@@ -683,6 +693,7 @@ def _train(cfg, stop_requested):
                     final=final,
                 )
                 complete = {**progress, "epoch_complete": True, "validation": validation}
+                save_model(stage_dir / f"epoch-{epoch:04d}.pt", model, complete)
                 save_model(stage_dir / "last.pt", model, complete)
                 if final:
                     save_model(output / "last.pt", model, complete)

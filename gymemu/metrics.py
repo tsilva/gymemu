@@ -1,16 +1,21 @@
-"""Metric schema v2: short semantic paths, explicit axes, latest-value summaries.
+"""Metric schema v3: short semantic paths, explicit axes, latest-value summaries.
 
-Legacy epoch aliases remain readable but new instrumentation must use this registry.
+Each measurement has one canonical path; legacy aliases are no longer emitted.
 """
 
 import re
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Template: (display label, unit, cadence). Dimensions are bounded path segments.
 METRICS = {
     "train/step": ("Optimizer step", "updates", "log"),
     "eval/step": ("Evaluated step", "updates", "epoch"),
     "train/samples": ("Training samples", "samples", "log"),
+    "train/objective": ("Training objective", "name", "epoch"),
+    "eval/rate": ("Validation throughput", "samples/s", "epoch"),
+    "train/{stage}/{metric}/epoch": ("{stage} training {metric}", "metric", "epoch"),
+    "eval/{stage}/{metric}": ("{stage} validation {metric}", "metric", "epoch"),
+    "train/{stage}/curriculum/{metric}": ("{stage} curriculum {metric}", "metric", "epoch"),
     "train/stage": ("Stage", "name", "log"),
     "train/epoch": ("Epoch", "epochs", "log"),
     "train/lr": ("Learning rate", "rate", "log"),
@@ -77,7 +82,7 @@ METRICS = {
 
 def pattern(template):
     value = re.escape(template)
-    for dimension in ("stage", "layer"):
+    for dimension in ("stage", "layer", "metric"):
         value = value.replace(re.escape("{" + dimension + "}"), r"[A-Za-z0-9_.-]+")
     return "^" + value.replace(re.escape("{horizon}"), r"[1-9][0-9]*") + "$"
 

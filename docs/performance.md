@@ -473,3 +473,41 @@ uv run python benchmark_autoregressive.py \
   --epoch 3 --warmup-samples 4096 --samples 32768 --repeats 3 \
   --out logs/h4r4-throughput.json
 ```
+
+## Single-frame reconstruction, September 17, 2026
+
+The width-32, 32-channel convolutional codec has 134,371 parameters. Measurements
+used Beast-3's RTX 4090, the same pinned Breakout revision, Adam at 0.001, and the
+production epoch loop with sampled health diagnostics. The model saw only each
+recorded target frame. Seeds were 47 for weights and 123 for shuffled frame order.
+The loader still uses the shared one-frame window contract. No dynamics model ran.
+
+| Setting | Measured frames | Frames/s | Peak allocated GPU MiB |
+| --- | ---: | ---: | ---: |
+| bfloat16, eager, batch 64, 2 cached-loader workers | 131,072 | 17,103 | 2,867 |
+| bfloat16, eager, batch 128, 2 workers | 131,072 | 15,383 | 5,730 |
+| bfloat16, eager, batch 256, 2 workers | 131,072 | 14,034 | 11,452 |
+| float32, eager, batch 128, 2 workers | 131,072 | 9,487 | 5,861 |
+| bfloat16, compiled, batch 32, 2 workers | 524,288 | 16,047 | 1,216 |
+| bfloat16, compiled, batch 64, 1 worker | 524,288 | 20,478 | 2,432 |
+| bfloat16, compiled, batch 64, 2 workers | 524,288 | 21,094 | 2,432 |
+| bfloat16, compiled, batch 64, 4 workers | 524,288 | 19,428 | 2,432 |
+| bfloat16, compiled, batch 128, 2 workers | 524,288 | 19,321 | 4,864 |
+
+The selected recipe uses batch 64, two loader workers, two PyTorch CPU threads,
+bfloat16 training, compilation, CUDA prefetch, and synchronization every 100
+batches. Its measured rate was about 23% above the eager batch-64 run. Warmup,
+dataset setup, validation, checkpoint serialization, and publication are excluded
+from these steady-state rates. The longer tests took 25–33 seconds; these are
+bounded measurements, not a guarantee of full-run throughput. Compilation warmup
+was about five seconds for the selected configuration. Validation remains float32.
+
+The standard multiprocessing loader at batch 128 and two workers failed when the
+container's shared memory filled. The cached loader completed all its tests and
+avoids those worker IPC allocations. An unrelated process retained about 2.3 GiB
+of GPU memory; an idle check showed 0% GPU use before the benchmark. It was left
+running. Measurements were sequential through dstack, not concurrent GPU trials.
+
+Receipts and benchmark scripts are retained under the ignored local directory
+`logs/reconstruction-20260917/`, with remote JSON results under
+`/home/tsilva/.local/share/gymemu/container-workspace/diagnostics/reconstruction-20260917/`.

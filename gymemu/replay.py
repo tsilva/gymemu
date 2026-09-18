@@ -7,7 +7,19 @@ from gymemu.data import Frames, Windows, frame_stack, read_episodes, resolve_dat
 COMPARISON_LABELS = ("Prediction", "Original", "Diff")
 
 
-def load_replay(model, config, device, *, dataset=None, revision=None, split=None, episode_id=None):
+def load_replay(
+    model,
+    config,
+    device,
+    *,
+    dataset=None,
+    revision=None,
+    split=None,
+    episode_id=None,
+    reconstruction=False,
+):
+    if reconstruction and not callable(getattr(model, "reconstruct", None)):
+        raise ValueError("This checkpoint has no frame reconstruction model")
     provenance = config.get("dataset", {})
     if isinstance(provenance, str):  # Older checkpoint metadata.
         provenance = {"dataset": provenance}
@@ -23,13 +35,17 @@ def load_replay(model, config, device, *, dataset=None, revision=None, split=Non
     if tuple(frames.shape) != tuple(config["shape"]):
         raise ValueError("Dataset frame dimensions differ from the checkpoint")
     episodes = read_episodes(root, split, state_fields=config.get("state_fields", ()))
-    player = ReplayPlayer(model, config, device, frames, episodes, episode_id=episode_id)
-    print(f"Teacher forcing: {resolved}, split={split}, episodes={len(episodes)}", flush=True)
+    player_type = ReconstructionPlayer if reconstruction else ReplayPlayer
+    player = player_type(model, config, device, frames, episodes, episode_id=episode_id)
+    print(f"{player.mode}: {resolved}, split={split}, episodes={len(episodes)}", flush=True)
     return player
 
 
 class ReplayPlayer:
     """Predict successors from recorded RGB, actions, and optional state on every step."""
+
+    mode = "teacher-forcing"
+    comparison_labels = COMPARISON_LABELS
 
     def __init__(self, model, config, device, frames, episodes, *, episode_id=None):
         self.model, self.config, self.device = model, config, device
@@ -88,9 +104,7 @@ class ReplayPlayer:
         self.input_tokens = tokens
         self.input_states = states[0].unsqueeze(0).to(self.device) if states else None
         if states:
-            prediction, _ = self.model.predict_step(
-                inputs, tokens, self.input_states
-            )
+            prediction, _ = self.model.predict_step(inputs, tokens, self.input_states)
         else:
             prediction = self.model(inputs, tokens)
         self.frame = prediction[0].float().cpu()
@@ -133,3 +147,44 @@ class ReplayPlayer:
         if self.mse is None:
             return "Initial recorded frame | prediction pending"
         return f"Action {self.recorded_action} | RGB MSE {self.mse:.6f}"
+
+
+class ReconstructionPlayer(ReplayPlayer):
+    """Encode and decode the displayed recorded frame, including the episode start."""
+
+    mode = "reconstruction"
+    comparison_labels = ("Reconstruction", "Original", "Diff")
+
+    def __init__(self, model, config, device, frames, episodes, *, episode_id=None):
+        if not callable(getattr(model, "reconstruct", None)):
+            raise ValueError("This checkpoint has no frame reconstruction model")
+        config = {**config, "history": 1, "action_history": 1, "state_fields": []}
+        super().__init__(model, config, device, frames, episodes, episode_id=episode_id)
+
+    @property
+    def start_name(self):
+        return f"reconstruction | episode {self.episode.episode_id}"
+
+    def reset(self, *, cycle=False):
+        super().reset(cycle=cycle)
+        self.reconstruct_current()
+
+    @torch.inference_mode()
+    def reconstruct_current(self):
+        self.target = self.windows.frames.get(int(self.episode.frames[self.steps]))
+        self.input_stack = self.target.unsqueeze(0)
+        self.frame = self.model.reconstruct(self.input_stack.to(self.device))[0].float().cpu()
+        self.has_prediction = True
+        self.mse = (self.frame - self.target.float()).square().mean().item()
+
+    def advance(self, action=None):
+        if self.finished:
+            self.continuous = False
+            return
+        self.steps += 1
+        self.reconstruct_current()
+        if self.finished:
+            self.continuous = False
+
+    def comparison_label(self):
+        return f"Current-frame reconstruction | RGB MSE {self.mse:.6f}"

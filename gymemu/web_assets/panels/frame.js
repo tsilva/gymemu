@@ -14,6 +14,12 @@ export function mount({ definition, services }) {
   }
   return { element, render(snapshot, view) {
     if (!snapshot) return;
+    if (source === 'prediction') {
+      const label = snapshot.mode === 'reconstruction' ? 'Reconstruction' : definition.title;
+      element.querySelector('.panel-title h2').textContent = label;
+      element.querySelector('[data-panel-menu]').setAttribute('aria-label', `${label} panel options`);
+      canvas.setAttribute('aria-label', snapshot.mode === 'reconstruction' ? 'reconstruction frame' : 'prediction frame');
+    }
     if (source === 'difference') element.querySelector('.frame-mse').textContent = `MSE ${snapshot.mse == null ? '—' : snapshot.mse.toFixed(7)}`;
     const bitmap = view.bitmaps?.[source];
     const pending = Boolean(bitmap) && source !== 'original' && !snapshot.has_prediction;
