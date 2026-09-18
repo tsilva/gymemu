@@ -2943,3 +2943,78 @@ recursive evaluation remain outstanding. The dataset is unchanged. Evidence,
 checkpoint provenance, four development fits, and evaluation results are under
 `runs/ball-vy-20260918/` and `logs/ball-vy-20260918/`. Verification: 372 tests
 passed, two skipped; Ruff, frozen dependency sync, and whitespace checks passed.
+
+## 2026-09-18: Discrete ball displacements and coherent fractional y
+
+The next experiment isolates x displacement, freezes that model, then learns
+vertical displacement including its fractional coordinate. Native forward replay
+matches recorded positions on all 5,271,950 nonterminal training sources and
+88,590 validation sources. The existing 118 current-state values are sufficient
+on these audited transitions. No dataset columns or persistent feature caches
+are added. Y-fraction labels come from audited native replay, with integer y
+checked against recorded successors.
+
+Velocity prediction alone does not establish position: adding twice the true
+successor velocity still gives 1,669 x errors and 3,330 combined-y errors on
+validation. The game can collide during either native frame. These oracle
+baselines only support diagnosis; the models never receive true next velocities.
+
+The training vocabulary has 22 x and 19 y displacements. A `ball_position`
+registry model keeps the successful vy/vx parent frozen and fits separate
+upper-field, paddle, and remaining-region heads. The upper head shares
+13→64→64 ReLU cell features and applies 135→128→128→K layers after masked max
+pooling; the paddle head is 97→256→256→256→K. K is the axis vocabulary size.
+Remaining-field x uses 31→128→128→22 layers; y uses 1→32→19. All 2,316 distinct
+training (x, vx) pairs outside the collision regions have unambiguous x targets;
+all remaining-region y targets equal twice incoming vy.
+
+| Development fit | Updates | Validation exact errors / 88,590 |
+| --- | ---: | ---: |
+| X, seed 91 | 30,000 | 4 |
+| X, seed 2026 | 30,000 | **3**, selected and frozen before y fitting |
+| Y including fraction, seed 91 | 60,000 | **0** |
+| Y including fraction, seed 2026 | 60,000 | **0**, selected by predefined name tie-break |
+
+Both models reuse the same training arrays in RAM. Disjoint region heads are
+selected independently using validation exact errors. The x model fits 227,586
+parameters and the y model fits 203,673, each preserving a complete frozen
+585,845-parameter parent. Y predicts a single continuous eighth-pixel coordinate,
+then separates integer RAM y and remainder, preserving carry/borrow consistency.
+
+Before reading any new test transitions, freeze and hash both complete models.
+The shared fresh test reserves 64 previously unused episodes using metadata seed
+590918 and excludes all five earlier test sets. No training follows inspection.
+
+| Fresh-test subset | Sources | X errors | Y-including-fraction errors |
+| --- | ---: | ---: | ---: |
+| All transitions | 187,251 | **21 (99.9888% exact)** | **7 (99.9963% exact)** |
+| Ordinary transitions, no audited event | 171,983 | 6 | 1 |
+| Paddle events | 3,251 | 12 | 2 |
+| Brick events | 5,122 | 3 | 3 |
+| Ceiling events | 2,624 | 0 | 0 |
+| Side-wall events | 4,516 | 3 | 1 |
+
+Event groups overlap. X MAE is 0.000283 px; combined-y MAE is 0.000156 px.
+Integer y has seven errors; its fractional component has three (99.9984%).
+On displacements differing from twice incoming velocity, x makes 15 errors /
+6,652 and y makes five / 10,997. The remaining six x errors and two y errors
+occur where constant-velocity displacement would have been correct.
+
+Both positions are simultaneously exact on 99.9850% of transitions (28 errors).
+Frozen vx and vy make 17 and 18 errors on this same new test; all four ball
+quantities are simultaneously exact on 99.9701% (56 errors). Those velocity
+scores use a different test set from the original velocity reports. Both stored
+velocity components remain identical to their parent, and CPU/CUDA checkpoint
+reloads agree exactly.
+
+This establishes accurate one-step positions, including a learned next-fraction
+update. It does not establish a closed recursive emulator: current layout,
+contact memory, prior paddle-hit count, width, and paddle state are supplied.
+X errors remain concentrated around paddle interactions. Perfect y validation
+still leaves seven fresh-test errors. Further improvements need development
+experiments without fitting this held-out test.
+
+Artifacts, provenance, the four development fits, and frozen test results are
+under `runs/ball-position-20260918/` and `logs/ball-position-20260918/`.
+Verification: 375 tests passed, two skipped; Ruff, frozen dependency sync, and
+whitespace checks passed. No shared runner/player or baseline approach changed.

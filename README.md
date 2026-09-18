@@ -65,7 +65,10 @@ raises fresh-test horizontal-velocity accuracy to **99.9913%** and catches
 **47 / 48** actual brick-triggered speed increases. The
 [vertical-velocity model](docs/training.md#isolated-vertical-ball-velocity) reaches
 **99.9929%** on a separate fresh test, with 13 errors in 182,441 transitions,
-while preserving the horizontal predictor. These remain one-step results.
+while preserving the horizontal predictor. The
+[position heads](docs/training.md#isolated-ball-positions-and-fractional-y) reach
+**99.9888% exact x** and **99.9963% exact y including its fractional component**
+on another fresh test. These remain one-step results.
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)
