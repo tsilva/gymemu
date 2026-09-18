@@ -3018,3 +3018,72 @@ Artifacts, provenance, the four development fits, and frozen test results are
 under `runs/ball-position-20260918/` and `logs/ball-position-20260918/`.
 Verification: 375 tests passed, two skipped; Ruff, frozen dependency sync, and
 whitespace checks passed. No shared runner/player or baseline approach changed.
+
+## 2026-09-18: Coherent brick-layout prediction
+
+The next isolated target is the full successor brick layout. Native replay
+matches the recorded transitions using the existing state. Across all 5,271,950
+nonterminal training sources, 142,307 change the layout; each removes exactly one
+brick. There are no added cells, multiple removals, empty source layouts, or
+complete clears. The smallest source layout has three bricks. Validation has
+2,432 removals in 88,590 sources. All 108 cells are represented in training, with
+877–1,800 removals per cell.
+
+The native game has a separate wall-refill phase, but the audited data never
+reaches it. The learned output contract therefore covers unchanged layouts or
+one occupied-cell removal and cannot represent refills. No new state columns
+or persistent feature caches are written. The targets are recorded brick masks;
+native rules support the audit only.
+
+A new `brick_layout` model scores 109 outcomes: no change and each possible cell
+removal. Absent cells are masked from removal choices. The model copies the
+successful y model's 13→64→64 spatial encoder into a trainable cell encoder,
+then combines each local 64-feature vector with a pooled 64-feature context and
+71 global current-state features. A shared 199→64→64→1 ReLU network scores
+removals, while 135→128→128→1 layers score no change. The model uses ball x/y,
+vx/vy, fractional y, contact memory, and current bricks. Paddle/controller
+inputs do not affect this head. It learns collision decisions without native
+rules, true successor values, or event-based routing in inference.
+
+There are 56,130 fitted parameters and 789,518 frozen y/velocity-parent
+parameters. Compare two seeds for 30,000 AdamW updates with batch 512 and 25%
+removal samples, selecting minimum validation whole-layout errors every 500
+updates. Separately test an analytical +2.48619236 correction to the no-change
+bias to undo the sampled class-prior shift. The correction is derived from
+training frequencies only; no threshold sweep or additional fit is performed.
+
+| Development candidate | Best training update | Validation errors / 88,590 | Breakdown |
+| --- | ---: | ---: | --- |
+| Seed 91 | 18,000 | 1 | One false removal; all true removals correct. |
+| Seed 2026 | 20,000 | **0** | All layouts and removals exact; selected. |
+| Seed 91 with prior correction | 18,000 | 1 | One missed removal; no false removals. |
+| Seed 2026 with prior correction | 20,000 | **0** | Same validation result; uncorrected model wins name tie-break. |
+
+Freeze and hash the complete seed-2026 checkpoint before reading 16 previously
+unused held-out episodes (metadata seed 690918). Exclude all six earlier test
+sets and leave 64 episodes untouched for later full-state evaluation.
+
+| Fresh-test measure | Result |
+| --- | --- |
+| Complete next layout | **45,245 / 45,245 exact (100%)** |
+| Actual removals, correct cell | **1,184 / 1,184 (100%)** |
+| Unchanged layouts | **44,061 / 44,061 exact** |
+| Missed removals / false removals / wrong-cell removals | **0 / 0 / 0** |
+| Removal-cell precision / recall / F1 | **1.0 / 1.0 / 1.0** |
+
+An always-unchanged baseline reaches 97.3831% aggregate exactness while missing
+all 1,184 removals. The learned result is therefore not an unchanged-layout
+shortcut. The fresh test has no clears or refills and a minimum of six bricks
+in a source layout. These finite results do not establish universal accuracy.
+
+CPU and CUDA checkpoint reloads produce identical layouts and preserve the
+parent's y and velocity predictions exactly. The separate x checkpoint is
+unchanged. No test errors are used for fitting. Contact memory is still supplied
+as a current input; its learned update is the next dependency before recursive
+full-state simulation. Wall-refill behavior remains outside this model's output
+contract and observed training coverage.
+
+Artifacts, audit and split provenance, development comparisons, and frozen-test
+results are under `runs/brick-layout-20260918/` and `logs/brick-layout-20260918/`.
+Verification: 377 tests passed, two skipped; focused decoder/freeze tests,
+Ruff, frozen dependency sync, and whitespace checks passed.

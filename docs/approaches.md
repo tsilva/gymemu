@@ -441,3 +441,21 @@ Position heads do not consume recorded successor velocities. Fractional-y
 training labels derive from audited native replay, while integer positions
 are checked against recorded successors. This is diagnostic supervision, not
 an additional dataset column or a closed recursive simulator.
+
+`brick_layout` predicts the next 108-cell layout using a categorical update:
+class zero keeps the layout, and classes 1–108 remove the corresponding cell.
+Use this model only after auditing that each transition contains at most one
+removal and no additions. It cannot represent wall refills or multiple removals.
+Absent cells are masked from the removal logits; an empty layout can only select
+no change. These are output constraints, not native collision decisions.
+
+The nested `position` specification constructs a frozen `ball_position` parent.
+Its fixed spatial encoding uses ball x, RAM y, vx, vy, fractional y, contact
+memory, and the 108 current brick cells. Paddle/controller fields are ignored by
+this head. A trainable shared cell encoder supplies local features and an
+occupancy-masked max pool. A shared removal scorer combines each cell's features
+with that global context; a separate head scores no change. There is no event-
+or successor-based routing. `forward()` returns 109 logits, `predict_event()`
+selects an update, and `predict()` returns the complete next layout. Checkpoints
+include all parent weights, and `train()` preserves the parent's evaluation mode
+and disabled gradients. Contact memory remains a supplied input, not an output.

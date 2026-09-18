@@ -68,7 +68,11 @@ raises fresh-test horizontal-velocity accuracy to **99.9913%** and catches
 while preserving the horizontal predictor. The
 [position heads](docs/training.md#isolated-ball-positions-and-fractional-y) reach
 **99.9888% exact x** and **99.9963% exact y including its fractional component**
-on another fresh test. These remain one-step results.
+on another fresh test. The
+[brick-layout classifier](docs/training.md#isolated-next-brick-layout) makes
+**zero errors on 45,245 fresh-test layouts**, including all 1,184 removals.
+Wall clears/refills are absent from the audited data and remain unsupported.
+These remain one-step results.
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)
