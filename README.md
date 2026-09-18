@@ -17,6 +17,61 @@ The default approach is the original direct RGB CNN. An experimental latent appr
 first trains a frame autoencoder, freezes it, then trains a separate latent predictor.
 Both use the same dataset adapter, player, and held-out RGB evaluation metric.
 
+`gymemu dynamics` runs a separate state-only, single-ball experiment. It predicts
+normalized ball/paddle state, brick occupancy, and termination without loading RGB
+or modifying the dataset. A loss ends the simulation; serving is outside its
+contract. It includes MLP/GRU models, independent state/action-history searches,
+recursive state training, and headless playback. See
+[state dynamics](docs/training.md#single-ball-state-dynamics).
+New state models omit paddle velocity from their inputs, prediction heads, and
+losses; original dataset columns and older checkpoints remain supported.
+The first 48-run search and its collision, brick-removal, and termination failures
+are documented in [the experiment results](docs/history.md#2026-09-17-single-ball-state-dynamics).
+Use [isolated state probes](docs/training.md#isolated-state-targets-and-input-sufficiency)
+to audit per-variable input ambiguity and separate target losses before joint training.
+The probes also report event-specific errors and constant-motion baselines, with
+optional event-balanced training samples.
+[Internal-state input experiments](docs/training.md#reconstructed-internal-state-inputs)
+compare reconstructed controller memory and paddle-hit counts with matched controls.
+A [compact paddle predictor](docs/training.md#compact-paddle-learning-with-sufficient-inputs)
+learns next position from current controller state, with a separate final-test evaluation.
+Its controller inputs can be reduced to charge for the current position-prediction
+experiment; [the ablation results](docs/history.md#2026-09-18-minimum-controller-inputs-for-paddle-position)
+separate one-step accuracy from the state needed for repeated controller updates.
+A [charge predictor](docs/training.md#learning-the-paddle-charge-update) now learns
+the other part of `[paddle x, charge] + action`, with recorded validation and
+recursive paddle-only results.
+[Horizontal-velocity probes](docs/training.md#discrete-horizontal-velocity-probes)
+compare continuous and discrete outputs using controller data and collision memory
+reconstructed in RAM, without adding dataset columns.
+The [focused paddle-region experiment](docs/training.md#focused-paddle-region-velocity-probes)
+tests a smaller input contract and separates bounce-direction errors from speed errors.
+[Direction-only probes](docs/training.md#isolating-horizontal-direction) compare
+two-class direction learning with the eight-class velocity objective on those same inputs.
+The [coverage audit](docs/training.md#auditing-direction-error-coverage) compares
+remaining errors with training support and native bounce-direction boundaries.
+The [direction learning curve](docs/training.md#direction-learning-with-more-training-episodes)
+compares 128, 256, and 512 training episodes with fixed validation and update budgets.
+The [full-data geometry experiment](docs/training.md#full-data-direction-geometry-experiments)
+reaches 99.94% paddle-direction accuracy on an independent test after perfect
+development validation. This is a direction-only diagnostic, not recursive play.
+The [state-model status table](docs/state-model-status.md) lists each target,
+its model and inputs, measured accuracy, and remaining gaps.
+[Controller history probes](docs/training.md#inferring-controller-state-from-history)
+test whether observed paddle/action histories can recover those internal values.
+The [paddle dataset annotator](docs/training.md#paddle-controller-dataset-columns)
+stores reconstructed controller values directly in transition and episode tables,
+with exact paddle replay checks and unchanged original columns.
+
+`recipe=breakout_reconstruction` trains only a single-frame autoencoder with RGB
+MSE. Open its `best.pt` with `gymemu play` to compare held-out recorded frames with
+their reconstructions. Validation runs after every epoch; every evaluated checkpoint
+is retained, and the lowest validation reconstruction MSE selects `best.pt`.
+See [representation training](docs/training.md#single-frame-reconstruction).
+New W&B runs log the validation score once as `eval/mse`, against optimizer updates
+on `eval/step`. The run configuration identifies whether the score measures
+reconstruction or next-frame prediction.
+
 `recipe=breakout_ball` adds frame-aligned `ball_x_normalized` and
 `ball_y_normalized` history and predicts the next coordinates alongside RGB. Its
 coordinate loss trains the shared encoder, and predicted coordinates condition the
@@ -104,7 +159,9 @@ immutable objects and manifests retain successfully uploaded checkpoint versions
 Use `r2.enabled=false` to keep artifacts local. Retry interrupted uploads with
 `uv run gymemu upload-checkpoints runs/my-run`.
 
+Periodic checkpoints default to every 10 minutes (`trainer.checkpoint_seconds=600`).
 New training runs also save `resume.pt`, including optimizer, RNG, and batch progress.
+Saves before validation, after each epoch, and on graceful stop remain enabled.
 Stop with Ctrl+C and wait for the checkpoint message before shutting down. Continue
 in a new output directory with:
 
@@ -148,7 +205,7 @@ predict**. Zoom, Alt-click color picking, undo, and reset are available. Painted
 frames retain their edits when reordered; scrubbing or stepping clears all edits.
 An edited tile shows a revert button in its bottom-right corner. Revert restores
 that frame and reruns inference while keeping the other edits and current order.
-Closing or leaving the browser pauses playback. Ctrl+C in the terminal stops the server.
+Switching tabs or windows keeps playback running and clears held keys. Closing the player page pauses playback. Ctrl+C in the terminal stops the server.
 
 The player opens two synchronized browser tabs using Gradlab's paired workspace
 approach. The first contains Original, Prediction, Diff, and the
@@ -191,8 +248,7 @@ unscored and gaps are left visible.
 Original and Prediction have blank footers; the difference footer keeps its gain
 control and legend. `--no-browser` prints both URLs without opening tabs;
 `--port auto` chooses an unused port by default. Diagnostics observes playback and
-does not send keyboard, heartbeat, or pause commands. Leaving the player tab pauses
-playback; returning to either tab shows the current server snapshot.
+does not send keyboard, heartbeat, or pause commands. Leaving the player tab keeps playback running; returning to either tab shows the current server snapshot.
 
 To inspect one-step predictions without accumulated feedback errors, replay recorded
 episodes with teacher forcing:
@@ -438,6 +494,43 @@ To measure whether ball position is linearly decodable from a frozen encoder, us
 readouts on recorded training episodes and scores held-out episodes; see
 [linear ball-position probes](docs/training.md#linear-ball-position-probes).
 
+[`prototype_brick_grid.py`](prototype_brick_grid.py) tests deterministic brick-grid
+labels from recorded Breakout RGB, with count checks and diagnostic images. See
+[brick-grid extraction](docs/training.md#brick-grid-extraction-prototype).
+
+[`augment_brick_dataset.py`](augment_brick_dataset.py) adds complete-dataset brick
+matrices, quality flags, and initial-layout flags while checking that all original
+columns survive unchanged. See [dataset annotations](docs/training.md#brick-dataset-annotations).
+
 For the four-frame context / four-step rollout variant, use
 `recipe=breakout_detached_h4_r4`. It keeps detached feedback, four action-history
 slots, and the same dataset and objective, with a 1 → 2 → 4-step curriculum.
+
+
+`probe_paddle_history.py` studies the frame/action context needed to predict paddle
+position and native velocity from deterministic RGB-derived paddle features.
+A compact next-state probe reached 0.225-pixel position MAE with features from
+one frame and four actions on held-out episodes. See the
+[experiment results](docs/history.md#2026-09-17-trained-paddle-state-history-probes)
+and [reproduction commands](docs/training.md#standalone-paddle-history-experiment).
+
+`probe_paddle_rgb.py` repeats this experiment using full RGB images and the
+same CNN encoder as the frame autoencoder. It compares direct state regression
+with a learned position head supervised by recorded normalized paddle labels.
+See [full RGB probe training](docs/training.md#full-rgb-paddle-probe).
+
+For **current-state estimation**, use the same script with `--current` and prepare
+the recorded width with `--include-width`. The plain CNN directly outputs
+normalized paddle position, velocity, and width for the newest observed frame.
+It uses past actions, with no transition model or auxiliary classification head.
+See [direct current paddle state](docs/training.md#direct-current-paddle-state).
+The trained two-frame/one-action model reached 0.055-pixel current position MAE,
+0.215-pixel/native-tick velocity MAE, and 0.043-pixel width MAE on held-out episodes.
+See [the current-state results](docs/history.md#2026-09-17-direct-current-paddle-state-from-rgb-and-past-actions).
+
+Preparing with `--include-ball` adds the existing normalized ball x, y, vx, and vy
+labels to the same direct current-state regressor. The seven-output experiment
+with two frames and one action achieved 0.713/0.815-pixel ball x/y MAE, but did
+not meet the earlier accuracy criterion across all variables; paddle accuracy
+also decreased. See [joint paddle/ball results](docs/history.md#2026-09-17-joint-current-paddle-and-ball-state)
+and [training options](docs/training.md#joint-current-paddle-and-ball-state).

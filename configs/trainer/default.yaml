@@ -5,7 +5,7 @@ device: auto
 threads: null
 workers: 0
 precision: fp32
-checkpoint_seconds: 60
+checkpoint_seconds: 600
 limit_episodes: null
 train_batches: null
 eval_batches: null

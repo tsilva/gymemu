@@ -24,7 +24,7 @@ trainer:
   threads: 2
   workers: 2
   precision: bf16
-  checkpoint_seconds: 60
+  checkpoint_seconds: 600
   limit_episodes: null
   train_batches: null
   eval_batches: null

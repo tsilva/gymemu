@@ -36,6 +36,7 @@ export function paintLine(data, width, from, to, color, size = 1) {
 const hex = rgb => '#' + rgb.map(v => v.toString(16).padStart(2,'0')).join('').toUpperCase();
 
 export function editUnavailableReason(snapshot) {
+  if (snapshot.mode === 'reconstruction') return 'Reconstruction uses the current recorded frame. Pixel edits are unavailable in this mode.';
   if (!snapshot.history_editable) return 'Restart the player to apply pixel edits. This server does not support them yet.';
   if (!snapshot.has_prediction) return 'Run one prediction before applying pixel edits. Close this popup and step the player once.';
   if (snapshot.loading) return 'Wait for the player to finish loading before applying pixel edits.';

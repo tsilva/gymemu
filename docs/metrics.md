@@ -61,11 +61,14 @@ inspect their coverage and images rather than treating low MSE as proof of playa
 
 ## Naming and cadence
 
-Schema v2 follows GradLab's short semantic paths, explicit axis metrics, unit/statistic
+Schema v3 follows GradLab's short semantic paths, explicit axis metrics, unit/statistic
 suffixes, registered metric templates, and latest-value diagnostic summaries.
 `train/step` counts optimizer updates across stages. `eval/step` identifies the
-checkpoint evaluated by full validation. Probe charts use `train/step`. Legacy
-aliases remain separate so existing charts and run comparisons keep working.
+checkpoint evaluated by full validation. Probe charts use `train/step`. Each full validation score is logged only as
+`eval/mse`; its meaning is saved in the run configuration at `evaluation.metric`.
+New runs no longer emit duplicate `evaluation/*` and `stages/*` aliases. Historical
+runs keep their original data in the Legacy runs section. Stage objective losses
+remain separate because they need not equal RGB MSE.
 The managed view is declared in `configs/monitoring/workspace.json`; metric names
 are registered in `gymemu/metrics.py`.
 

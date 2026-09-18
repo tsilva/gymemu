@@ -64,7 +64,7 @@ def test_project_uses_canonical_environment_not_config_alias():
     assert project_name({"game": {"env_id": "CartPole-v1"}}) == "gymemu-CartPole-v1"
 
 
-@pytest.mark.parametrize("approach", ["direct", "latent", "scheduled_actions"])
+@pytest.mark.parametrize("approach", ["direct", "latent", "scheduled_actions", "reconstruction"])
 def test_epoch_metrics_match_local_records(snapshot, tmp_path, fake_wandb, approach):
     cfg = tracking_config(snapshot, tmp_path / "run", approach)
     cfg.trainer.epochs = 2
@@ -78,21 +78,33 @@ def test_epoch_metrics_match_local_records(snapshot, tmp_path, fake_wandb, appro
     local = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
     assert len(local) == len(run.records)
     for index, (record, logged) in enumerate(zip(local, run.records, strict=True), 1):
-        prefix = f"stages/{record['stage']}"
-        assert logged["optimizer_steps"] == index * 2
-        assert logged["train_samples_seen"] == index * 4
-        assert logged[f"{prefix}/epoch"] == record["epoch"]
-        assert logged[f"{prefix}/learning_rate"] == cfg.trainer.learning_rate
-        for split in ("train", "validation"):
+        stage = record["stage"]
+        assert logged["train/step"] == logged["eval/step"] == index * 2
+        assert logged["train/samples"] == index * 4
+        assert logged["train/epoch"] == record["epoch"]
+        assert logged["train/lr"] == cfg.trainer.learning_rate
+        assert logged[f"train/{stage}/loss/epoch"] == record["train"]["loss"]
+        assert logged[f"eval/{stage}/loss"] == record["validation"]["loss"]
+        for split, namespace in (("train", "train"), ("validation", "eval")):
             for key, value in record[split].items():
-                assert logged[f"{prefix}/{split}/{key}"] == value
-            assert logged[f"{prefix}/{split}/samples_per_second"] > 0
+                if key not in ("loss", "mse"):
+                    suffix = "/epoch" if namespace == "train" else ""
+                    assert logged[f"{namespace}/{stage}/{key}{suffix}"] == value
+            assert logged[f"{namespace}/rate"] > 0
         for key, value in record["curriculum"].items():
-            assert logged[f"{prefix}/curriculum/{key}"] == value
-        if record["stage"] == "representation":
-            assert "evaluation/next_frame_rgb_mse" not in logged
-        else:
-            assert logged["evaluation/next_frame_rgb_mse"] == record["validation"]["mse"]
+            assert logged[f"train/{stage}/curriculum/{key}"] == value
+        final_stage = stage == cfg.approach.stages[-1].name
+        score_keys = [key for key in logged if key.endswith("/mse")]
+        assert score_keys == (["eval/mse"] if final_stage else [])
+        if final_stage:
+            assert logged["eval/mse"] == record["validation"]["mse"]
+        assert not any(key.startswith(("stages/", "evaluation/")) for key in logged)
+        assert not {"optimizer_steps", "train_samples_seen", "stage", "objective"} & logged.keys()
+    definitions = {args[0]: kwargs for args, kwargs in run.definitions}
+    assert definitions["eval/*"]["step_metric"] == "eval/step"
+    assert definitions["train/*"]["step_metric"] == "train/step"
+    assert not {"optimizer_steps", "stages/*"} & definitions.keys()
+    assert run.config["metrics_schema_version"] == 3
     summary = json.loads((output / "summary.json").read_text())
     assert run.summary == summary
     assert run.config["evaluation"] == summary["evaluation"]

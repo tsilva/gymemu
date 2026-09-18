@@ -1,0 +1,60 @@
+# Independent state-only experiment. Does not alter RGB approaches or source datasets.
+defaults:
+  - game: breakout_state
+  - _self_
+cache: data/state-dynamics
+output: runs/state-dynamics
+checkpoint: null
+data:
+  split_seed: 917
+  train_episodes: null
+  validation_episodes: null
+  test_episodes: null
+model:
+  kind: state_mlp
+  history: 1
+  past_actions: 0
+  width: 128
+  depth: 2
+  predict_paddle_velocity: false
+loss:
+  motion: 1.0
+  width: 0.1
+  bricks: 1.0
+  terminal: 0.2
+  motion_tolerances: [4.0, 4.0, 0.25, 0.25, 4.0, 0.25]
+  brick_change_weight: 20.0
+trainer:
+  seed: 47
+  device: cpu
+  threads: 4
+  batch_size: 512
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  gradient_clip: 5.0
+  epochs: 10
+  rollout_epochs: 3
+  rollout_horizons: [4, 8]
+  train_samples: 100000
+  validation_samples: 10000
+  rollout_starts: 256
+  eval_every: 1
+evaluation:
+  horizons: [1, 8, 32, 128]
+  split: validation
+  samples: 0
+  starts: 512
+  seed: 812
+  threshold: null
+  divergence_ball_pixels: 8.0
+  divergence_paddle_pixels: 4.0
+search:
+  histories: [1, 2, 4, 8]
+  past_actions: [0, 1, 3, 7]
+  seeds: [47, 91]
+  screening_epochs: 4
+  finalists: 2
+  widths: [64, 128, 256]
+  recurrent: true
+playback:
+  steps: 128

@@ -26,7 +26,14 @@ def run_cli(directory, *arguments):
 def test_cli_help_and_errors(tmp_path):
     assert "cache-frames" in run_cli(tmp_path, "--help")
     assert run_cli(tmp_path, "--version").strip()
-    for command in ["play", "compare", "cache-frames", "save-start-state", "upload-checkpoints"]:
+    for command in [
+        "play",
+        "compare",
+        "cache-frames",
+        "save-start-state",
+        "upload-checkpoints",
+        "dynamics",
+    ]:
         assert "usage:" in run_cli(tmp_path, command, "--help")
     result = subprocess.run([str(CLI), "unknown"], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 2
@@ -53,9 +60,12 @@ def test_cli_train_and_play(snapshot, tmp_path, approach):
         tmp_path,
         "play",
         str(checkpoint),
-        "--device", "cpu",
-        "--headless-actions", "0,2",
-        "--output", str(tmp_path / f"{approach}.png"),
+        "--device",
+        "cpu",
+        "--headless-actions",
+        "0,2",
+        "--output",
+        str(tmp_path / f"{approach}.png"),
     )
     assert (tmp_path / f"{approach}.png").is_file()
     assert (output / "reproduction.json").is_file()

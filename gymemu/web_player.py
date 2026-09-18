@@ -56,7 +56,7 @@ class PlaybackSession:
         self.replay = isinstance(player, ReplayPlayer)
         self.normal_keymap = keymap
         self.mode_factory = mode_factory
-        self.players = {"teacher-forcing" if self.replay else "autoregressive": player}
+        self.players = {getattr(player, "mode", "autoregressive"): player}
         self.keymap = {"space": None} if self.replay else keymap
         self.scale = scale
         self.revision = 0
@@ -75,6 +75,7 @@ class PlaybackSession:
         self.history_revision = 0
         self.history_source = None
         self.history_edits = {}
+        self.record_mse()
 
     def sync_history_source(self):
         # Every prediction and reset replaces the input stack, even a seek to the same step.
@@ -85,6 +86,10 @@ class PlaybackSession:
             self.history_revision += 1
 
     def validate_history_revision(self, command):
+        if getattr(self.player, "mode", None) == "reconstruction":
+            raise ValueError(
+                "Reconstruction uses the current recorded frame; history edits are unavailable"
+            )
         self.sync_history_source()
         if not self.player.has_prediction:
             raise ValueError("Predict a frame before modifying its history")
@@ -185,6 +190,7 @@ class PlaybackSession:
     def clear_history(self):
         self.history.clear()
         self.history_epoch += 1
+        self.record_mse()
 
     def record_mse(self):
         if self.replay and self.player.mse is not None:
@@ -214,7 +220,10 @@ class PlaybackSession:
         if kind == "mode":
             self.pause()
             mode = command.get("mode")
-            if mode not in ("teacher-forcing", "autoregressive") or self.mode_factory is None:
+            modes = getattr(
+                self.player.model, "playback_modes", ("teacher-forcing", "autoregressive")
+            )
+            if mode not in modes or self.mode_factory is None:
                 raise ValueError("Playback mode is unavailable")
             if mode not in self.players:
                 self.loading = mode
@@ -229,8 +238,10 @@ class PlaybackSession:
             self.player.reset()
             self.clear_history()
             self.inference_ms = None
-        elif kind in ("pause", "blur"):
+        elif kind == "pause":
             self.pause()
+        elif kind == "blur":
+            self.player.held_keys.clear()
         elif kind == "play":
             self.player.continuous = not (self.replay and self.player.finished)
             self.last_heartbeat = time.monotonic()
@@ -283,6 +294,8 @@ class PlaybackSession:
             if position:
                 self.player.steps = position - 1
                 self.advance()
+            else:
+                self.record_mse()
         elif kind == "key":
             key = command.get("key")
             if not isinstance(key, str) or len(key) > 32:
@@ -312,8 +325,7 @@ class PlaybackSession:
         if not self.player.continuous:
             return False
         if now - self.last_heartbeat > 1.5:
-            self.pause()
-            return True
+            self.player.held_keys.clear()
         action = (
             self.keymap[self.player.held_keys[-1]] if self.player.held_keys else self.default_action
         )
@@ -348,8 +360,12 @@ class PlaybackSession:
         )
         return {
             "revision": self.revision,
-            "mode": "teacher-forcing" if self.replay else "autoregressive",
-            "available_modes": ["autoregressive", "teacher-forcing"] if self.mode_factory else [],
+            "mode": getattr(player, "mode", "autoregressive"),
+            "available_modes": list(
+                getattr(player.model, "playback_modes", ("autoregressive", "teacher-forcing"))
+            )
+            if self.mode_factory
+            else [],
             "checkpoint": self.checkpoint,
             "name": player.start_name or "Empty start",
             "playing": self.player.continuous,
@@ -373,7 +389,7 @@ class PlaybackSession:
                 else list(range(player.config["history"]))
             ),
             "history_revision": self.history_revision,
-            "history_editable": True,
+            "history_editable": getattr(player, "mode", None) != "reconstruction",
             "history_edited_frames": sorted(self.history_edits),
             "history_reordered": bool(
                 self.history_preview

@@ -11,7 +11,7 @@ from PIL import Image
 from gymemu.catalog import run_directory
 from gymemu.checkpoints import load_model
 from gymemu.player import Player, default_bindings
-from gymemu.replay import COMPARISON_LABELS, load_replay
+from gymemu.replay import load_replay
 from gymemu.runtime import device_for, positive
 from gymemu.scenes import (
     START_STATES,
@@ -85,6 +85,10 @@ def load_playback(args):
         )
     device = device_for(args.device)
     model, config = load_model(args.checkpoint, device)
+    modes = getattr(model, "playback_modes", ("teacher-forcing", "autoregressive"))
+    reconstruction = getattr(args, "reconstruction", False) or modes == ("reconstruction",)
+    if reconstruction and not args.teacher_forcing:
+        raise ValueError("Reconstruction requires recorded dataset playback, not autoregression")
     if args.teacher_forcing:
         player = load_replay(
             model,
@@ -94,6 +98,7 @@ def load_playback(args):
             revision=args.revision,
             split=args.split,
             episode_id=args.episode_id,
+            reconstruction=reconstruction,
         )
     else:
         player = recorded_player(args, model, config, device, scene_path)
@@ -113,7 +118,9 @@ def load_playback(args):
         keymap[key] = int(value)
 
     def mode_factory(mode):
-        if mode == "teacher-forcing":
+        if mode not in modes:
+            raise ValueError("Playback mode is unavailable for this checkpoint")
+        if mode in ("teacher-forcing", "reconstruction"):
             return load_replay(
                 model,
                 config,
@@ -122,6 +129,7 @@ def load_playback(args):
                 revision=args.revision,
                 split=args.split,
                 episode_id=args.episode_id,
+                reconstruction=mode == "reconstruction",
             )
         path = (
             None
@@ -163,6 +171,11 @@ def main(argv=None):
         help="Start interactive play from the checkpoint's recorded scene",
     )
     startup.add_argument(
+        "--reconstruction",
+        action="store_true",
+        help="Compare each recorded frame with its own codec reconstruction",
+    )
+    startup.add_argument(
         "--start-state", help="Named snapshot for this game; use --list-start-states"
     )
     startup.add_argument(
@@ -199,6 +212,8 @@ def main(argv=None):
     parser.add_argument("--headless-actions", help="Comma-separated action values for a smoke")
     parser.add_argument("--output", type=Path, default=Path("logs/play.png"))
     args = parser.parse_args(argv)
+    if args.reconstruction:
+        args.teacher_forcing = True
     if args.teacher_forcing is None:
         args.teacher_forcing = not (
             args.start_state is not None
@@ -278,8 +293,8 @@ def main(argv=None):
         result = Image.new("RGB", (pixels.width, pixels.height + 36), (20, 20, 20))
         result.paste(pixels, (0, 36))
         draw = ImageDraw.Draw(result)
-        panel_width = pixels.width // len(COMPARISON_LABELS)
-        for index, label in enumerate(COMPARISON_LABELS):
+        panel_width = pixels.width // len(player.comparison_labels)
+        for index, label in enumerate(player.comparison_labels):
             draw.text((index * panel_width + 2, 2), label, fill="white")
         draw.text((2 * panel_width + 2, 18), "Gray=0; brighter +; darker -", fill="white")
         result.save(args.output)

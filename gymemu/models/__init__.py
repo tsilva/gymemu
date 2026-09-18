@@ -1,16 +1,33 @@
 """Explicit model registry. Checkpoints never import arbitrary Python targets."""
 
 from gymemu.models.action_history import ActionHistoryAutoencoder
+from gymemu.models.ball_direction_geometry import BallDirectionGeometry
 from gymemu.models.ball_state import BallStateAutoencoder
+from gymemu.models.ball_velocity import BallVelocityMLP
+from gymemu.models.controller_history import ControllerHistoryMLP
 from gymemu.models.direct import Autoencoder
 from gymemu.models.latent import FrameCodec, LatentDynamics
+from gymemu.models.paddle import PaddlePositionCNN, PaddleStateCNN
+from gymemu.models.paddle_transition import PaddleTransitionMLP
+from gymemu.models.state_context import HiddenStateProbe, PaddleContextProbe
+from gymemu.models.state_dynamics import StateGRU, StateMLP
 
 MODELS = {
     "direct_cnn": Autoencoder,
     "action_history_cnn": ActionHistoryAutoencoder,
     "ball_state_cnn": BallStateAutoencoder,
+    "ball_velocity_mlp": BallVelocityMLP,
+    "ball_direction_geometry": BallDirectionGeometry,
     "frame_codec": FrameCodec,
     "latent_cnn": LatentDynamics,
+    "paddle_state_cnn": PaddleStateCNN,
+    "paddle_position_cnn": PaddlePositionCNN,
+    "state_mlp": StateMLP,
+    "state_paddle_context_probe": PaddleContextProbe,
+    "state_hidden_probe": HiddenStateProbe,
+    "paddle_transition_mlp": PaddleTransitionMLP,
+    "controller_history_mlp": ControllerHistoryMLP,
+    "state_gru": StateGRU,
 }
 
 

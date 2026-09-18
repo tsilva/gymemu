@@ -1,5 +1,28 @@
 # Emulator approaches
 
+The optional [paddle controller dataset columns](training.md#paddle-controller-dataset-columns)
+provide both `source_` inputs and unprefixed successor targets. An approach using
+them must explicitly adapt these columns and keep their timing distinct. They are
+raw int32/boolean values, with normalization divisors in the annotation schema.
+The annotator replays native rules offline to produce labels. A learned approach
+must still define how its own controller state advances during recursive playback.
+`paddle_transition_mlp.controller_fields` selects which of charge, measure, repeat,
+and held reach the scalar/binary encoder. Current x and action always remain.
+The default includes all four fields and preserves existing checkpoints. For the
+pinned controller's allowed resets and two-frame actions, exhaustive reachability
+checks establish that x and charge determine next x and charge. Separate learned
+position and charge classifiers now have a bounded recursive paddle evaluation.
+Charge checkpoints store `config.target=paddle_charge` and an ordered
+`model_spec.delta_values` list. Decode logits through `model.delta(...)` and add
+the result to current charge. Do not treat these outputs as pixels or call native
+controller rules during model inference.
+
+New state configs disable `predict_paddle_velocity`. The registry model default
+remains true so historical checkpoint specs load unchanged. New models physically
+omit the velocity input and head, while the existing state-vector slot stays zero
+for cache/player compatibility. State loss and score code omit that slot. Keep
+the flag in saved model specs when adding approaches or changing model families.
+
 An approach is a complete way to train and run an emulator. It can own one model or
 several models, and it declares an ordered list of training stages. The player only
 needs its next-frame prediction interface.
@@ -15,6 +38,7 @@ needs its next-frame prediction interface.
 | `approach=scheduled_actions` | Same action-history RGB CNN | Uniform RGB MSE with progressively sampled generated context |
 | `approach=autoregressive_ball_region` | Same action-history RGB CNN | RGB and ball-region losses at every valid rollout step; optional detached feedback |
 | `approach=latent` | Frame codec and separate latent CNN | Reconstruct recorded frames, freeze the codec, then predict successor latents |
+| `approach=reconstruction` | Single-frame codec only | Reconstruct the input frame with uniform RGB MSE |
 
 The direct model preserves the original architecture, RGB input, action encoding,
 stride padding, and sigmoid output. `model=direct_small` inherits `direct_cnn` and
@@ -36,6 +60,13 @@ region is normalized by its actual pixel count. Missing detections contribute
 zero to the region term before averaging over the full batch. The detector assumes
 exact recorded RGB, not resized, noisy, or generated frames. It cannot reliably
 label merged or occluded sprites. These are explicit experiment limitations.
+
+The reconstruction approach trains the codec alone. Its `reconstruct(frames)`
+method supports recorded-frame playback, and its `evaluation_metric` is
+`reconstruction_rgb_mse`. It has no predictive objectives or rollout probes.
+Evaluation uses the input image as the target and selects the best reconstruction
+checkpoint on held-out episodes. The player uses the declared `playback_modes`
+capability, not the approach name. Every evaluated epoch is retained.
 
 The latent approach is an experimental example of multiple models and stages, not a
 claim of better emulation. Its codec compresses individual RGB frames spatially by
@@ -66,6 +97,16 @@ gradient amplification. The option defaults to false for existing configurations
 stored in checkpoint metadata. It does not alter the inference interface or evaluation.
 
 ## Add a model
+
+The separate `gymemu dynamics` experiment uses `state_mlp` and `state_gru` from
+the same explicit model registry. `gymemu/state_approach.py` owns its losses and
+rollout behavior. Its state adapter and runner are separate from the RGB approach
+interface because it has no image prediction or comparable RGB MSE. Its checkpoint
+format is `gymemu-state-dynamics-v1`; use `gymemu dynamics play`, not `gymemu play`.
+The GRU warms memory from the configured history and carries it through generated
+rollout steps. The MLP receives a moving state/action window. Both terminate at
+ball loss and preserve the requested-action contract. Extension and experiment
+instructions are in [the training guide](training.md#single-ball-state-dynamics).
 
 1. Implement a `torch.nn.Module` in `gymemu/models/`. Match the constructor and forward
    contract expected by its slot. The direct predictor takes `history`, `actions`, and
@@ -195,3 +236,104 @@ auxiliary state inputs. Evaluation continues to supply ordinary one-step example
 The approach owns curriculum, unrolling, gradient flow, and valid-step reduction.
 `autoregressive_ball_region` implements this contract using the existing action-history
 model and ball-region objective. No approach-specific behavior belongs in the player.
+
+The isolated `state_probes.py` experiment constructs registered state models but
+optimizes exactly one target through `SingleTargetApproach`. The optional
+`state_paddle_context_probe` consumes extra recorded paddle history recovered by
+`RecordedPaddleContext`. Its `gymemu-state-probe-v1` checkpoints are diagnostic and
+are rejected by the joint state player. This keeps input-sufficiency experiments
+separate from joint rollout training; see the isolated-target section in the
+[training guide](training.md#isolated-state-targets-and-input-sufficiency).
+
+
+`gymemu/state_probe_diagnostics.py` owns isolated event strata, per-event baseline
+comparisons, and training-only event sampling. These labels never enter predictor
+inputs. `train_target` can initialize a compatible probe checkpoint with a fresh
+optimizer for matched sampling/learning-rate experiments. Event diagnostics remain
+outside the shared RGB runner and the joint state player.
+
+
+`state_hidden_probe` extends the context probe with five reconstructed internal
+source-state values. Its explicit mode masks select controller values, paddle-hit
+count, both, or a zero-input control with the same parameter count. `HiddenInputs`
+loads separate arrays with checked provenance; the isolated approach owns passing
+those values to the registered model. `gymemu/state_hidden_context.py` prepares
+these diagnostic inputs without changing the dataset or the joint player. Keep
+any future learned update for internal state in an explicit approach; do not call
+the diagnostic native-code reproduction inside neural playback.
+
+
+The separate `paddle_transition_mlp` registry entry consumes six current native
+values: paddle x, four controller variables, and requested action. Its scalar or
+hybrid binary encoding contains no game transition rules. The dedicated
+`paddle_transition_training` experiment owns native-displacement MSE or categorical
+cross-entropy, split-aware loading, and validation checkpoint selection. These
+small sufficient-input fits do not branch the shared RGB runner or player. Their
+`gymemu-paddle-transition-v1` checkpoint contract is distinct from full-state
+models because controller memory and the other game variables are not outputs.
+
+`controller_history_mlp` predicts one current internal controller variable from
+observed paddle history. `controller_history_inputs` builds source-time inputs
+without current/future actions or observations, preserving life boundaries. The
+diagnostic experiment trains separate charge and measurement classifiers with
+class vocabularies from training targets only. Their
+`gymemu-controller-history-probe-v1` checkpoints are diagnostics, not playable
+state models. They do not update controller state or call native game rules.
+
+`ball_velocity_mlp` is an isolated next-horizontal-velocity probe. Its 118 source
+values contain ball x, integer RAM y, both ball velocities, paddle x and width,
+charge, prior paddle-hit count, fractional y in eighths, brick-contact memory,
+and 108 brick cells. Paddle velocity, images, and future observations are absent.
+The model owns scalar or scalar-plus-bit encoding and either eight categorical
+velocity logits or one residual velocity output. `memory=False` masks hit count,
+fractional y, and brick contact while retaining charge and the same architecture.
+The optional `relative_offset` encoding adds ball x minus paddle x, and its bits
+for hybrid inputs. This is a relation between existing source coordinates, not a
+new state variable or a native collision rule.
+The optional `paddle_only=True` contract accepts exactly the first nine source
+values, physically excluding brick contact and layout. With hybrid encoding and
+relative offset this gives 85 encoded inputs, two 128-unit SiLU layers, and eight
+logits (28,552 parameters). It is a diagnostic for the source-selected descending
+paddle region, not a replacement for the full-game input contract. The default
+remains 118 source values; checkpoints retain this choice in the registry spec.
+`objective="direction"` replaces the velocity output with two logits for left
+and right. Its `predict()` returns a sign, -1 or +1, not a velocity magnitude.
+The compact hybrid direction model has 27,778 parameters. Classification and
+regression defaults and their checkpoint contracts remain unchanged. Diagnostic
+drivers may also sum an eight-class model's probabilities by direction; this
+decoding choice must be stored alongside that diagnostic checkpoint.
+Native rules may reconstruct source inputs for diagnostics but must not enter
+the neural forward pass or application playback. The experiment's
+`gymemu-ball-velocity-probe-v1` checkpoint stores the registry spec and all model
+weights; it is not a complete state-player checkpoint. Collision-memory updates
+and the other state variables remain outside this model's outputs.
+
+
+`ball_velocity_mlp` also accepts `spatial_features=True`. It appends eight
+coordinate, relative displacement, and fractional-position features computed
+from the current source and constant-velocity proposals. This gives 93 inputs
+and 28,802 parameters for the compact direction model. The default is false,
+so previous checkpoint shapes stay unchanged. `memory=False` also masks the
+fraction used by these features.
+
+`ball_direction_geometry` is a direction-only diagnostic with two learned
+components. A frozen `paddle_transition_mlp` predicts one-native-frame paddle
+displacement from current paddle position and charge. Its classification
+vocabulary is determined from training targets. A separate direction MLP uses
+that predicted position and the nine current source variables. Both components
+are included in the checkpoint. Calling `train()` keeps the paddle component
+frozen and in evaluation mode.
+
+Geometry encoding exposes constant-velocity coordinate proposals and relative
+ball/paddle positions. It contains no collision decisions or controller update
+rules. `scalar`, `hybrid`, and `hybrid_absolute` produce 16, 62, and 84 inputs.
+The last encoding includes binary digits of absolute ball x and its motion
+proposal as well as the relative-coordinate digits. Width, depth, and ReLU or
+SiLU activation are stored in the registry specification. Output remains a
+left/right sign, not velocity magnitude or a complete next state.
+
+The intermediate paddle training target is derived from recorded controller
+values using the audited native rule, in RAM. This adds auxiliary supervision
+to the experiment. It is distinct from the recorded next-direction label and
+must be disclosed when comparing models. Native rules do not run during model
+inference. These diagnostic checkpoints do not yet implement recursive playback.

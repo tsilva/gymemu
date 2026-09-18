@@ -52,34 +52,36 @@ class Tracker:
     def log_epoch(self, record, *, optimizer_steps, train_samples_seen, learning_rate, final):
         if self.run is None:
             return
-        prefix = f"stages/{record['stage']}"
+        stage = record["stage"]
         metrics = {
-            "optimizer_steps": optimizer_steps,
-            "train_samples_seen": train_samples_seen,
-            "stage": record["stage"],
-            "objective": record["objective"],
-            f"{prefix}/epoch": record["epoch"],
-            f"{prefix}/learning_rate": learning_rate,
+            "train/step": optimizer_steps,
+            "eval/step": optimizer_steps,
+            "train/samples": train_samples_seen,
+            "train/stage": stage,
+            "train/objective": record["objective"],
+            "train/epoch": record["epoch"],
+            "train/lr": learning_rate,
+            "train/rate": record["train"]["samples"] / record["train"]["seconds"],
+            "eval/rate": record["validation"]["samples"] / record["validation"]["seconds"],
+            f"train/{stage}/loss/epoch": record["train"]["loss"],
+            f"eval/{stage}/loss": record["validation"]["loss"],
         }
-        for split in ("train", "validation"):
-            result = record[split]
-            metrics.update({f"{prefix}/{split}/{key}": value for key, value in result.items()})
-            metrics[f"{prefix}/{split}/samples_per_second"] = result["samples"] / result["seconds"]
-        metrics.update(
-            {f"{prefix}/curriculum/{key}": value for key, value in record["curriculum"].items()}
-        )
+        for split, namespace in (("train", "train"), ("validation", "eval")):
+            for key, value in record[split].items():
+                # Loss has its own canonical key; only the final stage publishes RGB MSE.
+                if key in ("loss", "mse"):
+                    continue
+                suffix = "/epoch" if namespace == "train" else ""
+                metrics[f"{namespace}/{stage}/{key}{suffix}"] = value
         metrics.update(
             {
-                "train/step": optimizer_steps,
-                "eval/step": optimizer_steps,
-                f"train/{record['stage']}/loss/epoch": record["train"]["loss"],
-                f"eval/{record['stage']}/loss": record["validation"]["loss"],
-                "train/rate": record["train"]["samples"] / record["train"]["seconds"],
+                f"train/{stage}/curriculum/{key}": value
+                for key, value in record["curriculum"].items()
             }
         )
         if final:
             metrics["eval/mse"] = record["validation"]["mse"]
-            metrics["evaluation/next_frame_rgb_mse"] = record["validation"]["mse"]
+        validate_metrics(metrics)
         self.run.log(metrics)
 
     def complete(self, summary):
@@ -122,11 +124,6 @@ def track_run(config, output, *, evaluation, parameters, training_examples, reci
         run.define_metric("train/*", step_metric="train/step", summary="last")
         run.define_metric("probe/*", step_metric="train/step", summary="last")
         run.define_metric("eval/*", step_metric="eval/step", summary="last")
-        run.define_metric("optimizer_steps")
-        run.define_metric("stages/*", step_metric="optimizer_steps")
-        run.define_metric(
-            "evaluation/next_frame_rgb_mse", step_metric="optimizer_steps", summary="min"
-        )
         yield Tracker(run)
     except TrainingInterrupted:
         run.summary.update({"status": "interrupted", "resume_checkpoint": "resume.pt"})
