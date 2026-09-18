@@ -2094,3 +2094,82 @@ The horizontal weights and predictions are identical to the frozen parent.
 These results establish accurate one-step vy under the audited supplied-state
 contract. They do not close the position, memory-update, or terminal models and
 do not establish autonomous rollouts. No training follows fresh-test inspection.
+
+## Isolated ball positions and fractional y
+
+`ball_position` classifies displacement for one coordinate, keeping the complete
+selected vertical/horizontal velocity checkpoint frozen. Both coordinate fits
+reuse the same 5,271,950 nonterminal training sources from 1,824 episodes and
+88,590 validation sources from 32 episodes. The source contract remains the
+existing 118 values. Native replay reproduces the recorded positions on every
+source. Fractional-y targets come from the audited replay, not a newly recorded
+column. All preparation arrays remain in RAM; dataset files are unchanged.
+
+Training exposes 22 horizontal displacement classes and 19 vertical classes,
+all exact multiples of one eighth pixel. For y, classify displacement of the
+combined coordinate `RAM_y + fractional_y_eighths / 8`. Add that displacement,
+then split the result into integer RAM y and the remainder in eighth pixels.
+This prevents independent y/fraction heads from disagreeing about a pixel carry.
+The coordinate heads consume current state only, not true successor velocities.
+
+The source-only upper/paddle/remaining regions match the vertical-velocity model.
+Each axis has its own shared 13→64→64 ReLU cell encoder, occupancy-masked max
+pool, and 135→128→128→K upper head. Its paddle head is
+97→256→256→256→K ReLU. K is 22 for x and 19 for y. These hidden layers start
+from the successful vy model; their copies train while all parent weights stay
+frozen. Outside those regions, x uses 31→128→128→22 ReLU layers over
+scalar/binary current/proposed x and current vx. All 2,316 distinct training
+(x, vx) pairs in that region have unambiguous displacement targets. The y flight
+head uses 1→32→19 ReLU layers, fitted on unique training (vy, displacement)
+pairs; all audited flight targets equal twice current vy.
+
+Region-head losses are summed cross-entropies. Upper batches have 512 samples,
+25% whose displacement differs from twice incoming velocity; paddle batches
+have 1,024 samples, 50% with that difference. The x flight batches have 512
+samples, 25% differing. AdamW uses learning rate 0.001, weight decay 0.0001,
+cosine decay to 0.00002, and gradient clipping at 5. Evaluate every 200 updates
+and retain each disjoint head's earliest minimum-error validation checkpoint.
+Compare seeds 91 and 2026 with 30,000 updates for x, then freeze the selected
+x model before fitting y with 60,000 updates per seed.
+
+Simple integration is insufficient even with oracle velocity: on validation,
+adding twice true successor vx gives 1,669 x errors, and twice true successor
+vy gives 3,330 combined-y errors. Twice current velocity gives 3,164 and 5,253
+errors respectively. These diagnostic baselines do not supply model inputs.
+
+Reserve one shared set of 64 previously unused held-out episodes using metadata
+seed 590918, excluding all five earlier test sets. Freeze and hash both selected
+coordinate checkpoints before reading any test transition. Report exact x,
+combined y, integer y, fractional y, joint position, collision groups, and
+transitions differing from constant-velocity motion. Verify saved-model CPU/CUDA
+agreement and unchanged vx/vy predictions. Artifacts and complete provenance are
+under `runs/ball-position-20260918/` and `logs/ball-position-20260918/`.
+
+Select x seed 2026: three validation errors / 88,590 (**99.9966%**), using
+upper/paddle/flight weights from updates 22,800 / 12,800 / 1,000. Both y seeds
+achieve zero validation errors; the predefined name tie-break selects seed 2026,
+with upper/paddle weights from updates 29,200 / 12,400. X contains 813,431 total
+parameters, including 227,586 fitted position parameters; y contains 789,518,
+including 203,673 fitted position parameters. Each stores the same frozen
+585,845-parameter velocity parent; those duplicated parent counts are not
+independent learned capacity.
+
+The fresh test contains 187,251 transitions. X has 21 errors (**99.9888%**,
+0.000283 px MAE), with 12 errors on 3,251 paddle events, three on 5,122 brick
+events, and six on ordinary no-event transitions. Y including its fraction has
+seven errors (**99.9963%**, 0.000156 px MAE): two on paddle events, three on brick
+events, one on a side-wall event, and one ordinary transition. Neither coordinate
+errs on any of 2,624 ceiling events. Groups can overlap. Integer y has seven
+errors and its fractional component has three (**99.9984% exact**).
+
+Across transitions whose displacement differs from twice incoming velocity,
+x has 15 errors / 6,652 and y has five / 10,997. Joint position has 28 errors
+(**99.9850% exact**). The unchanged vx/vy models make 17 and 18 errors on this
+new test; all four ball quantities jointly have 56 errors (**99.9701% exact**).
+Saved predictions agree on CPU and CUDA and both velocity models remain
+identical to their parent. No test error is used for subsequent fitting.
+
+Current collision memory, hit count, layout, width, and paddle state are still
+supplied. The next fractional-y value is now learned, but feedback across whole
+lives and the remaining state updates are separate work. Perfect validation
+here does not imply perfect fresh-test or recursive simulation performance.

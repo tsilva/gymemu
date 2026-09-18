@@ -5,6 +5,7 @@ from gymemu.models.ball_acceleration import BallAcceleration, BallAccelerationSp
 from gymemu.models.ball_direction_geometry import BallDirectionGeometry
 from gymemu.models.ball_horizontal_router import BallHorizontalRouter
 from gymemu.models.ball_horizontal_velocity import BallHorizontalVelocity
+from gymemu.models.ball_position import BallPosition
 from gymemu.models.ball_state import BallStateAutoencoder
 from gymemu.models.ball_velocity import BallVelocityMLP
 from gymemu.models.ball_vertical_velocity import BallVerticalVelocity
@@ -27,6 +28,7 @@ MODELS = {
     "ball_acceleration": BallAcceleration,
     "ball_acceleration_spatial": BallAccelerationSpatial,
     "ball_vertical_velocity": BallVerticalVelocity,
+    "ball_position": BallPosition,
     "frame_codec": FrameCodec,
     "latent_cnn": LatentDynamics,
     "paddle_state_cnn": PaddleStateCNN,

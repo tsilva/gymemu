@@ -421,3 +421,23 @@ learned intermediate-paddle estimate errs. The nested `horizontal` specification
 contains constructor arguments for the fixed registry class. Checkpoints store
 every component; calling `train()` keeps the horizontal parent in evaluation
 mode with gradients disabled. This remains a one-step diagnostic model.
+
+`ball_position` predicts one ball-coordinate displacement using the same
+118-value current-state contract. Set `axis` to `x` or `y` and pass the signed
+eighth-pixel displacement vocabulary observed in training. `forward()` returns
+class logits, `predict_displacement()` decodes a displacement, and `predict()`
+adds it to the current coordinate. For y, the coordinate is RAM y plus its
+fractional eighth-pixel part; `predict_y_parts()` returns the coherent integer
+RAM y and fractional remainder. Native collision rules never run in inference.
+
+Its complete `ball_vertical_velocity` parent, including horizontal dynamics,
+is stored under the nested `vertical` constructor specification and stays frozen
+in evaluation mode. `predict_velocities()` exposes those unchanged predictions.
+Separate trainable upper-field and paddle heads use the parent's spatial and
+paddle feature encoders. The source-only region boundaries are unchanged.
+The remaining region's x head receives 31 scalar/binary current/proposed-x and
+vx features, allowing learned wall behavior; its y head receives current vy.
+Position heads do not consume recorded successor velocities. Fractional-y
+training labels derive from audited native replay, while integer positions
+are checked against recorded successors. This is diagnostic supervision, not
+an additional dataset column or a closed recursive simulator.

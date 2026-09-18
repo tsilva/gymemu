@@ -18,8 +18,8 @@ is established. MLP means a fully connected neural network.
 | Full-game horizontal velocity, older probe | 195→128→128→8, SiLU; cross-entropy over eight signed velocities; train-only irrelevant-brick augmentation | Current ball/paddle state excluding paddle velocity, charge, prior hit count, fractional y, brick-contact memory, 108 brick cells; relative x encoding | Older full-game one-step probe: **99.6659% validation overall**, but **85.4510% on paddle hits**. Historical baseline; superseded for full-game vx by the routed model below. |
 | Upper-field horizontal acceleration | Shared 13→64→64 ReLU network per brick; occupancy-masked max pooling, then 70→128→2; 14,402 trainable parameters | Ball x, RAM y, vx, vy, fractional y, brick-contact memory, 108 brick cells, fixed layout geometry; current y ≤ 100 and incoming speed < 2 | **47 / 48 actual speed increases caught (97.9167% recall)** on the newest fresh test, with **3 false increases** across 11,197 eligible sources; 94% precision. No additional recorded inputs. |
 | Full-game horizontal velocity, current | Previous routed vx predictor frozen, plus the spatial acceleration head; 386,781 total parameters | Existing 118-value current-state contract; source-only routing; no event-label inputs | **99.9966% validation**, 3 errors / 88,590. **99.9913% newest fresh test**, 16 / 184,160, compared with 57 for the previous model on the same episodes. Brick events: 2 / 4,966 errors; paddle events: 6 / 3,269, unchanged. One-step vx, not recursive simulation. |
-| Next ball x | Two 128-unit SiLU hidden layers; isolated residual regression with squared error | Older context described below, plus four controller values and prior hit count | Older fit: **0.254923 px validation MAE**. Not yet rebuilt with the successful compact collision representation. |
-| Next integer RAM ball y | Two 128-unit SiLU hidden layers; isolated residual regression with squared error | Older context plus prior hit count | Older fit: **0.708709 px validation MAE**. Still inaccurate around collisions. |
+| Next ball x | 22 displacement classes, cross-entropy. Shared 13→64→64 cell encoder; upper head 135→128→128→22; paddle 97→256→256→256→22; remaining field 31→128→128→22. ReLU; 227,586 fitted parameters plus frozen velocity parent | Existing 118 current-state values; spatial upper-field and paddle geometry; remaining-field head uses current x and vx. No successor velocity inputs | **99.9966% validation**, 3 / 88,590 errors. **99.9888% fresh test**, 21 / 187,251; MAE **0.000283 px**. Paddle events: 12 / 3,251 errors; brick events: 3 / 5,122. One-step position. |
+| Next RAM ball y together with fractional y | 19 displacement classes for the combined coordinate, cross-entropy. Shared 13→64→64 cell encoder; upper head 135→128→128→19; paddle 97→256→256→256→19; flight 1→32→19. ReLU; 203,673 fitted parameters plus frozen velocity parent | Same current-state contract; y includes the supplied fractional eighth-pixel component. Flight uses current vy; no successor velocity inputs | **100% validation**, 0 / 88,590 in both seeds. **99.9963% fresh-test combined-y accuracy**, 7 / 187,251; MAE **0.000156 px**. Integer y: 7 errors; fractional component: 3 errors (**99.9984%**). Fraction labels derive from audited replay. |
 | Next vertical velocity, vy | Eight-class cross-entropy. Upper field: shared 13→64→64 cell encoder, max pooling, 135→128→128→8. Paddle: 97→256→256→256→8. Flight: 1→32→8. All ReLU; horizontal parent frozen; 199,064 fitted vertical parameters | Existing 118 current-state values; upper head uses ball state, fractional y, contact memory and bricks; paddle head uses the nine paddle-geometry inputs plus explicit charge encoding; flight uses current vy | **99.9989% validation**, 1 / 88,590 errors. **99.9929% fresh test**, 13 / 182,441 errors. Actual velocity changes: **10,437 / 10,441 correct**; paddle: 1 / 3,335 errors; brick: 3 / 4,895; ceiling: 0 / 2,211. One-step prediction; current hidden state still supplied. |
 | Next paddle width | Two 128-unit SiLU hidden layers; binary cross-entropy for narrow/full width | One or eight full state observations, seven prior actions and current action | Aggregate validation accuracy exceeds 99.95%, but **0 / 36 width changes correct** in both isolated probes. Not solved. |
 | Next brick layout | Two 128-unit SiLU hidden layers; 108 occupancy logits, change-weighted binary cross-entropy | Eight full state observations, seven prior actions and current action | Older isolated probe: **brick-removal validation F1 0.189**. Not solved; mostly unchanged cells make aggregate accuracy misleading. |
@@ -47,11 +47,11 @@ not a claim for other frame skips or other state targets. Auxiliary paddle label
 use native-rule supervision, but model inference calls no native controller or
 collision rules. The source dataset was not modified for these experiments.
 
-## State still supplied rather than learned
+## Auxiliary state and remaining updates
 
 | Value | Current handling |
 | --- | --- |
-| Fractional ball y | Reconstructed from known reset state and forward native replay for diagnostics. A learned next-fraction update is not established. |
+| Fractional ball y | Current input and supervision reconstructed by native replay. Its next value is now learned jointly with y: 3 fractional errors / 187,251 fresh transitions. Autonomous feedback of this value remains untested. |
 | Prior paddle-hit count | Derived from preceding observed collisions and checked against native replay. It is an input, not a learned output yet. |
 | Brick-contact memory | Reconstructed for full-game diagnostics; excluded from the near-paddle direction model. A learned update remains untested. |
 | Paddle measurement, repeat and held-input fields | Reconstructed and present in the controller-annotated dataset. The closed x/charge paddle state does not require separate predictions of these fields under the audited reset and two-frame action contract. |
@@ -60,9 +60,10 @@ collision rules. The source dataset was not modified for these experiments.
 
 Horizontal speed and direction are now combined and integrated across the full
 field in a saved model, with a learned spatial head correcting most missed
-brick-triggered speed increases. Remaining work includes rare horizontal errors,
-ball-position and collision-memory updates. Vertical velocity now has its own
-accurate learned head with the horizontal predictor preserved unchanged.
+brick-triggered speed increases. Remaining work includes rare ball-state errors,
+brick-layout changes, collision-memory and hit-count updates, paddle width, and
+termination. Both positions (including fractional y) and both velocities now have
+one-step learned predictors. The position heads preserve both velocity models.
 High one-step accuracy with reconstructed current inputs does not yet establish
 an autonomous compact-state simulator.
 
@@ -74,7 +75,8 @@ Evidence is in [the experiment history](history.md), especially the sections on
 [the combined speed/direction experiment](history.md#2026-09-18-learned-horizontal-speed-with-frozen-direction),
 [full-game vx integration](history.md#2026-09-18-full-game-vx-integration-with-a-frozen-paddle-model),
 [spatial acceleration learning](history.md#2026-09-18-shared-spatial-brick-features-resolve-most-missed-accelerations),
-and [vertical velocity](history.md#2026-09-18-discrete-vertical-velocity-with-a-frozen-horizontal-model).
+[vertical velocity](history.md#2026-09-18-discrete-vertical-velocity-with-a-frozen-horizontal-model),
+and [ball positions](history.md#2026-09-18-discrete-ball-displacements-and-coherent-fractional-y).
 
 
 The near-paddle test rows above use the same speed-stage set of 64 fresh held-out
@@ -89,3 +91,10 @@ The vertical-velocity row uses another 64 previously unused held-out episodes,
 separate from every horizontal test above. Its checkpoint was frozen before
 reading those transitions. CPU and CUDA predictions agree exactly, and its
 stored horizontal component matches the previous horizontal checkpoint exactly.
+
+Both position rows use the same new 64-episode test set, separate from the
+velocity tests above. Both positions are simultaneously exact on **99.9850%**
+of its 187,251 transitions (28 joint errors). Including the frozen vx/vy
+predictors, all four ball quantities are simultaneously exact on **99.9701%**
+(56 errors). These are one-step predictions with the other state inputs supplied;
+no complete learned-state rollout is established.
