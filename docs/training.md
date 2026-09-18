@@ -1887,3 +1887,210 @@ Paddle test accuracy is 99.9380%; all selected test approaches score 99.9602%.
 The inspected test episodes must not silently become a fresh independent test
 for subsequent development. Full results and limitations are in the
 [experiment history](history.md#2026-09-18-near-perfect-direction-development-accuracy-and-reserved-test).
+
+### Isolated horizontal speed and frozen direction
+
+`logs/ball-speed-20260918/` trains `ball_horizontal_velocity` on the same full
+training episode set and development validation approaches as the direction
+experiment. It retains the nine-source-variable contract and encodes geometry
+with the previously selected direction model. All direction and intermediate
+paddle parameters are frozen. Training caches those encoded features in GPU
+memory and fits only the speed network with cross-entropy over the four observed
+magnitudes, 0.5, 1, 1.5, and 2 native pixels per native frame.
+
+The initial speed network is 84→128→128→4 with ReLU, trained with seeds 91 and
+2026 for up to 35,100 updates. Wider three-layer 256-unit fits are conditional
+on remaining validation errors. AdamW uses learning rate 0.001, weight decay
+0.0001, batches of 1,024, gradient clipping at 5, and cosine decay to 0.00005.
+Every 30 updates, exact speed errors on all validation approaches select the
+checkpoint, retaining the earliest tie. Zero validation errors stop a fit.
+
+Evaluation separates speed, direction, and their combined signed velocity. It
+reports paddle hits, no-hit approaches, actual speed changes, unchanged speed,
+fast paddle hits, first/second native-frame hits, and approaches passing below
+the paddle. Keeping the incoming speed with the same frozen direction predictor
+is the baseline. Aggregate accuracy alone is not sufficient evidence of learning
+speed changes.
+
+The existing 64 test episodes have already been inspected. `plan_holdout.py`
+reserves 64 different episodes from the remaining 400 original held-out episodes
+using only metadata and seed 190918. `freeze.py` selects the model before
+`prepare_fresh_test.py` reads their transitions. Derived arrays remain in RAM;
+`transfer.py` and `send_test.py` stream them over SSH without writing a feature
+cache. Checkpoints include every inference weight and are reloaded on both CUDA
+and CPU. The experiment does not alter dataset files or enable recursive play.
+
+
+The selected speed head is the three-layer, 256-unit seed-91 fit. Combined
+velocity has one error / 7,164 validation approaches and ten / 15,346 fresh-test
+approaches. On fresh-test paddle hits, speed makes eight errors / 3,263 and the
+combined velocity makes nine. Speed-change accuracy is 384 / 388. Checkpoint,
+full subgroup results, frozen-weight checks, and a diagnostic attribution audit
+are under `runs/ball-speed-20260918/gpu-artifacts/`. See the
+[experiment history](history.md#2026-09-18-learned-horizontal-speed-with-frozen-direction)
+for the complete comparison and the distinction between near-paddle and
+full-game prediction.
+
+### Full-game horizontal velocity with a frozen paddle component
+
+`logs/ball-vx-router-20260918/` combines the selected near-paddle speed/direction
+checkpoint with the older full-field eight-class vx model. The registered
+`ball_horizontal_router` selects the near-paddle component when current RAM y
+is in [160, 183] and current vy is positive. All other sources use the full-field
+MLP. Routing uses no successor values or event labels. Inference remains learned;
+native rules are used only to reconstruct and audit diagnostic inputs offline.
+
+The full-field network remains 195→128→128→8 with SiLU. Fine-tuning updates only
+its 42,632 parameters; the paddle component's 329,747 parameters stay frozen.
+The composite contains every inference weight and both nested constructor specs.
+It is a diagnostic vx checkpoint, not a complete state-dynamics/player checkpoint.
+
+Two matched controls retain the original 128 training episodes. Two expanded
+fits use all 1,824 eligible training episodes from the original training split.
+Both start from the same existing full-field checkpoint, exclude the fixed
+near-paddle source region from training, and use seeds 91 and 2026. Each fit has
+30,000 updates, batches of 2,048 sampled uniformly with replacement, cross-entropy,
+AdamW at 0.0003 with weight decay 0.0001, cosine decay to 0.00001, and gradient
+clipping at 5. Random training-only brick-layout augmentation retains the earlier
+native-audited region RAM y > 100. The validation partition remains 32 episodes.
+Every 300 updates, exact vx errors outside the gate select the checkpoint;
+the parent is also a candidate and earlier checkpoints win ties.
+
+Four chunks stream derived training arrays from local RAM to remote RAM over
+SSH. No feature cache or dataset columns are written. `prepare_chunk.py` checks
+reconstructed current fraction, contact memory, and prior hit count against
+recorded successors before training. This audit does not choose source phase
+from a successor label. `holdout-plan.json` reserves 64 episodes using metadata
+and seed 290918, excluding both previously inspected 64-episode test sets.
+`final_test.py` copies and hashes the selected checkpoint before reading those
+new test transitions. Report ordinary flight, walls, bricks, paddle hits, actual
+vx changes, and unchanged vx separately; event categories can overlap.
+
+The expanded seed-91 model was selected at update 20,400. Validation has 16
+errors / 88,590 (99.9819%); the fresh test has 50 / 185,517 (99.9730%). The
+same fresh test gives 751 errors for the old model, 119 for the routed parents,
+and 84 for the best original-data fine-tune. All 21 fresh-test brick errors are
+missed speed increases: only 31 / 52 actual brick accelerations are correct.
+Keep this rare-event measure alongside aggregate accuracy. The selected model,
+CPU/CUDA reload checks, provenance, and remaining-error audit are under
+`runs/ball-vx-router-20260918/`. See the
+[full-game vx experiment](history.md#2026-09-18-full-game-vx-integration-with-a-frozen-paddle-model)
+for category counts and the matched training-data controls.
+
+### Isolated brick-triggered horizontal acceleration
+
+`logs/ball-acceleration-20260918/` freezes the complete selected full-game vx
+model and fits a keep/increase-speed head. The source-only domain is RAM y <=
+100 and incoming horizontal magnitude < 2. Across all prepared nonterminal
+training transitions outside the paddle region, every magnitude change lies in
+this domain; its observed outcomes are incoming magnitude or 2. Labels come
+from recorded successor vx, not a native-rule label generator.
+
+Input auditing found no conflicting acceleration labels among 178,725 distinct
+reduced input vectors across development training/validation. The reduced inputs
+are x, RAM y, vx, vy, fractional y, brick-contact memory, and 108 brick cells.
+Native-rule checks under three interventions on paddle/controller values left
+all 5,117 eligible validation targets unchanged. These checks support the input
+contract on this data; they do not establish arbitrary-state observability.
+
+All 1,824 training episodes provide 304,107 eligible examples, including 1,694
+accelerations. Preparation still checks the complete 5,271,950 nonterminal
+training transitions before filtering. Validation has 5,117 eligible examples,
+including 29 accelerations. Flat scalar/binary heads use 149→128→128→2 ReLU;
+constant-velocity geometry variants use 179 inputs. Compare uniform sampling
+with 25% positive/75% negative batches using seeds 91/2026, batches of 1,024,
+and 30,000 updates. AdamW uses 0.001, weight decay 0.0001, cosine decay to
+0.00002, and gradient clipping at 5. Validation is evaluated every 100 updates.
+Select minimum speed-decision errors, breaking ties by fewer misses and then
+earliest checkpoint; zero validation errors stop a fit.
+
+Because sampling changes alone retain substantial errors, a spatial head shares
+13→64→64 ReLU layers across all 108 brick cells. It masks absent cells, max
+pools the 64 learned features, appends six global scalars, and applies
+70→128→2 ReLU layers. Cell-relative current/proposed positions use the fixed
+layout geometry; no native collision decisions run during inference. Spatial
+fits compare uniform and 25% positive sampling, both seeds, batch 512, and
+15,000 updates with the same optimizer settings. A bounded capacity check uses
+three shared 128-unit layers and 30,000 updates. Every fit freezes all 372,379
+parent parameters. The selected small spatial head adds 14,402 trainable
+parameters; the complete model contains 386,781.
+
+The selected seed-91 balanced spatial fit is from update 6,900. It has one
+missed acceleration and one false acceleration on validation, giving three
+full-field vx errors / 88,590. The wider variants do not improve that count.
+Reserve 64 fresh episodes using metadata seed 390918, excluding all three
+previously inspected 64-episode test sets, then hash the selected checkpoint
+before reading their transitions. Derived arrays remain in RAM and dataset
+files are unchanged. The SSH log stream disconnected near the end of training;
+recovered checkpoints, completed summaries, and the remote freeze record confirm
+that all 14 fits and selection completed before test evaluation.
+
+On 184,160 new test transitions, the parent makes 57 vx errors and the selected
+model makes 16 (**99.9913% exact**). Actual upper-field horizontal speed increases
+improve from 32 / 48 to **47 / 48**, while false increases fall from 29 to **3**.
+The head makes four magnitude-decision errors; one inherited direction error
+brings the region's full-vx errors to five. Eleven errors remain outside its
+domain. These are one-step results with supplied current collision memory;
+recursive full-state prediction remains untested. Checkpoints, all development
+comparisons, provenance, and fresh-test results are under
+`runs/ball-acceleration-20260918/`.
+
+## Isolated vertical ball velocity
+
+`ball_vertical_velocity` learns eight signed next-vy classes from the same
+118-value current-state contract as the horizontal model. Source-state native
+replay checks all 5,271,950 nonterminal training transitions from 1,824 episodes
+and 88,590 validation transitions from 32 episodes. Paddle measurement is
+reconstructed exactly from charge on these sources; this diagnostic finds no
+additional input requirement. Fractional y, brick-contact memory, and prior
+paddle-hit count are still supplied from audited reconstruction, not predicted
+by this model. No dataset columns or persistent feature caches are added.
+
+There are three disjoint source-selected regions: upper field (RAM y <= 100),
+descending paddle approaches (160 <= RAM y <= 183 and vy > 0), and the rest.
+Training contains 1,782,412 upper-field sources, 440,833 paddle sources, and
+3,048,705 remaining sources. The remaining region has no observed vy changes.
+Its 1→32→8 ReLU classifier is fitted to unique training velocity pairs and
+then frozen. All inference remains neural; native rules only support the audit.
+
+The upper head uses shared 13→64→64 ReLU cell features, occupancy-masked max
+pooling, then 135→128→128→8 ReLU layers. Its 71 global features encode current
+and proposed coordinates, velocities, fractional y, and contact memory. The
+paddle head uses 97→256→256→256→8 ReLU layers: 84 existing geometry features
+plus scalar/binary charge. Its hidden layers start from the learned horizontal
+speed head, with the extra charge weights initially zero. The upper cell encoder
+starts from the horizontal acceleration head. These copies train independently;
+the complete 386,781-parameter horizontal model remains frozen. The new model
+contains 585,845 parameters, including 199,064 fitted vertical parameters.
+
+Both collision heads train together with summed cross-entropy. Upper batches
+contain 512 sources, 25% with changed vy; paddle batches contain 1,024 sources,
+50% with changed vy. AdamW uses learning rate 0.001, weight decay 0.0001, cosine
+decay to 0.00002, and gradient clipping at 5. Compare seeds 91 and 2026 at 12,000
+and 60,000 updates. Every 200 updates, select each independent head by minimum
+validation exact errors, keeping the earliest tie. Compose those disjoint best
+heads and select the fit with the fewest total validation errors.
+
+The eight observed classes are -3.375, -2, -1.5, -1, 1, 1.5, 2, and 3.375
+native pixels per native frame. Evaluation reports actual velocity changes,
+ordinary transitions, paddle, brick, ceiling, and side-wall events separately;
+event groups can overlap. Reserve 64 previously unused held-out episodes using
+metadata seed 490918, excluding the four earlier test sets. Freeze and hash the
+checkpoint before reading these test transitions. Artifacts and provenance are
+under `runs/ball-vy-20260918/` and `logs/ball-vy-20260918/`.
+
+The selected seed-91 long fit uses upper weights from update 30,800 and paddle
+weights from update 17,200. Validation has one error / 88,590 (**99.9989%**),
+a missed paddle bounce. The fresh 64-episode test has 13 errors / 182,441
+(**99.9929%**): nine on ordinary transitions and four on actual velocity changes.
+Of 10,441 actual changes, 10,437 are predicted exactly (**99.9617%**). Paddle
+hits have one error / 3,335, brick events three / 4,895, and ceiling events zero
+/ 2,211. Side-wall events have one / 4,527, overlapping another event category.
+Two of 527 magnitude-changing outcomes are wrong. Reusing current vy would make
+10,441 errors overall, illustrating why aggregate accuracy alone is insufficient.
+
+The complete checkpoint reloads with identical predictions on CPU and CUDA.
+The horizontal weights and predictions are identical to the frozen parent.
+These results establish accurate one-step vy under the audited supplied-state
+contract. They do not close the position, memory-update, or terminal models and
+do not establish autonomous rollouts. No training follows fresh-test inspection.
