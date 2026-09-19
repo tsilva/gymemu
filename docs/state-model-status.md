@@ -21,10 +21,11 @@ is established. MLP means a fully connected neural network.
 | Next ball x | 22 displacement classes, cross-entropy. Shared 13→64→64 cell encoder; upper head 135→128→128→22; paddle 97→256→256→256→22; remaining field 31→128→128→22. ReLU; 227,586 fitted parameters plus frozen velocity parent | Existing 118 current-state values; spatial upper-field and paddle geometry; remaining-field head uses current x and vx. No successor velocity inputs | **99.9966% validation**, 3 / 88,590 errors. **99.9888% fresh test**, 21 / 187,251; MAE **0.000283 px**. Paddle events: 12 / 3,251 errors; brick events: 3 / 5,122. One-step position. |
 | Next RAM ball y together with fractional y | 19 displacement classes for the combined coordinate, cross-entropy. Shared 13→64→64 cell encoder; upper head 135→128→128→19; paddle 97→256→256→256→19; flight 1→32→19. ReLU; 203,673 fitted parameters plus frozen velocity parent | Same current-state contract; y includes the supplied fractional eighth-pixel component. Flight uses current vy; no successor velocity inputs | **100% validation**, 0 / 88,590 in both seeds. **99.9963% fresh-test combined-y accuracy**, 7 / 187,251; MAE **0.000156 px**. Integer y: 7 errors; fractional component: 3 errors (**99.9984%**). Fraction labels derive from audited replay. |
 | Next vertical velocity, vy | Eight-class cross-entropy. Upper field: shared 13→64→64 cell encoder, max pooling, 135→128→128→8. Paddle: 97→256→256→256→8. Flight: 1→32→8. All ReLU; horizontal parent frozen; 199,064 fitted vertical parameters | Existing 118 current-state values; upper head uses ball state, fractional y, contact memory and bricks; paddle head uses the nine paddle-geometry inputs plus explicit charge encoding; flight uses current vy | **99.9989% validation**, 1 / 88,590 errors. **99.9929% fresh test**, 13 / 182,441 errors. Actual velocity changes: **10,437 / 10,441 correct**; paddle: 1 / 3,335 errors; brick: 3 / 4,895; ceiling: 0 / 2,211. One-step prediction; current hidden state still supplied. |
-| Next paddle width | Two 128-unit SiLU hidden layers; binary cross-entropy for narrow/full width | One or eight full state observations, seven prior actions and current action | Aggregate validation accuracy exceeds 99.95%, but **0 / 36 width changes correct** in both isolated probes. Not solved. |
+| Next paddle width | 33→64→64→2 ReLU classifier, cross-entropy; 6,466 fitted parameters, outputs 12 or 16 pixels | Current width, RAM ball y, fractional y, and vy. Scalar/binary encoding includes the constant-velocity proposal `y + vy`. No other state, action, or history inputs | **100% validation**, 0 / 88,590 and all 36 changes correct. **100% reused-test width accuracy**, 0 / 45,245 and all 18 changes correct. Zero false changes/widenings. Width remains exact across 52 test life segments with width/count/contact fed back together. |
 | Next brick layout | 109-class cross-entropy: no change or one occupied cell removed. Shared 13→64→64 cell encoder; removal scorer 199→64→64→1; no-change head 135→128→128→1. ReLU; 56,130 fitted parameters plus frozen y/velocity parent | Current ball x, RAM y, vx, vy, fractional y, brick-contact memory, and 108 brick cells. No image/action history or successor inputs | **100% validation**, 0 / 88,590 complete-layout errors. **100% on a fresh 16-episode test**, 0 / 45,245 errors: all **1,184 removals** correct and **0 false removals** on 44,061 unchanged layouts. Removal precision/recall/F1 all 1.0. Wall clears/refills absent from audited data and unsupported by this output contract. |
 | Next brick-contact memory | 86→128→128→2 ReLU classifier, cross-entropy; 27,906 fitted parameters plus frozen brick/y/velocity parent | Current ball x, RAM y, vx, vy, fractional y, contact, and bricks. Frozen parent supplies 71 ball features, 2 predicted removal probabilities, and 13 probability-weighted brick geometry features | **100% validation**, 0 / 88,590. **100% on the reused 16-episode brick test**, 0 / 45,245, including all 996 activations and 993 clearings. Contact-only feedback remains exact across 52 life segments. Labels derive from audited native replay; all other state inputs remain supplied. |
-| Life-loss terminal flag | Two 128-unit SiLU hidden layers; weighted binary cross-entropy | One full state observation, seven prior actions and current action | Older isolated probe: **validation F1 0.299**. Dataset life boundaries are enforced, but accurate learned termination remains unresolved. |
+| Next capped paddle-hit count | 96→256→256→256→2 ReLU hit classifier, cross-entropy; decode `min(12, count + hit)`. 156,930 fitted parameters plus frozen vertical parent | Hit detection uses current ball x, RAM y, vx, vy, fractional y, paddle x, width and charge. Frozen intermediate-paddle prediction and geometric/binary encoding. Current count enters only the decoder | **100% validation count accuracy**, 0 / 88,590. **99.9978% reused-test count accuracy**, 1 / 45,245; all 377 increments and 801 actual hits detected, one false hit. With count and contact fed back, **99.9912%**, 4 count errors across 52 life segments. Selected detector also has one false validation hit at saturated count 12. |
+| Life-loss terminal flag | 31→64→64→2 ReLU classifier, cross-entropy; 6,338 fitted parameters | Current RAM ball y, fractional y, and vy; scalar/binary encoding includes `y + vy`. No lives, action, or history inputs | **100% validation**, 0 / 88,638 errors, all 48 deaths exact. **100% reused-test accuracy**, 0 / 45,283, all 38 deaths on the exact step and no premature stops across 52 segments. Recorded current ball state; full-state feedback remains untested. Supersedes the older history-based probe with F1 0.299. |
 
 The older context contains eight full state observations, seven prior requested
 actions plus the current action, and 32 retained paddle observations/actions.
@@ -53,7 +54,7 @@ collision rules. The source dataset was not modified for these experiments.
 | Value | Current handling |
 | --- | --- |
 | Fractional ball y | Current input and supervision reconstructed by native replay. Its next value is now learned jointly with y: 3 fractional errors / 187,251 fresh transitions. Autonomous feedback of this value remains untested. |
-| Prior paddle-hit count | Derived from preceding observed collisions and checked against native replay. It is an input, not a learned output yet. |
+| Prior paddle-hit count | Current state and labels reconstructed and checked against native replay. Its capped next value is now predicted by a learned hit detector. One reused-test false increment affects four feedback transitions. |
 | Brick-contact memory | Current value and labels reconstructed by native replay. Its next value is now learned with zero validation and reused-test errors, including contact-only feedback. Full-state feedback remains untested. |
 | Paddle measurement, repeat and held-input fields | Reconstructed and present in the controller-annotated dataset. The closed x/charge paddle state does not require separate predictions of these fields under the audited reset and two-frame action contract. |
 | Paddle velocity | Removed from the new dynamics input/output contract. Historical models and dataset columns retain it. |
@@ -62,10 +63,10 @@ collision rules. The source dataset was not modified for these experiments.
 Horizontal speed and direction are now combined and integrated across the full
 field in a saved model, with a learned spatial head correcting most missed
 brick-triggered speed increases. Remaining work includes rare ball-state errors,
-hit-count updates, paddle width, termination, and wall
-refills. Both positions (including fractional y), both velocities, and observed
-brick-layout and contact-memory updates now have learned predictors. The brick model
-preserves the y/velocity parent, and the separate x model remains unchanged.
+full-state integration, and wall refills. Learned predictors now cover termination, both positions,
+including fractional y, both velocities, brick layout, contact memory, capped
+hit count, and paddle width. The brick model preserves the y/velocity parent,
+and the separate x model remains unchanged.
 High one-step accuracy with reconstructed current inputs does not yet establish
 an autonomous compact-state simulator.
 
@@ -116,3 +117,33 @@ jointly incorrect transitions, giving 99.9668% joint accuracy for contact,
 layout, x, combined y, vx, and vy. Of 1,181 complete seven-step windows around
 brick removals, 1,178 have every output exact. The three imperfect windows contain
 existing ball errors. See [the contact experiment](history.md#2026-09-19-learned-brick-contact-memory-and-isolated-feedback).
+
+The hit-count experiment uses the same 16 reused test episodes. The selected
+model detects all 801 actual hits, including 424 after count saturation, but
+adds one false hit at episode 1570, step 2228. It incorrectly changes count 4
+to 5. The error persists for four scored transitions before the reference
+segment boundary. Its intermediate-paddle prediction is correct at 61 px;
+this is a remaining hit-classification error, also present in earlier ball
+velocity predictions for that source. No test-directed refitting is performed.
+
+Feeding count and contact together preserves exact contact and layout outputs
+and leaves every frozen ball prediction unchanged. There are 18 jointly wrong
+state transitions, up from 15 with supplied count, giving 99.9602% joint state
+accuracy. All other state fields remain supplied. See [the count experiment](history.md#2026-09-19-learned-capped-paddle-hit-count).
+
+The width experiment again reuses those 16 test episodes. Its selected head uses
+only four existing fields and catches all 18 width changes, with zero width
+errors or false widenings. Adding width feedback preserves every older model's
+predictions exactly, including the existing four count-feedback errors and 18
+joint state errors. Ball, paddle position/charge, and brick inputs still come
+from reference data. The older history-based width probes missed every change;
+the new result uses reconstructed fractional y and balanced transition sampling.
+See [the width experiment](history.md#2026-09-19-learned-paddle-width-and-three-field-feedback).
+
+The stop experiment includes life-ending transitions that the other state heads
+exclude. It retains later lives as separate segments and treats censored endings
+separately. All 38 reused-test deaths are detected on their true transition,
+while all 14 censored segments remain unstopped. This closes the isolated stop
+prediction gap using current vertical state; it does not establish correct
+termination once ball prediction errors accumulate. See
+[the termination experiment](history.md#2026-09-19-learned-life-loss-termination).

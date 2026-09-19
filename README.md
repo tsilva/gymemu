@@ -76,6 +76,17 @@ The [contact-memory head](docs/training.md#isolated-next-brick-contact-memory)
 also makes **zero errors on those 45,245 reused-test transitions**, including
 when its predictions feed the following contact input. Other state fields remain
 supplied, so full-state rollouts are still untested.
+The [paddle-hit counter](docs/training.md#isolated-next-paddle-hit-count) reaches
+**99.9978% exact count accuracy** on that reused test and **99.9912%** with count
+and contact fed back. Its one false hit affects four count updates before a
+reference segment boundary.
+The [paddle-width predictor](docs/training.md#isolated-next-paddle-width) makes
+**zero width errors on all 45,245 reused-test transitions**, including all 18
+narrowings, and stays exact with width, count, and contact fed back together.
+The [life-loss stop head](docs/training.md#isolated-life-loss-termination) makes
+**zero errors across 45,283 reused-test transitions**, stopping on the exact
+step of all 38 deaths with no premature stops. This uses recorded current ball
+state; full-state feedback remains untested.
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)

@@ -14,8 +14,11 @@ from gymemu.models.brick_layout import BrickLayout
 from gymemu.models.controller_history import ControllerHistoryMLP
 from gymemu.models.direct import Autoencoder
 from gymemu.models.latent import FrameCodec, LatentDynamics
+from gymemu.models.life_termination import LifeTermination
 from gymemu.models.paddle import PaddlePositionCNN, PaddleStateCNN
+from gymemu.models.paddle_hit_count import PaddleHitCount
 from gymemu.models.paddle_transition import PaddleTransitionMLP
+from gymemu.models.paddle_width import PaddleWidth
 from gymemu.models.state_context import HiddenStateProbe, PaddleContextProbe
 from gymemu.models.state_dynamics import StateGRU, StateMLP
 
@@ -33,6 +36,9 @@ MODELS = {
     "ball_position": BallPosition,
     "brick_layout": BrickLayout,
     "brick_contact": BrickContact,
+    "paddle_hit_count": PaddleHitCount,
+    "paddle_width": PaddleWidth,
+    "life_termination": LifeTermination,
     "frame_codec": FrameCodec,
     "latent_cnn": LatentDynamics,
     "paddle_state_cnn": PaddleStateCNN,

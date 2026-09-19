@@ -3170,3 +3170,215 @@ raw-input predictions, every nested parent weight is unchanged, and the separate
 x checkpoint retains its previous hash. Verification passes 379 tests with two
 skipped, Ruff, frozen dependency sync, and whitespace checks. No GPU parity result
 is claimed for this experiment.
+
+## 2026-09-19: Learned capped paddle-hit count
+
+Learn a binary paddle-hit event and decode the next count as the current count
+plus that event, capped at 12. Native replay supplies supervision and verifies
+all 5,271,950 nonterminal training successors against recorded ball and brick
+state. Keep all eligible lives, separating their boundaries. No dataset columns
+or persistent feature caches are written. The training set contains 440,833
+sources in the established paddle region and 93,389 actual hits.
+
+The new `paddle_hit_count` model freezes the selected vertical-velocity parent
+and reuses its paddle encoding. Remove the prior-count scalar, leaving 96
+features from current ball x, RAM y, vx, vy, fractional y, paddle x, width and
+charge, including the frozen learned intermediate paddle position. The event
+classifier excludes count, contact memory, and bricks. Its decoder alone uses
+current count. This makes event predictions independent of accumulated count
+errors. A broad source-only region, RAM y 160 through 183 with positive vy,
+covers every audited hit; sources outside it retain the count.
+
+The head is 96→256→256→256→2 with ReLU and cross-entropy. It has 156,930 fitted
+parameters plus 585,845 frozen parent parameters. Initialize the hidden layers
+from the vertical paddle head, dropping its count column; initialize the two
+outputs by averaging positive-vy and negative-vy output weights respectively.
+The decoder enforces a zero-or-one increment and saturation, but collision
+decisions remain learned. Native game rules never run during inference.
+
+Train two seeds for 20,000 AdamW updates, batch 512 with equal hits and non-hits
+from the paddle region. Use learning rate 0.0005, cosine decay to 0.00001,
+weight decay 0.0001, and gradient clipping at 5. Select by validation hit errors,
+then count errors, retaining the earliest update and breaking run ties by name.
+Validation contains 1,519 hits, but only 699 increment the count. The other 820
+occur at saturation, so count accuracy alone would conceal event mistakes.
+
+| Candidate | Best update | Validation count errors / 88,590 | Hit-event error |
+| --- | ---: | ---: | --- |
+| Seed 91 | 2,250 | 0 | One missed hit at count 12 |
+| Seed 2026 | 3,750 | 0 | One false hit at count 12; selected by name |
+
+Freeze the selected checkpoint before reading the count-test transitions. Reuse
+the same 16 episodes previously inspected for brick layout, contact, and ball
+errors, keeping them out of count fitting and selection. This is not a fresh
+test; 64 episodes remain untouched for eventual full-state evaluation.
+
+| Reused-test measure | Result |
+| --- | --- |
+| Exact next count | 45,244 / 45,245, **99.9978%** |
+| Actual count increments detected | **377 / 377** |
+| Actual paddle hits detected | **801 / 801** |
+| Hits detected after saturation | **424 / 424** |
+| False hits and false count increments | **1** each |
+| Hit precision / recall | **99.8753% / 100%** |
+| Count accuracy with count/contact feedback | 45,241 / 45,245, **99.9912%** |
+
+The false hit occurs at episode 1570, step 2228 and changes count 4 to 5. The
+frozen intermediate-paddle predictor gives 61 px, matching the offline
+controller calculation. This is a remaining event-classification error, also
+seen in the existing ball velocity models for that source. It is not explained
+by an incorrect intermediate paddle prediction. No test-directed refitting is
+performed.
+
+Count/contact feedback starts from known life resets and supplies every other
+state field. The erroneous count persists for four transitions until the
+reference segment boundary. Across 52 life segments, one has count errors;
+contact and layout stay exact. Every ball prediction is unchanged. Joint state
+errors rise from 15 to 18 because of three additional counter-only errors,
+giving 99.9602% joint accuracy. Validation feedback has zero count/contact errors
+across 79 segments, retaining five existing joint ball errors. These checks do
+not demonstrate autonomous error recovery, learned termination, or full-state
+recursive simulation.
+
+The selected CPU checkpoint is
+`runs/paddle-hit-count-20260919/count-s2026/best.pt`, SHA-256
+`19d70377d9ba6db8e02d3720a27a6f4f3abe160339f4ed4959d3d1d815e533cf`.
+Audit, comparison, selection, and feedback records are under that run folder
+and `logs/paddle-hit-count-20260919/`. CPU reload preserves raw-input predictions
+and every frozen parent weight. The separate x and contact checkpoint hashes
+are unchanged. Verification passes 381 tests with two skipped, Ruff, frozen
+dependency sync, and whitespace checks. Paddle width, termination, rare collision
+errors, and wall-refill coverage remain unfinished.
+
+## 2026-09-19: Learned paddle width and three-field feedback
+
+Audit the width transition before fitting. The pinned native code narrows the
+paddle on a ceiling collision and restores full width at serve or life loss.
+Those lifecycle resets are outside the within-life dynamics scope. Every one of
+5,271,950 nonterminal training sources matches the native width rule: 2,159
+narrowings, 4,093,205 wide retentions, and 1,176,586 narrow retentions. There are
+no within-life widenings. Training targets are recorded successor widths;
+native replay checks the transition rule and reconstructs fractional y in RAM.
+The dataset and its columns remain unchanged.
+
+Use current width, RAM ball y, fractional y, and vertical velocity. Integer and
+fractional y form one eighth-pixel coordinate. The initial encoding combines
+three normalized scalars, 11 coordinate bits, six signed-velocity bits, and a
+current-narrow indicator. A 21→64→64→2 ReLU classifier predicts width 12 or 16.
+It does not impose a monotonic update or run a native collision rule.
+
+Width changes are rare. The validation persistence baseline scores 99.9594%
+while missing every one of 36 changes. Fit with equal representation of wide
+retention, narrowing, and narrow retention, 128 examples per category per batch.
+For each seed, run 10,000 AdamW updates with cross-entropy, learning rate 0.001,
+cosine decay to 0.00002, weight decay 0.0001, and gradient clipping at 5. Select
+minimum validation width errors, then changed-width errors, retaining the
+earliest checkpoint at 250-update checks and breaking run ties by name.
+
+The initial heads catch all true changes but narrow early on two and one
+validation sources. Append the normalized constant-velocity proposal `y + vy`
+and its 11 coordinate bits. The new 33→64→64→2 head has 6,466 parameters and
+uses the same four input fields. It exposes simple motion arithmetic without
+executing a collision decision or taking a true successor as input. Cached and
+direct feature construction agree exactly on 359,086 original training sources.
+
+| Candidate | Best update | Validation errors / 88,590 | Missed changes |
+| --- | ---: | ---: | ---: |
+| Initial encoding, seed 91 | 6,750 | 2 false narrowings | 0 |
+| Initial encoding, seed 2026 | 7,250 | 1 false narrowing | 0 |
+| Motion proposal, seed 91 | 4,750 | 2 false narrowings | 0 |
+| Motion proposal, seed 2026 | 7,500 | **0**, selected | **0** |
+
+Freeze and hash the selected checkpoint before reading the same 16 reused test
+episodes. They remain outside width training and selection, but their earlier
+brick, contact, count, and ball results have already been inspected. Preserve
+64 untouched episodes for eventual full-state testing. Do not present the reused
+result as fresh-test generalization.
+
+| Reused-test width transition | Examples | Errors |
+| --- | ---: | ---: |
+| Wide remains wide | 36,007 | 0 |
+| Narrows | 18 | 0 |
+| Narrow remains narrow | 9,220 | 0 |
+| All next widths | **45,245** | **0** |
+
+Change precision and recall are both 100%. There are no false changes or false
+widenings. The small number of actual changes is an important limit on the
+coverage of this finite evaluation.
+
+Feed width, count, and contact forward together from known life starts, using
+recorded or reconstructed values for the other state fields. Width remains exact
+across all 52 test life segments. Every older model output matches the preceding
+count/contact feedback evaluation byte for byte. The existing count error still
+covers four transitions; joint state errors remain 18, or 99.9602% joint accuracy.
+Validation feedback has zero width errors across 79 segments and retains five
+existing joint ball-state errors. These are partial-state checks with reference
+boundaries, not complete recursive simulation or learned termination.
+
+The selected CPU checkpoint is
+`runs/paddle-width-20260919/proposal-s2026/best.pt`, SHA-256
+`dd1cf25b8e049c5f858f2b183d64f4511bb1cfe2589a3a835e39440c8a09208d`.
+Audit, comparison, selection, and feedback records are under that run folder
+and `logs/paddle-width-20260919/`. CPU reload reproduces the selected predictions,
+and all frozen x, contact, and count checkpoint hashes are unchanged. No dataset
+columns or persistent feature caches are written. Learned life-loss termination,
+rare collision errors, wall-refill coverage, and full-state integration remain
+unfinished.
+
+Verification for the width model passes 385 tests with two skipped, Ruff,
+frozen dependency sync, and whitespace checks.
+
+
+## 2026-09-19: Learned life-loss termination
+
+The older history-based terminal probe had validation F1 0.299. Tackle this
+state target independently with the sufficient current-state representation,
+including the death transitions excluded by the position and velocity probes.
+
+Restore terminal sources in a RAM-only training view, leaving the dataset
+unchanged. Their fractional y comes from the previous source's causal replay
+output within the same life. Preserve later lives and distinguish death from
+censoring. The original game's pre-movement loss check at the fixed two-frame
+cadence agrees with every included recorded boundary across training, validation,
+and reused test. This is an offline audit, not the neural inference rule.
+
+Fit a 31→64→64→2 ReLU classifier with 6,338 parameters, using current RAM y,
+fractional y, and vy. Inputs include scalar and bit encodings of the combined y,
+vy, and the current-motion proposal `y + vy`. No lives or actions are required
+by this tested predictor. Native rules do not execute at inference.
+
+Use all 1,824 training episodes: 5,275,072 sources, including 3,122 deaths.
+Balance deaths, surviving sources near the loss boundary, and other survivors
+with 128 examples of each per batch. Run two seeds for 8,000 AdamW updates each,
+with cross-entropy, learning rate 0.001 decayed to 0.00002, weight decay 0.0001,
+and gradient clipping at 5. Select by validation errors, then missed deaths,
+earliest checked update, and finally run name. Both seeds reach zero validation
+errors; seed 2026 is selected by the declared run-name tie break. Each training
+run takes about five CPU seconds after preparation.
+
+| Check | Sources | Actual deaths | Missed deaths | False stops |
+| --- | ---: | ---: | ---: | ---: |
+| Validation, seed 91, update 250 | 88,638 | 48 | 0 | 0 |
+| Validation, seed 2026, update 500, selected | 88,638 | 48 | 0 | 0 |
+| Reused 16-episode test, frozen selected checkpoint | 45,283 | 38 | 0 | 0 |
+
+Death precision and recall are 100% on both validation and reused test. Scan for
+the first predicted stop in each recorded life segment: all 48 validation and
+38 test deaths stop on the exact transition. There are no predicted stops in
+31 censored validation segments or 14 censored test segments. These are source
+state checks, not recursive ball prediction. Only 38 test deaths were observed,
+and the 16 test episodes were previously inspected for other targets. The
+remaining 64 held-out episodes are still untouched.
+
+The model is saved at `runs/life-termination-20260919/stop-s2026/best.pt`, SHA-256
+`ff2bad6f68b5701699684537186ba225b171ae271f65ffbf1587a1a68493f37d`.
+The result is in `runs/life-termination-20260919/result.json`; preparation,
+training, audit and selection scripts/receipts are under
+`logs/life-termination-20260919/`. CPU checkpoint reload is exact. Checked prior
+model hashes are unchanged; no dataset fields or persistent feature caches are
+written. Full-state integration and the effect of accumulated ball errors on
+termination remain untested.
+
+Verification passes 387 tests with two skipped, Ruff, frozen dependency sync,
+and whitespace checks. Focused tests cover the input dependency contract,
+learning, checkpoint reload, and network-controlled stop decisions.

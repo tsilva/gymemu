@@ -477,3 +477,56 @@ a binary integer. `train()` keeps the complete layout and ball parent in eval
 mode with disabled gradients. Contact labels derive from offline native replay;
 inference executes no native collision rules. This model needs the current
 contact value. It does not infer an initial value from images.
+
+`paddle_hit_count` predicts a paddle-hit event and decodes the next count as
+`min(12, current_count + predicted_hit)`. Its nested `vertical` specification
+constructs a frozen `ball_vertical_velocity` parent. The established paddle
+encoder supplies geometry, a learned intermediate paddle position, and charge
+features. Remove its prior-count scalar to form 96 classifier inputs, then use
+96→256→256→256→2 ReLU layers. Hit detection is independent of current count,
+contact memory, and brick layout. The decoder still consumes current count.
+
+`forward()` returns two hit logits. It scores sources in the established region
+of RAM y from 160 through 183 with positive vy, and emits no hit elsewhere.
+Audit that every hit lies within this broad source-only region before using the
+model at a new cadence. `predict_hit()` returns the binary event, including hits
+after count saturation; `predict()` returns the capped count. The decoder does
+not handle life resets or termination. `encode()` and `forward_encoded()` allow
+RAM-only feature reuse during isolated fitting, and `train()` keeps the parent
+frozen and in eval mode. No native collision rule or successor label runs during
+inference.
+
+`paddle_width` predicts 12-pixel or 16-pixel width directly. It accepts the shared
+118-value current state but reads only current width, integer RAM ball y,
+fractional y, and vy. Combine the y components into one eighth-pixel coordinate.
+Three normalized scalars, 11 coordinate bits, six signed-velocity bits, and a
+current-narrow indicator form 21 encoded features. A 21→64→64→2 ReLU network
+returns width logits; `predict()` maps the argmax to 12 or 16.
+The selected `proposal=True` variant appends normalized `y + vy` and its 11
+coordinate bits, producing a 33→64→64→2 head. This motion proposal uses current
+inputs and is not a simulated collision or a successor-state input.
+
+This standalone model has no trainable dependency on existing models. It uses no
+images, actions, horizontal state, brick cells, contact flag, hit count, or
+predicted successors. It runs no native ceiling rule and imposes no hard-coded
+monotonic width update. Train it on nonterminal within-life transitions and
+handle life initialization separately. `encode()` and `forward_encoded()` permit
+RAM-only feature reuse during isolated training.
+
+`life_termination` is a standalone binary stop head. It accepts the shared
+118-value physical source state but reads only RAM ball y, fractional y, and vy.
+Two normalized scalars, 11 combined-y bits, six signed-velocity bits, and a
+normalized constant-velocity proposal `y + vy` with 11 bits form 31 features.
+The 31→64→64→2 ReLU network has 6,338 parameters. `forward()` returns logits;
+`predict()` returns a boolean terminal decision. `encode()` and
+`forward_encoded()` support RAM-only feature reuse. No native loss threshold,
+collision rule, lives counter, or successor label executes during inference.
+
+Train this head on surviving transitions **and** transitions ending a life.
+The target is the existing life-loss boundary; truncation, invalid data, and
+other censored endings are not deaths. At a predicted terminal transition, a
+future integrated simulator must stop the life and discard the state heads'
+unsupported successor outputs. Their training still excludes terminal targets.
+This model is registered for isolated evaluation; it is not yet wired into the
+shared runner or player. Its current evidence uses recorded ball state and
+causally reconstructed fractional y at the fixed two-native-frame cadence.
