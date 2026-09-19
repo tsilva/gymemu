@@ -21,6 +21,9 @@ from gymemu.models.paddle_transition import PaddleTransitionMLP
 from gymemu.models.paddle_width import PaddleWidth
 from gymemu.models.state_context import HiddenStateProbe, PaddleContextProbe
 from gymemu.models.state_dynamics import StateGRU, StateMLP
+from gymemu.models.vertical_ball_pair import VerticalBallPair
+from gymemu.models.vertical_collision_timing import VerticalCollisionTiming
+from gymemu.models.vertical_displacement_refinement import VerticalDisplacementRefinement
 
 MODELS = {
     "direct_cnn": Autoencoder,
@@ -39,6 +42,9 @@ MODELS = {
     "paddle_hit_count": PaddleHitCount,
     "paddle_width": PaddleWidth,
     "life_termination": LifeTermination,
+    "vertical_ball_pair": VerticalBallPair,
+    "vertical_collision_timing": VerticalCollisionTiming,
+    "vertical_displacement_refinement": VerticalDisplacementRefinement,
     "frame_codec": FrameCodec,
     "latent_cnn": LatentDynamics,
     "paddle_state_cnn": PaddleStateCNN,

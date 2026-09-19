@@ -3382,3 +3382,193 @@ termination remain untested.
 Verification passes 387 tests with two skipped, Ruff, frozen dependency sync,
 and whitespace checks. Focused tests cover the input dependency contract,
 learning, checkpoint reload, and network-controlled stop decisions.
+
+
+## 2026-09-19: Paired vertical position and velocity
+
+Combine the existing y predictor, including fractional y, with its velocity
+parent and test their feedback independently before adding other state heads.
+Each transition computes both predictions from one source state, then applies
+the selected feedback together. Use all eligible starts at horizons 1, 8, 32,
+and 128; never cross reference life boundaries. Keep other state supplied.
+
+The first incompatibility is a validation paddle bounce at episode 1918,
+step 2461. Predicted next y is correctly 176.375, but vy remains +3.375 instead
+of switching to -3.375. This one velocity error becomes 128 failed 128-step
+windows with joint feedback. Y-only feedback adds no errors, while vy-only
+feedback produces 18 incorrect endpoints at that horizon. This distinguishes
+a velocity disagreement from failure of the original y model on validation.
+
+Freeze both original predictors and train a 10→64→64→8 ReLU correction to vy.
+Its inputs are current vy, predicted y displacement and eight original vy
+probabilities. The 5,384-parameter head can use evidence of a bounce in the
+position prediction without executing collision rules or receiving true next y.
+Use 359,086 sources from the original 128 training episodes, with equal batch
+sampling of original velocity errors, correct velocity changes and other correct
+predictions. Only three training sources have original vy errors, so they are
+sampled repeatedly. Both seeds run 6,000 AdamW updates. Their earliest zero-error
+validation checkpoint is update 250, and both become exact through all 78,806
+eligible 128-step validation windows. Select seed 2026 by the declared name tie
+break. This smaller correction makes joint rollout fine-tuning unnecessary for
+the validation target at this stage.
+
+Freeze the selection, then evaluate the same 16 reused test episodes, keeping
+64 untouched episodes reserved. The correction reduces one-step vy errors from
+five to one; y retains its three errors. Joint errors fall from seven to three.
+
+| Joint-feedback check | Original pair | Corrected pair |
+| --- | ---: | ---: |
+| One-step exact, 45,245 sources | 99.9845% | 99.9934% |
+| Incorrect 8-step endpoints / 44,881 | 45 | 24 |
+| Incorrect 32-step endpoints / 43,640 | 165 | 96 |
+| Incorrect 128-step endpoints / 39,203 | 422 | 224 |
+| Fully exact 128-step windows / 39,203 | 38,692 | 38,979 |
+| Fully exact 128-step percentage | 98.6965% | 99.4286% |
+| Mean 128-step endpoint y error | 1.9200 px | 1.5996 px |
+| Maximum 128-step endpoint y error | 782.25 px | 897.75 px |
+
+Windows overlap, so 224 failed windows are seeded by three distinct transitions,
+not 224 independent collision mistakes. All three remaining one-step errors
+involve y: two paddle interactions and one brick interaction, with one also
+having incorrect vy. Some failures drift more severely after correction, and
+mean y error is higher at horizons 8 and 32. This is a reduction in failure
+frequency, not a guarantee of bounded error. No held-out examples were used for
+fitting. All other fields remain supplied and reference boundaries stop the
+runs; complete ball or full-state feedback remains untested.
+
+The selected checkpoint is
+`runs/vertical-pair-20260919/coupling-s2026/best.pt`, SHA-256
+`db047b3a50ba075aba9238240b86109b9c1a209fe19b71234daae3ccdc60e748`.
+It saves both original models and the correction. All original model weights
+remain identical, and no dataset columns or persistent feature caches were
+written. Scripts and audit receipts are under `logs/vertical-pair-20260919/`;
+all four feedback comparisons are in `runs/vertical-pair-20260919/result.json`.
+The evaluator's reuse of exact reference-input predictions matches brute-force
+feedback in tests. Checkpoint reload also reproduces the full reused-test
+rollout results after eliminating duplicate position computation.
+
+Verification passes 390 tests with two skipped, Ruff, frozen dependency sync,
+and whitespace checks. The three focused pair/evaluator tests also pass after
+the inference optimization.
+
+
+## 2026-09-19: Collision displacement refinement rejected after held-out evaluation
+
+Attempt a focused improvement to the remaining vertical pair failures. The
+original validation set has zero errors, so reserve 256 development episodes
+from the training pool before fitting new heads. These episodes were seen by
+the frozen parent models. They provide a refinement comparison, not independent
+generalization evidence. Fit on the remaining 1,568 episodes and preserve the
+original 32 validation episodes as a zero-regression gate.
+
+A full causal audit covers 5,271,950 nonterminal sources. The fitting subset has
+23 y mistakes across 4,529,910 sources, all in the upper or paddle regions.
+Development has five y errors and six joint errors across 742,040 sources.
+This supplies training analogues of collision errors without fitting any of the
+known held-out witnesses.
+
+Add two frozen-feature residual y heads, 162→64→64→19 and 124→64→64→19 ReLU,
+29,222 parameters. The original y/vy pair remains frozen. The correction sees
+existing spatial/paddle features and original predicted probabilities. Corrected
+y displacement then supplies the existing velocity coupling. Keep ordinary
+flight unchanged and initialize residual logits to zero.
+
+Train two seeds for 6,000 updates each with categorical displacement loss,
+small residual-logit regularization, and balanced sampling of original errors,
+correct nonlinear movements, and correct linear movements. The full-strength
+heads introduce validation errors. Neither seed yields an eligible checkpoint.
+
+As a bounded follow-up, calibrate the last seed's correction strength using
+only development and original validation. Scale 0.3 preserves exact original
+validation and reduces development joint errors from six to three. It repairs
+22 of 23 fitting y errors without introducing fitting errors. Full 128-step
+development failures drop from 357 to 89, mean y error from 0.2143 to 0.0240
+pixels, and maximum y error from 911.25 to 459 pixels. Freeze the candidate.
+
+| Stage | Original validation joint errors | Development joint errors |
+| --- | ---: | ---: |
+| Current pair | 0 | 6 |
+| Unscaled seed 91, final update | 4 | 13 |
+| Unscaled seed 2026, final update | 4 | 12 |
+| Seed 2026 at 0.3 correction strength | 0 | 3 |
+
+The reused held-out test does not confirm the improvement. The candidate keeps
+all three prior one-step errors and introduces one new paddle displacement error.
+The ball bounces, but the predicted displacement reflects the wrong timing within
+the two-native-frame transition. Next vy remains correct for that new mistake.
+
+| Reused-test metric | Current pair | Candidate |
+| --- | ---: | ---: |
+| Joint errors / 45,245 transitions | 3 | 4 |
+| Failed 128-step windows / 39,203 | 224 | 352 |
+| Fully exact 128-step windows | 99.4286% | 99.1021% |
+| Mean endpoint y error at 128 steps | 1.5996 px | 2.3451 px |
+| Worst endpoint y error at 128 steps | 897.75 px | 897.75 px |
+
+Reject the candidate and retain the existing combined pair. This experiment
+improves fitting and development behavior but fails to transfer that improvement
+to the reused held-out episodes. It does not establish missing state information
+or justify more fitting to the test cases. No further fitting follows the test,
+and 64 untouched episodes remain reserved. Other state fields and stopping
+boundaries remain supplied throughout these partial-state rollouts.
+
+The retained checkpoint is
+`runs/vertical-pair-20260919/coupling-s2026/best.pt`, SHA-256
+`db047b3a50ba075aba9238240b86109b9c1a209fe19b71234daae3ccdc60e748`.
+The rejected candidate is
+`runs/vertical-refinement-20260919/calibrated-s2026/best.pt`, SHA-256
+`e1ff4dc450d3df2992673d4246289c163f531ed2b34c658fea149c9266b9f882`.
+Its checkpoint records development acceptance; final rejection is recorded in
+`logs/vertical-refinement-20260919/decision.json` and the run result's
+`disposition`. Scripts and receipts are under that log directory. Frozen parent
+weights and dataset contents are unchanged. No persistent feature caches were
+written, and no shared runner/player behavior changed. Verification passes
+391 tests with two skipped, Ruff, frozen dependency sync, and whitespace checks.
+
+## 2026-09-19: Explicit collision timing rejected after held-out evaluation
+
+Test a direct representation of bounce timing: jointly predict the vertical
+velocities used in the first and second native movements. Their sum determines
+y displacement, and the second determines next vy. Offline native replay confirms
+these targets on 5,271,950 sources without mismatches. They add supervision, not
+new source information; the first velocity is also recoverable from the recorded
+displacement and next vy. Dataset contents remain unchanged.
+
+Keep the existing pair frozen and train upper-field 135→128→128→64 and paddle
+97→256→256→256→64 ReLU heads on its features. Use 64 joint velocity outcomes,
+categorical loss, and an auxiliary timing loss. Balance unchanged, first-frame,
+and second-frame events. Fit two seeds for 10,000 updates. The standalone heads
+do not pass the original-validation/development gate.
+
+Before reading the reused test, calibrate a prior from the frozen original y
+probabilities. Select seed 2026 with prior weight 2 on both heads. It has zero
+joint errors on all 88,590 original-validation and 742,040 development sources,
+and all their complete 128-step windows are exact. However, the 256 development
+episodes were part of frozen-parent training, so this is not evidence of
+generalization to episodes unseen by the complete model.
+
+| Reused-test metric | Existing pair | Timing candidate |
+| --- | ---: | ---: |
+| Joint errors / 45,245 transitions | 3 | 4 |
+| Failed 128-step windows / 39,203 | 224 | 352 |
+| Fully exact 128-step windows | 99.4286% | 99.1021% |
+| Mean endpoint y error at 128 steps | 1.5996 px | 2.7291 px |
+| Worst endpoint y error at 128 steps | 897.75 px | 897.75 px |
+
+Reject the candidate and retain `vertical-pair-20260919/coupling-s2026`.
+Explicit timing does not improve the reused held-out result: all three original
+joint errors remain and one paddle timing error is introduced. This is the same
+additional source that failed in the preceding displacement refinement. No
+fitting follows the test result, and 64 untouched episodes remain reserved.
+Other state fields and life boundaries are supplied; overlapping windows are
+not independent failures or full-state gameplay trials.
+
+Before another model change, establish development trajectories unused in the
+training of every component. The present result does not prove missing inputs
+or isolate the cause of the generalization gap. See
+[the training record](training.md#explicit-vertical-collision-timing) for the
+split, hyperparameters, calibration, and checkpoint identity. Plans, audit,
+scripts, and rejection receipt are under `logs/vertical-timing-20260919`;
+`runs/vertical-timing-20260919/result.json` records final rejection. The dataset,
+existing checkpoint, and shared runner/player remain unchanged. Verification
+passes 394 tests with two skipped, Ruff, and frozen dependency sync.

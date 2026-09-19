@@ -530,3 +530,86 @@ unsupported successor outputs. Their training still excludes terminal targets.
 This model is registered for isolated evaluation; it is not yet wired into the
 shared runner or player. Its current evidence uses recorded ball state and
 causally reconstructed fractional y at the fixed two-native-frame cadence.
+
+`vertical_ball_pair` composes a `ball_position` specification with `axis=y` and
+its existing vertical-velocity parent. `predict()` returns combined y and vy
+from the same source state. Only after both outputs are computed should playback
+split y into integer RAM y and fractional eighths and update all three fields.
+The wrapper introduces no native transition rules or shared-runner branches.
+
+With `coupling_width=0`, both original outputs are returned. The wrapper permits
+training their y/vy heads while keeping horizontal and intermediate-paddle
+dependencies frozen. The selected `coupling_width=64` variant instead freezes the
+complete original pair. A 10→64→64→8 ReLU correction classifies next vy using
+current vy, the frozen y predictor's displacement, and eight frozen vy
+probabilities. `coupling_encode()` supports RAM-only feature reuse; neither a
+recorded successor nor a true collision event enters these features. Each
+original predictor runs once per forward call. The only trained component is
+the 5,384-parameter correction, and y is unchanged.
+
+`evaluate_vertical_pair()` in `gymemu/vertical_pair_eval.py` compares reference,
+y-only, vy-only, and joint feedback. It starts at every eligible source and
+scores horizons 1, 8, 32, and 128 only when the complete window stays in a
+contiguous life segment. Supply explicit life IDs in addition to episode and
+step IDs. Input rows exclude terminal transitions. Other state fields remain
+recorded or reconstructed, and reference boundaries stop rollouts. Exact
+reference-input predictions are reused; changed inputs run the pair again.
+Tests compare this optimization with brute-force feedback across life boundaries.
+
+`vertical_displacement_refinement` wraps a frozen `vertical_ball_pair` with a
+coupling head. It adds residual logits to the original y displacement classes
+in the existing upper-field and descending-paddle regions. Flight logits remain
+unchanged. Both residual heads initialize their last layer to zero, so the
+initial model reproduces the parent pair exactly.
+
+For the upper field, reuse the frozen y encoder's pooled brick representation
+and 71 global values. For the paddle region, reuse its 97-value paddle encoder.
+Append the original 19 y probabilities and eight coupled vy probabilities.
+The default heads are 162→64→64→19 and 124→64→64→19 ReLU networks, totaling
+29,222 trainable parameters. No successor state or true event label enters these
+features. `encode()` exposes the frozen features and original logits for
+RAM-only fitting.
+
+After correcting the y logits, use the corrected predicted displacement in the
+existing frozen velocity coupling. This keeps y and vy predictions connected
+without changing the original pair's weights. `forward()` returns y-displacement
+and vy logits; `predict()` returns combined y and vy. `train()` keeps the complete
+parent in evaluation mode. The checkpoint saves the parent and both residual
+heads, and loading uses the explicit model registry.
+
+For the calibrated refinement, multiply each residual head's final linear weight
+and bias by the development-selected scale before saving. This scales the
+correction to class scores, not the predicted movement or the physical y value.
+The output still selects one of the original eighth-pixel displacement classes.
+No extra scale must be applied after loading the checkpoint.
+
+`vertical_collision_timing` predicts a joint pair of vertical velocities, one
+for each native frame of the fixed two-frame transition. Each of eight velocities
+can occur in either frame, giving 64 output classes. Decode next combined y as
+current combined y plus the two predicted movements; next vy is the second
+predicted velocity. Thus an early bounce and a late bounce can share an outgoing
+velocity while producing different displacements. No native collision/controller
+rules run during inference.
+
+The original `vertical_ball_pair` is frozen. Reuse its y model's pooled spatial
+features and paddle encoding. Upper-field and paddle heads are
+135→128→128→64 and 97→256→256→256→64 ReLU networks. Initialize their hidden
+layers from the loaded y model and train copied weights. Joint velocity-pair
+cross-entropy can be combined with timing NLL. `timing_log_probabilities()`
+marginalizes outcomes into unchanged, first-frame change, second-frame change,
+or changes in both frames, relative to current vy.
+
+`active_regions` explicitly selects upper and/or paddle regions. All remaining
+regions use the original pair, including ordinary flight. This permits testing
+one timing head without accepting regressions from the other. `encode()` exposes
+source-only frozen features for RAM-only fitting, and `predict()` returns
+combined y and vy. The full parent stays in eval mode during training.
+
+An optional nonnegative `prior_weight` adds the original y model's log probability
+for each candidate pair's summed displacement to the timing head's logits.
+Velocity pairs whose sum is absent from the original displacement vocabulary
+receive a finite log-prior floor of -30. This combines learned scores before
+choosing one coherent pair; it does not average physical positions. The weight
+and active regions are stored in the model specification. A zero weight preserves
+the standalone timing model, and all lookup buffers are derived from saved
+velocity/displacement vocabularies.
