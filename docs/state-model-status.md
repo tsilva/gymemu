@@ -175,3 +175,12 @@ mean endpoint y error rises from 1.5996 to 2.7291 pixels. The current checkpoint
 and table remain unchanged. The development split has the same frozen-parent
 training overlap as the preceding refinement. See
 [the rejected timing experiment](history.md#2026-09-19-explicit-collision-timing-rejected-after-held-out-evaluation).
+
+The follow-up ancestry audit establishes 400 development episodes with zero
+training overlap across the current pair and all its learned dependencies,
+preserving 64 untouched final-test episodes. On 1,152,531 nonterminal development
+transitions, the unchanged pair makes 78 y errors, 68 vy errors, and 99 joint
+errors, or **99.9914% exact one-step joint accuracy**. These previously inspected
+episodes now serve development explicitly. This is neither a fresh-test score
+nor a rollout improvement; the current checkpoint remains unchanged. See
+[the split and baseline](training.md#vertical-development-split-with-untrained-episodes).

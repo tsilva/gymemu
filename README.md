@@ -97,8 +97,10 @@ improved development results but regressed on the reused held-out test and was
 rejected. The existing combined pair remains the current model.
 An [explicit collision-timing experiment](docs/training.md#explicit-vertical-collision-timing)
 also regressed on the reused held-out test despite exact development predictions;
-it was rejected too. Further comparisons need development episodes unseen by
-every trained component.
+it was rejected too. A subsequent [split audit](docs/training.md#vertical-development-split-with-untrained-episodes)
+establishes 400 development episodes excluded from every component's training,
+while preserving 64 untouched final-test episodes. The development episodes were
+previously evaluated, so their scores guide tuning rather than final reporting.
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)
