@@ -2780,3 +2780,87 @@ with and without the prior.
 The next experiment should establish development episodes unseen by every
 trained component before trying another architecture. This result does not
 establish missing state or prove why the generalization gap occurs.
+
+## Vertical development split with untrained episodes
+
+The 2026-09-19 follow-up establishes this split without changing dataset files or
+training any model. It applies to future vertical-pair experiments; earlier
+experiment scripts retain their historical split definitions.
+
+| Role | Episodes | Permitted use |
+| --- | ---: | --- |
+| Fit | 1,824 | Gradient fitting, augmentation donors, fitted preprocessing |
+| Legacy validation | 32 | Existing regression checks; already used for selection |
+| Development | 400 | Diagnosis, calibration, model selection; no gradient fitting |
+| Final test | 64 | Reserved until the candidate and evaluation procedure are frozen |
+
+The development set is the union of all previously inspected held-out episode
+allocations, including the 16 most recently reused episodes. No component of the
+current pair trained on these 400 episodes. They have informed earlier research
+decisions, so this is a development baseline, not a new unbiased test result.
+The remaining 64 held-out episodes stay untouched. The former 256 development
+episodes are part of the fitting pool because frozen parents trained on them.
+No life changes split: every life inherits its original episode's role.
+
+Audit the complete learned ancestry, rather than only the last correction head.
+Compare the current nested weights exactly against eight checkpoint records:
+the pair, y model, vy model, acceleration model, horizontal router, paddle speed,
+paddle direction, and intermediate paddle model. Also verify the older global
+horizontal initialization's checkpoint hash and training-cache identity. Its
+weights subsequently changed during training-only fine-tuning. These nine
+provenance entries have zero training overlap with development or final test.
+Check every saved held-out allocation against the frozen episode partition.
+This audit covers the current pair and its dependencies, not arbitrary future
+components; a new dependency requires its own ancestry audit.
+
+The immutable episode lists, component hashes, training episode IDs, and exposure
+records are in `logs/vertical-development-20260919/split.json`. Recheck them with:
+
+```bash
+PYTHONPATH=. uv run python logs/vertical-development-20260919/establish.py
+```
+
+The audit refuses to overwrite an existing plan whose partition or provenance
+has changed. Use an explicitly versioned plan for a future change. No transition
+targets are read to establish this partition; only metadata, historical receipts,
+and checkpoints are inspected.
+
+The paired model's one-step baseline is evaluated on all 400 development episodes
+using filtered reads, RAM-only source reconstruction, and the existing life
+boundaries. The loader checks episode membership before each read and again on
+returned rows. Negative checks confirm that fitting, legacy-validation, and
+final-test IDs are rejected by the development reader. Native replay audits the
+prepared targets without providing collision decisions to model inference.
+
+| One-step development metric | Existing pair |
+| --- | ---: |
+| Nonterminal transitions | 1,152,531 |
+| Incorrect combined y | 78 |
+| Incorrect vy | 68 |
+| Either output incorrect | 99 |
+| Both outputs exactly correct | 99.9914% |
+
+This is a new measurement of unchanged weights, not a model improvement. Inputs
+are recorded current states; the score does not measure accumulated rollout
+error. No new 128-step score or final-test score is claimed.
+
+Run the same bounded baseline with:
+
+```bash
+PYTHONPATH=. uv run python logs/vertical-development-20260919/baseline.py
+```
+
+The baseline plan is written before loading development targets. Results and
+per-episode error witnesses are saved in that directory, while feature arrays
+remain in RAM. Future tuning must keep these development IDs out of every
+gradient-fitting stage, augmentation pool, fitted normalizer, and learned target
+vocabulary, including those of frozen parents. Select using the full development
+set and the planned feedback metrics, retain legacy regression checks, then freeze
+the candidate before any final-test read. Do not report later development gains
+as fresh-test evidence.
+
+The completed baseline confirms unchanged dataset file sizes/modification times
+and checkpoint hash. `verification.json` records rejection of a modified frozen
+partition and a deliberately injected training overlap in a frozen parent, plus
+the three development-reader rejection checks. These checks modify only in-memory
+test records or temporary files, not the real dataset or provenance receipts.

@@ -3572,3 +3572,50 @@ scripts, and rejection receipt are under `logs/vertical-timing-20260919`;
 `runs/vertical-timing-20260919/result.json` records final rejection. The dataset,
 existing checkpoint, and shared runner/player remain unchanged. Verification
 passes 394 tests with two skipped, Ruff, and frozen dependency sync.
+
+## 2026-09-19: Development split audited across the full vertical-model ancestry
+
+The two rejected refinements used 256 development episodes that the frozen
+parents had trained on. Establish a different development set before further
+model changes. Use all 400 previously inspected held-out episodes for development
+and preserve the remaining 64 untouched episodes for final evaluation. Keep
+1,824 fitting episodes and the original 32 validation episodes. The 256 former
+development episodes return to their existing fitting-pool role. Whole episodes
+retain one role across every life.
+
+Verify eight checkpoint identities against the current pair's nested weights,
+covering position, velocity, acceleration, horizontal routing, paddle speed,
+direction, and intermediate paddle motion. Trace the older horizontal-model
+initialization as a ninth provenance entry. Check training IDs against the new
+partition and all saved held-out allocations. The development and final-test
+sets have zero overlap with any audited component's training data. These 400
+episodes have already informed research decisions, so their future scores are
+development evidence rather than fresh-test evidence.
+
+Freeze explicit episode lists and provenance hashes in
+`logs/vertical-development-20260919/split.json`. Evaluate only the existing pair,
+without fitting or calibration, on every nonterminal development source.
+
+| One-step metric | Unchanged current pair |
+| --- | ---: |
+| Episodes | 400 |
+| Transitions | 1,152,531 |
+| Combined-y errors | 78 |
+| Vy errors | 68 |
+| Joint errors | 99 |
+| Joint exact accuracy | 99.9914% |
+
+This establishes a broader baseline; it does not improve the model or measure
+recursive drift. The final test remains unread. Native reconstruction checks
+pass for all sources, feature arrays remain in RAM, and dataset file sizes and
+modification times are unchanged. The retained checkpoint hash is unchanged.
+
+Verification rejects a modified frozen partition, a deliberately injected
+frozen-parent training overlap, and fitting, legacy-validation, or final-test
+IDs passed to the development reader. It also confirms all 256 former
+development episodes belong to the fitting pool. Scripts, preparation receipts,
+error witnesses, baseline results, and verification are saved in
+`logs/vertical-development-20260919`. Ruff and whitespace checks pass. No model,
+shared runner, player, or dataset code changed. See
+[the split protocol](training.md#vertical-development-split-with-untrained-episodes)
+before fitting the next candidate.
