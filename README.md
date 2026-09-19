@@ -72,7 +72,10 @@ on another fresh test. The
 [brick-layout classifier](docs/training.md#isolated-next-brick-layout) makes
 **zero errors on 45,245 fresh-test layouts**, including all 1,184 removals.
 Wall clears/refills are absent from the audited data and remain unsupported.
-These remain one-step results.
+The [contact-memory head](docs/training.md#isolated-next-brick-contact-memory)
+also makes **zero errors on those 45,245 reused-test transitions**, including
+when its predictions feed the following contact input. Other state fields remain
+supplied, so full-state rollouts are still untested.
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)
