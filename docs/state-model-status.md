@@ -25,6 +25,7 @@ is established. MLP means a fully connected neural network.
 | Next brick layout | 109-class cross-entropy: no change or one occupied cell removed. Shared 13→64→64 cell encoder; removal scorer 199→64→64→1; no-change head 135→128→128→1. ReLU; 56,130 fitted parameters plus frozen y/velocity parent | Current ball x, RAM y, vx, vy, fractional y, brick-contact memory, and 108 brick cells. No image/action history or successor inputs | **100% validation**, 0 / 88,590 complete-layout errors. **100% on a fresh 16-episode test**, 0 / 45,245 errors: all **1,184 removals** correct and **0 false removals** on 44,061 unchanged layouts. Removal precision/recall/F1 all 1.0. Wall clears/refills absent from audited data and unsupported by this output contract. |
 | Next brick-contact memory | 86→128→128→2 ReLU classifier, cross-entropy; 27,906 fitted parameters plus frozen brick/y/velocity parent | Current ball x, RAM y, vx, vy, fractional y, contact, and bricks. Frozen parent supplies 71 ball features, 2 predicted removal probabilities, and 13 probability-weighted brick geometry features | **100% validation**, 0 / 88,590. **100% on the reused 16-episode brick test**, 0 / 45,245, including all 996 activations and 993 clearings. Contact-only feedback remains exact across 52 life segments. Labels derive from audited native replay; all other state inputs remain supplied. |
 | Next capped paddle-hit count | 96→256→256→256→2 ReLU hit classifier, cross-entropy; decode `min(12, count + hit)`. 156,930 fitted parameters plus frozen vertical parent | Hit detection uses current ball x, RAM y, vx, vy, fractional y, paddle x, width and charge. Frozen intermediate-paddle prediction and geometric/binary encoding. Current count enters only the decoder | **100% validation count accuracy**, 0 / 88,590. **99.9978% reused-test count accuracy**, 1 / 45,245; all 377 increments and 801 actual hits detected, one false hit. With count and contact fed back, **99.9912%**, 4 count errors across 52 life segments. Selected detector also has one false validation hit at saturated count 12. |
+| Combined y, fractional y, and vy | Original y/vy pair frozen; 10→64→64→8 ReLU correction, cross-entropy; 5,384 fitted parameters | Current vy, predicted y displacement, and eight original vy probabilities. Original predictors use their established current-state contract | **100% validation** through all 78,806 eligible 128-step windows. Reused-test one-step joint errors **7→3 / 45,245**. Fully exact 128-step windows **98.6965%→99.4286%**, 511→224 failed windows / 39,203. Only vertical fields fed back; other state supplied and reference life boundaries enforced. |
 | Life-loss terminal flag | 31→64→64→2 ReLU classifier, cross-entropy; 6,338 fitted parameters | Current RAM ball y, fractional y, and vy; scalar/binary encoding includes `y + vy`. No lives, action, or history inputs | **100% validation**, 0 / 88,638 errors, all 48 deaths exact. **100% reused-test accuracy**, 0 / 45,283, all 38 deaths on the exact step and no premature stops across 52 segments. Recorded current ball state; full-state feedback remains untested. Supersedes the older history-based probe with F1 0.299. |
 
 The older context contains eight full state observations, seven prior requested
@@ -53,7 +54,7 @@ collision rules. The source dataset was not modified for these experiments.
 
 | Value | Current handling |
 | --- | --- |
-| Fractional ball y | Current input and supervision reconstructed by native replay. Its next value is now learned jointly with y: 3 fractional errors / 187,251 fresh transitions. Autonomous feedback of this value remains untested. |
+| Fractional ball y | Current input and supervision reconstructed by native replay. Its next value is now learned jointly with y: 3 fractional errors / 187,251 fresh transitions. Now fed back jointly with y and vy in the paired experiment below; full-state feedback remains untested. |
 | Prior paddle-hit count | Current state and labels reconstructed and checked against native replay. Its capped next value is now predicted by a learned hit detector. One reused-test false increment affects four feedback transitions. |
 | Brick-contact memory | Current value and labels reconstructed by native replay. Its next value is now learned with zero validation and reused-test errors, including contact-only feedback. Full-state feedback remains untested. |
 | Paddle measurement, repeat and held-input fields | Reconstructed and present in the controller-annotated dataset. The closed x/charge paddle state does not require separate predictions of these fields under the audited reset and two-frame action contract. |
@@ -147,3 +148,30 @@ while all 14 censored segments remain unstopped. This closes the isolated stop
 prediction gap using current vertical state; it does not establish correct
 termination once ball prediction errors accumulate. See
 [the termination experiment](history.md#2026-09-19-learned-life-loss-termination).
+
+The first paired experiment combines y, its fractional component, and vy.
+A frozen position head can predict the bounce correctly while the old velocity
+head misses it. A learned velocity correction uses the position prediction to
+resolve this validation disagreement. On reused test it leaves three incorrect
+one-step y predictions, one also paired with incorrect vy. These seed the
+remaining vertical feedback failures. Windows overlap, so window counts are not
+independent game outcomes. No test-directed fitting was done. See
+[the paired vertical experiment](history.md#2026-09-19-paired-vertical-position-and-velocity).
+
+A later collision-displacement refinement was **not promoted**. It repaired
+22 of 23 fitting-set y errors and improved development 128-step failures from
+357 to 89, while retaining exact original validation. However, reused-test joint
+errors rose from 3 to 4 and failed 128-step windows rose from 224 to 352.
+The earlier `vertical-pair-20260919/coupling-s2026` checkpoint remains current.
+The refinement's 256 development episodes were withheld from the new heads,
+but had been used to train the frozen parents; their gains were not fresh-test
+evidence. See [the rejected refinement](history.md#2026-09-19-collision-displacement-refinement-rejected-after-held-out-evaluation).
+
+An explicit two-native-frame collision-timing model was also **not promoted**.
+It predicts a joint velocity pair and derives y displacement from their sum.
+With a calibrated frozen-position prior, development becomes exact, but reused
+test joint errors rise from 3 to 4 and failed 128-step windows from 224 to 352;
+mean endpoint y error rises from 1.5996 to 2.7291 pixels. The current checkpoint
+and table remain unchanged. The development split has the same frozen-parent
+training overlap as the preceding refinement. See
+[the rejected timing experiment](history.md#2026-09-19-explicit-collision-timing-rejected-after-held-out-evaluation).

@@ -87,6 +87,18 @@ The [life-loss stop head](docs/training.md#isolated-life-loss-termination) makes
 **zero errors across 45,283 reused-test transitions**, stopping on the exact
 step of all 38 deaths with no premature stops. This uses recorded current ball
 state; full-state feedback remains untested.
+The [combined y/vy pair](docs/training.md#paired-vertical-position-and-velocity)
+uses a small learned velocity correction to reconcile the two predictions.
+On the reused test, fully exact 128-step vertical rollouts improve from
+**98.6965% to 99.4286%** across 39,203 overlapping windows. Other state fields
+remain supplied, and rare remaining errors can still produce large drift.
+A subsequent [collision-displacement refinement](docs/training.md#vertical-collision-displacement-refinement)
+improved development results but regressed on the reused held-out test and was
+rejected. The existing combined pair remains the current model.
+An [explicit collision-timing experiment](docs/training.md#explicit-vertical-collision-timing)
+also regressed on the reused held-out test despite exact development predictions;
+it was rejected too. Further comparisons need development episodes unseen by
+every trained component.
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)
