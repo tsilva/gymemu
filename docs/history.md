@@ -3087,3 +3087,86 @@ Artifacts, audit and split provenance, development comparisons, and frozen-test
 results are under `runs/brick-layout-20260918/` and `logs/brick-layout-20260918/`.
 Verification: 377 tests passed, two skipped; focused decoder/freeze tests,
 Ruff, frozen dependency sync, and whitespace checks passed.
+
+## 2026-09-19: Learned brick-contact memory and isolated feedback
+
+Learn the next contact flag while preserving the selected brick-layout, y,
+velocity, and separate x models. Native replay reconstructs contact labels in
+RAM from known resets and matches all 5,271,950 nonterminal training successors
+against recorded ball coordinates, velocities, and bricks. Contact labels are
+derived supervision, not independently recorded observations. No dataset columns
+or persistent feature caches are written. All later lives remain eligible as
+separate segments.
+
+A first head receives 71 current ball features and two probabilities from the
+frozen brick model, no removal versus any removal. The 73→128→128→2 ReLU
+classifier plateaus at 102 validation errors, mostly false activations near the
+brick area's vertical edges. Grouping exactly identical float32 inputs finds
+no contradictory validation targets, so these results do not prove missing
+information or an irreducible accuracy limit.
+
+Expose predicted collision geometry next. Weight each cell's 13 geometric
+features by its frozen removal probability and append their sum. The resulting
+86→128→128→2 ReLU classifier uses 27,906 trainable parameters and keeps 845,648
+parent parameters frozen. Inputs are current ball x, RAM y, vx, vy, fractional y,
+contact memory, and current bricks. Neither recorded successor events nor native
+collision rules enter inference. The additional features describe the model's
+predicted collision, so they add no dataset fields.
+
+Use cross-entropy and AdamW for 20,000 updates per seed, batch 512. Each batch
+contains 128 examples from each current/next contact pair. Learning rate starts
+at 0.001 and decays by cosine to 0.00002, with weight decay 0.0001 and gradient
+clipping at 5. Select the earliest minimum-error validation checkpoint every 250
+updates, then compare runs by errors and name. Training has 121,374 activations
+and 121,223 clearings; validation has 2,053 and 2,050 respectively.
+
+| Candidate | Best update | Validation errors / 88,590 |
+| --- | ---: | ---: |
+| Removal probability only, seed 91 | 11,250 | 104 |
+| Removal probability only, seed 2026 | 18,500 | 102 |
+| Predicted collision geometry, seed 91 | 14,500 | **0** |
+| Predicted collision geometry, seed 2026 | 18,000 | **0**, selected by name |
+
+Both GPU addresses were unreachable. Run locally on CPU, reusing frozen features
+in RAM. A narrow Arrow read recovers source layouts for the geometry comparison;
+all ordered eligible ball states and 71 encoded source values match the earlier
+audit exactly. Probability differences due to batch size are at most 1.2e-7.
+
+Freeze and hash the selected checkpoint before evaluating the same 16 held-out
+episodes used for brick-layout testing. This is explicitly a reused test and
+preserves 64 untouched episodes for eventual full-state evaluation. No test rows
+participate in contact training or selection.
+
+| Reused-test contact transition | Examples | Errors |
+| --- | ---: | ---: |
+| Inactive remains inactive | 41,899 | 0 |
+| Activates | 996 | 0 |
+| Clears | 993 | 0 |
+| Active remains active | 1,357 | 0 |
+| All contact predictions | **45,245** | **0** |
+
+Feed only predicted contact into subsequent transitions, resetting at each life,
+episode, or step gap. Other state fields remain recorded or reconstructed. Across
+52 life segments, contact stays exact and all predicted layouts stay exact. The
+frozen ball models retain 8 x errors, 3 combined-y errors, 5 vx errors, and 5 vy
+errors. Their union covers 15 transitions, unchanged from supplied-contact
+inference. Joint accuracy across contact, layout, and four ball quantities is
+99.9668%. Of 1,181 complete seven-step windows around brick removals, 1,178 have
+every output exact; the other three contain existing ball errors. Validation
+feedback likewise preserves zero contact/layout errors and five joint ball
+errors across 88,590 transitions.
+
+This establishes contact-only feedback on the evaluated lives, not full-state
+recursive simulation. Hit-count and width updates, termination, rare ball errors,
+and wall-refill coverage remain unresolved. Contact accuracy measures agreement
+with replay-derived labels and does not prove universal correctness.
+
+The complete selected checkpoint is
+`runs/brick-contact-20260919/geometry-s2026/best.pt`, SHA-256
+`4f23f5fc4d2dea3159a15c813bd98e9303883079447a661a3cac692c5ee297b0`.
+Audit receipts, comparisons, and evaluation results are under the corresponding
+`logs/brick-contact-20260919/` and run folders. CPU reload reproduces the selected
+raw-input predictions, every nested parent weight is unchanged, and the separate
+x checkpoint retains its previous hash. Verification passes 379 tests with two
+skipped, Ruff, frozen dependency sync, and whitespace checks. No GPU parity result
+is claimed for this experiment.

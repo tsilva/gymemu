@@ -1,6 +1,6 @@
 # Learned state-model status
 
-Updated 2026-09-18. These are separate diagnostic models, not an integrated
+Updated 2026-09-19. These are separate diagnostic models, not an integrated
 recursive emulator. Validation selects checkpoints; reserved-test results are
 identified explicitly. Results from different targets and input contracts are
 not interchangeable. Percentages denote exact predictions unless stated otherwise.
@@ -23,6 +23,7 @@ is established. MLP means a fully connected neural network.
 | Next vertical velocity, vy | Eight-class cross-entropy. Upper field: shared 13→64→64 cell encoder, max pooling, 135→128→128→8. Paddle: 97→256→256→256→8. Flight: 1→32→8. All ReLU; horizontal parent frozen; 199,064 fitted vertical parameters | Existing 118 current-state values; upper head uses ball state, fractional y, contact memory and bricks; paddle head uses the nine paddle-geometry inputs plus explicit charge encoding; flight uses current vy | **99.9989% validation**, 1 / 88,590 errors. **99.9929% fresh test**, 13 / 182,441 errors. Actual velocity changes: **10,437 / 10,441 correct**; paddle: 1 / 3,335 errors; brick: 3 / 4,895; ceiling: 0 / 2,211. One-step prediction; current hidden state still supplied. |
 | Next paddle width | Two 128-unit SiLU hidden layers; binary cross-entropy for narrow/full width | One or eight full state observations, seven prior actions and current action | Aggregate validation accuracy exceeds 99.95%, but **0 / 36 width changes correct** in both isolated probes. Not solved. |
 | Next brick layout | 109-class cross-entropy: no change or one occupied cell removed. Shared 13→64→64 cell encoder; removal scorer 199→64→64→1; no-change head 135→128→128→1. ReLU; 56,130 fitted parameters plus frozen y/velocity parent | Current ball x, RAM y, vx, vy, fractional y, brick-contact memory, and 108 brick cells. No image/action history or successor inputs | **100% validation**, 0 / 88,590 complete-layout errors. **100% on a fresh 16-episode test**, 0 / 45,245 errors: all **1,184 removals** correct and **0 false removals** on 44,061 unchanged layouts. Removal precision/recall/F1 all 1.0. Wall clears/refills absent from audited data and unsupported by this output contract. |
+| Next brick-contact memory | 86→128→128→2 ReLU classifier, cross-entropy; 27,906 fitted parameters plus frozen brick/y/velocity parent | Current ball x, RAM y, vx, vy, fractional y, contact, and bricks. Frozen parent supplies 71 ball features, 2 predicted removal probabilities, and 13 probability-weighted brick geometry features | **100% validation**, 0 / 88,590. **100% on the reused 16-episode brick test**, 0 / 45,245, including all 996 activations and 993 clearings. Contact-only feedback remains exact across 52 life segments. Labels derive from audited native replay; all other state inputs remain supplied. |
 | Life-loss terminal flag | Two 128-unit SiLU hidden layers; weighted binary cross-entropy | One full state observation, seven prior actions and current action | Older isolated probe: **validation F1 0.299**. Dataset life boundaries are enforced, but accurate learned termination remains unresolved. |
 
 The older context contains eight full state observations, seven prior requested
@@ -53,7 +54,7 @@ collision rules. The source dataset was not modified for these experiments.
 | --- | --- |
 | Fractional ball y | Current input and supervision reconstructed by native replay. Its next value is now learned jointly with y: 3 fractional errors / 187,251 fresh transitions. Autonomous feedback of this value remains untested. |
 | Prior paddle-hit count | Derived from preceding observed collisions and checked against native replay. It is an input, not a learned output yet. |
-| Brick-contact memory | Reconstructed for full-game diagnostics; excluded from the near-paddle direction model. A learned update remains untested. |
+| Brick-contact memory | Current value and labels reconstructed by native replay. Its next value is now learned with zero validation and reused-test errors, including contact-only feedback. Full-state feedback remains untested. |
 | Paddle measurement, repeat and held-input fields | Reconstructed and present in the controller-annotated dataset. The closed x/charge paddle state does not require separate predictions of these fields under the audited reset and two-frame action contract. |
 | Paddle velocity | Removed from the new dynamics input/output contract. Historical models and dataset columns retain it. |
 | Lives, serve and respawn | Outside the current simulation scope. Each life ends at ball loss; later lives remain separate training segments. |
@@ -61,9 +62,9 @@ collision rules. The source dataset was not modified for these experiments.
 Horizontal speed and direction are now combined and integrated across the full
 field in a saved model, with a learned spatial head correcting most missed
 brick-triggered speed increases. Remaining work includes rare ball-state errors,
-collision-memory and hit-count updates, paddle width, termination, and wall
+hit-count updates, paddle width, termination, and wall
 refills. Both positions (including fractional y), both velocities, and observed
-brick-layout updates now have one-step learned predictors. The brick model
+brick-layout and contact-memory updates now have learned predictors. The brick model
 preserves the y/velocity parent, and the separate x model remains unchanged.
 High one-step accuracy with reconstructed current inputs does not yet establish
 an autonomous compact-state simulator.
@@ -103,5 +104,15 @@ no complete learned-state rollout is established.
 
 The brick-layout test uses another **16 previously unused episodes**, separate
 from every earlier test, preserving **64 untouched held-out episodes** for later
-full-state evaluation. Current contact memory remains supplied. Zero errors on
-this finite test do not establish perfect recursive or wall-refill behavior.
+full-state evaluation. That experiment supplied current contact memory. Zero errors on
+that finite test do not establish perfect recursive or wall-refill behavior.
+
+The contact-memory experiment reuses the brick-layout test's 16 episodes and
+preserves the 64 untouched episodes. It does not provide a new fresh-test score.
+Both geometry seeds reach zero validation errors; select seed 2026 by the
+predeclared name tie-break. With contact alone fed back, every contact and brick
+layout stays exact on the reused test. The frozen ball predictors retain 15
+jointly incorrect transitions, giving 99.9668% joint accuracy for contact,
+layout, x, combined y, vx, and vy. Of 1,181 complete seven-step windows around
+brick removals, 1,178 have every output exact. The three imperfect windows contain
+existing ball errors. See [the contact experiment](history.md#2026-09-19-learned-brick-contact-memory-and-isolated-feedback).

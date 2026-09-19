@@ -459,3 +459,21 @@ or successor-based routing. `forward()` returns 109 logits, `predict_event()`
 selects an update, and `predict()` returns the complete next layout. Checkpoints
 include all parent weights, and `train()` preserves the parent's evaluation mode
 and disabled gradients. Contact memory remains a supplied input, not an output.
+
+`brick_contact` adds a next-contact classifier around a frozen `brick_layout`
+parent. Its nested `layout` specification includes every parent dependency.
+The input remains the 118-value current state. The parent supplies 71 encoded
+ball-state values and two probabilities, no removal versus any removal. The
+latter comes from the parent's predicted logits, never the target event.
+A 73→128→128→2 ReLU network predicts inactive or active next contact.
+With `collision_geometry=True`, append 13 cell-geometry features weighted by
+the frozen removal probabilities. The classifier then has 86 inputs and can
+distinguish predicted contacts with different bricks. This adds no dataset field.
+
+`encode()` computes the frozen features under `no_grad`; `forward_encoded()`
+allows those features to be reused in RAM during isolated training. `forward()`
+accepts the full current state and returns two logits, while `predict()` returns
+a binary integer. `train()` keeps the complete layout and ball parent in eval
+mode with disabled gradients. Contact labels derive from offline native replay;
+inference executes no native collision rules. This model needs the current
+contact value. It does not infer an initial value from images.
