@@ -170,6 +170,11 @@ life segments; **141/246** entire segments
 are exact. Recursive trajectory errors remain; actions are recorded, and missed
 deaths are censored at the reference end.
 
+A [first-error audit](docs/training.md#first-errors-in-full-state-rollouts)
+finds that 67 of the 105 divergent segments first fail in ball prediction,
+52 near the paddle. Existing training errors provide a mining pool; vertical
+paddle predictions also show a generalization gap. No weights changed in this audit.
+
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)
