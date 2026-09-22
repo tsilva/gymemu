@@ -101,6 +101,31 @@ it was rejected too. A subsequent [split audit](docs/training.md#vertical-develo
 establishes 400 development episodes excluded from every component's training,
 while preserving 64 untouched final-test episodes. The development episodes were
 previously evaluated, so their scores guide tuning rather than final reporting.
+The [development feedback experiment](docs/training.md#development-vertical-feedback-and-factorized-paddle-outcomes)
+finds paddle collisions are the largest first-failure group. A timing/speed
+factorization reduces failed 128-step development windows by 21.8%, but introduces
+one original-validation error and is not promoted. The existing pair remains current.
+Adding [explicit paddle-edge distances](docs/training.md#paddle-edge-feature-experiment)
+gives a small further drift improvement but retains that validation error and is
+also rejected.
+A [matched dataset comparison](docs/training.md#checkpoint-trajectory-dataset-comparison)
+finds that trajectories from ten policy checkpoints reduce paddle y/vy errors
+by 73% on old development data and 78% on new validation data, averaged over two
+seeds with the same model and training budget. This tests the paddle branch;
+the current reference remains unchanged pending promotion checks.
+The subsequent [upper-screen continuation](docs/training.md#upper-screen-dataset-continuation)
+improves new-data accuracy and recursive drift but regresses on old data.
+A [fixed-size 50/50 mixture](docs/training.md#fixed-size-mixed-upper-screen-fitting)
+recovers much of the old-data accuracy while retaining most new-data gains.
+Legacy validation and rollout drift still prevent promotion; the reference stays unchanged.
+The [horizontal pairing experiment](docs/training.md#horizontal-pair-on-new-checkpoint-trajectories)
+reaches 99.9476% joint x/vx accuracy with independent predictors on new validation.
+Sharing hidden layers nearly halves trainable parameters but slightly reduces
+one-step and exact-path accuracy. Horizontal paddle interactions remain the main gap.
+The next [ball-state merge](docs/training.md#four-variable-ball-state-merge)
+combines x, y with its fractional part, vx and vy in one checkpoint. It reaches
+99.9400% exact joint validation accuracy and 93.3265% entirely exact 128-step
+ball-feedback windows. The selected candidate is ready for the brick-layout merge.
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)
