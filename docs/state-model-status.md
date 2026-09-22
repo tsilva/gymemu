@@ -35,6 +35,7 @@ is established. MLP means a fully connected neural network.
 | Combined ball, bricks, contact, count, width and charge | One `ball_paddle_charge` container; added 25→128→128→11 SiLU charge classifier, 21,259 trainable parameters this stage; existing state frozen | 118 state values plus current action; 116 simultaneous outputs. Charge uses paddle x, charge and action | **99.9171%** exact joint validation, 170 / 205,075 errors. Charge **100.0000%**, 0 errors. **91.5089%** entirely exact128 windows; 0 endpoint charge errors. Paddle x and life boundaries supplied. |
 | Combined compact state including paddle position | One `ball_paddle_position` container; added 25→128→128→23 SiLU position classifier, 22,807 fitted parameters this stage; previous predictors frozen | 118 state values plus action; 117 outputs. Position uses current paddle x, charge and action | **99.9005%** exact joint validation, 204 / 205,075 errors. Paddle x **99.9834%**, 34 errors. **90.0675%** entirely exact128 windows, with all compact state fields fed back. Recorded actions and life boundaries supplied. |
 | Combined compact state and life-loss termination | One `ball_life_termination` container; added 31→64→64→2 ReLU stop head, 6,338 fitted parameters this stage; state branch frozen | Same 119 state/action values; 117 state outputs valid only when stop output 117 is false. Stop uses current y, fraction and vy | Stop **100%** on 205,314 validation transitions: 239/239 deaths, no false stops. Combined **99.9006%**. Full feedback: exact death timing **169/239**; exact entire segments **141/246**. Recorded actions; missed deaths censored at reference end. |
+| Separate unified state MLP | One shared 188→512 projection, six residual blocks with two 512-wide layers each, one 206-logit output layer; 3,361,486 parameters | Same 119 current state/action values; generic scalar/binary encoding; no pretrained helpers or regional networks | **98.1852%** exact joint validation, 3,726 errors. Fully exact segments **13/246**; exact death timing **16/239**. Training probe **99.9969%**, 2/65,536 errors. Separate benchmark; existing container remains selected. |
 | Life-loss terminal flag | 31→64→64→2 ReLU classifier, cross-entropy; 6,338 fitted parameters | Current RAM ball y, fractional y, and vy; scalar/binary encoding includes `y + vy`. No lives, action, or history inputs | **100% validation**, 0 / 88,638 errors, all 48 deaths exact. **100% reused-test accuracy**, 0 / 45,283, all 38 deaths on the exact step and no premature stops across 52 segments. Recorded current ball state; historical isolated result. Supersedes the older history-based probe with F1 0.299. |
 
 The older context contains eight full state observations, seven prior requested
@@ -422,3 +423,29 @@ ball/count/position, retaining ordinary examples and near-collision cases to tes
 generalization. Do not assume replaying existing mistakes alone fixes vertical
 bounce timing. Dataset and final-test partition remain untouched. See
 [the diagnosis](training.md#first-errors-in-full-state-rollouts).
+
+
+## Separate unified MLP benchmark
+
+Train one shared residual MLP from scratch for 20 uniformly shuffled epochs.
+Every training row is used once per epoch, with no error mining or oversampling.
+Select epoch 20 as `runs/unified-state-mlp-20260922/best.pt`. The container stays
+unchanged.
+
+| Measure | Container | Shared MLP |
+| --- | ---: | ---: |
+| Exact joint one-step validation | 99.9006% | 98.1852% |
+| Incorrect transitions | 204 | 3,726 |
+| Completely exact segments | 141/246 | 13/246 |
+| Exact death timing | 169/239 | 16/239 |
+
+The MLP has just two errors on a fixed uniform 65,536-row training probe, or
+99.9969% accuracy. The train/validation gap is substantial. Its largest per-field
+validation error counts are y with fraction, vertical velocity, contact and
+bricks. Width remains exact, and charge has four errors.
+
+This run shows that this shared model and training recipe do not match the
+container. The models differ in specialized encodings, auxiliary supervision
+and training history, so it does not isolate shared layers as the cause. Dataset
+unchanged; final-test targets unread. See
+[the benchmark](training.md#unified-residual-mlp-benchmark).

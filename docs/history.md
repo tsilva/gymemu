@@ -4064,3 +4064,31 @@ Keep the selected checkpoint and dataset unchanged; final-test targets remain
 unread. Next priority is training-only mining for horizontal ball/count, with
 ordinary and near-collision examples retained. See
 [the full diagnosis](training.md#first-errors-in-full-state-rollouts).
+
+
+## 2026-09-22: A separate shared MLP fits training but generalizes worse
+
+Replace the collection of specialized predictors experimentally with one shared
+512-wide residual MLP, six blocks, 3,361,486 parameters and a single classification
+output layer. Train from scratch for 20 uniformly shuffled epochs on unchanged
+training data. Use no mining or oversampling and leave the established container
+checkpoint fixed.
+
+| Measure | Container | Unified MLP |
+| --- | ---: | ---: |
+| Exact joint validation | 99.9006% | 98.1852% |
+| Incorrect transitions | 204 | 3,726 |
+| Entire segments exact | 141/246 | 13/246 |
+| Exact death timing | 169/239 | 16/239 |
+
+The selected MLP is epoch 20. It makes only two errors on a fixed random training
+probe of 65,536 rows, or 99.9969% accuracy. Validation errors concentrate in
+vertical ball motion and brick/contact predictions. This is a generalization
+gap in the tested recipe; it does not prove shared MLPs cannot match specialized
+models. Feature engineering, auxiliary objectives and prior training schedules
+also differ between the candidates.
+
+Training took 21.79 minutes including CPU validation. Save the separate model,
+retain the container, and leave dataset exposure and final-test targets unchanged.
+Full suite: 426 passed, two skipped. See
+[the benchmark](training.md#unified-residual-mlp-benchmark).
