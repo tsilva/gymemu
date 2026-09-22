@@ -3619,3 +3619,232 @@ error witnesses, baseline results, and verification are saved in
 shared runner, player, or dataset code changed. See
 [the split protocol](training.md#vertical-development-split-with-untrained-episodes)
 before fitting the next candidate.
+
+## 2026-09-21: Development rollouts and factorized paddle predictions
+
+Run 8-, 32-, and 128-step vertical feedback across the newly audited 400-episode
+development set, preserving all 64 final-test episodes. The unchanged pair makes
+99 one-step joint errors in 1,152,531 transitions. Those errors seed 739 failed
+8-step windows, 2,744 failed 32-step windows, and 9,027 failed 128-step windows.
+At 128 steps, 99.1188% of 1,024,358 eligible windows remain entirely exact; mean
+endpoint y error is 1.5756 pixels and maximum error is 1,012.5 pixels. Windows
+overlap, other state remains supplied, and stopping uses reference life boundaries.
+
+Paddle collisions are the largest recorded event group at the first error,
+accounting for 3,914 failed 128-step windows. Brick collisions account for 2,534,
+no recorded collision for 2,299, and side-wall-only events for 280. There are no
+ceiling first failures. By source region, 55 of the 99 one-step errors occur near
+the paddle and 44 in the upper field. Some near-paddle errors incorrectly predict
+a bounce on a transition whose recorded event is no collision.
+
+Audit 536,838 combined fitting/development paddle examples for identical inputs
+with conflicting targets. Find zero conflicting groups for the full state, the
+nine paddle source fields, and the actual 97-feature encoder output. The last
+two each contain 57,615 repeated groups. This gives no observed evidence of
+missing paddle information or exact encoder aliasing, while leaving open how
+well the network can learn the representation's decision boundaries.
+
+Test one output change using the same features: a shared 97→256→256→256 ReLU
+trunk with separate learned timing and outgoing-velocity classifiers. Decode
+their predictions into a consistent combined-y/vy pair. All parent models remain
+frozen; only the descending paddle region changes. Fitting labels from 1,824
+episodes exactly satisfy this decomposition. Train seeds 91 and 2026 for 12,000
+updates each with balanced timing and bounce-speed sampling.
+
+No checked checkpoint preserves zero errors on the original validation episodes.
+The best diagnostic candidate is seed 2026 at update 3,500. It reduces development
+paddle errors from 55 to 41 and total joint errors from 99 to 85, with 7,055 failed
+128-step windows instead of 9,027. Its one original-validation error predicts a
+bounce in the first native movement instead of the second. At episode 1369,
+step 2902, next vy remains correctly −3.375, but predicted y is 171.125 rather
+than 177.875. The candidate therefore fails the predeclared validation gate;
+retain the current pair. No test-directed fitting or final-test read occurs.
+
+The candidate's development paddle errors split into 28 timing errors and 13
+outgoing-speed errors. This supports continued attention to timing, but the
+experiment does not establish a complete causal explanation or justify adding
+dataset fields. Implementation verification passes 395 tests with two skipped.
+Actual joint feedback confirms a mean 128-step endpoint y error reduction from
+1.5756 to 0.9690 pixels and a maximum reduction from 1,012.5 to 945 pixels.
+The validation regression affects 98 complete 128-step windows. Final rejection,
+unchanged dataset/checkpoint checks, and exact portable reload are recorded in
+`logs/vertical-rollout-20260921/decision.json`. The candidate is retained solely
+as a research artifact; the current pair and final-test reservation are unchanged.
+See [the training record](training.md#development-vertical-feedback-and-factorized-paddle-outcomes)
+for the full metrics, training settings, and final disposition.
+
+## 2026-09-21: Paddle-edge distances give a small gain but retain the timing regression
+
+Test whether explicit distances make the factorized paddle predictor easier to
+train. Append eight signed raster-edge distances to its 97 existing features:
+four for the current ball/paddle geometry and four for the constant-velocity
+ball proposal with the frozen learned intermediate-paddle position. These
+features contain no collision decisions or executed native transitions.
+
+Widen only the first shared layer to 105 inputs. Keep the 256→256→256 hidden
+widths, timing/speed heads, seeds, 12,000-update budget, optimizer, sampling,
+losses, and selection rules unchanged. Copy the parent weights and zero the new
+input columns without consuming the control's random stream. Fit only on the
+same 1,824 episodes; retain the 400 development, 32 original-validation, and 64
+untouched final-test episode roles. No dataset columns are added.
+
+Neither seed eliminates original-validation errors. The diagnostic checkpoint,
+seed 2026 at update 3,500, keeps 85 joint development one-step errors. Compared
+with the factorized control, failed 128-step windows fall from 7,055 to 7,026 out
+of 1,024,358. Mean endpoint y error falls from 0.9690 to 0.9173 pixels and maximum
+error from 945 to 918 pixels. The original pair remains the reference at 9,027
+failed windows, 1.5756 mean error, and 1,012.5 maximum error.
+
+The same validation error at episode 1369, step 2902, persists: a second-frame
+bounce is predicted one native frame early. It affects 98 validation 128-step
+windows. Reject the candidate under the predeclared zero-validation-error gate.
+The additional geometry helps drift modestly under this budget, but does not
+resolve the timing regression. This is not evidence that new recorded state
+fields are required.
+
+Keep the diagnostic checkpoint at `runs/vertical-edges-20260921/candidate.pt`;
+the original reference checkpoint is unchanged. Plans, geometry definitions,
+provenance, checkpoint hash, three-model metrics, and final rejection are saved
+under `logs/vertical-edges-20260921`. All feature arrays remain in RAM. Candidate
+reload is exact; all 96,005 archived control paddle predictions are reproduced
+after the optional model extension. Verification passes 397 tests with two
+skipped, Ruff, and whitespace checks. Dataset files and final-test reservation
+are unchanged. See [the experiment record](training.md#paddle-edge-feature-experiment).
+
+## 2026-09-21: Broader checkpoint trajectories improve paddle generalization
+
+Compare the existing fitting pool with `tsilva/gradlab-breakout-6127e81d`, pinned
+at `79827bb74fd7a881af7771f111770504c1565d0d`. The new dataset collects evaluation
+episodes at ten policy checkpoints, grouping repeated environment seeds into the
+same split. Reconstruct missing controller fields in RAM. All 1,854,012
+train/validation paddle movements and 1,845,497 usable ball transitions pass the
+native replay audits. No dataset columns are added.
+
+Train the same edge-feature timing/speed MLP for 12,000 updates using two paired
+seeds, with old data, new data, or a 50/50 mixture. Keep initialization and all
+pretrained dependencies identical. New fitting has only 134,341 paddle examples
+versus 440,833 old examples, but adds 124,001 distinct nine-field source states.
+Use fixed final checkpoints rather than choosing an intermediate validation peak.
+
+Mean joint paddle errors fall from 41 to 11 on the same 96,005 old-development
+sources and from 73.5 to 16 on the same 17,074 new-validation sources. These are
+73.2% and 78.2% error reductions. The mixture averages 11 and 19 errors. Both
+old-only models fit all old training examples, and both new-only models fit all
+new training examples, supporting a generalization gap in these runs.
+
+Exact 128-step vertical paths improve on both distributions. New-only failures
+are 5,518/5,535 on old development and 8,056/8,120 on new validation, compared with
+matched old-only counts 7,261/6,887 and 13,216/11,948. This scores first-error
+survival with other state fields supplied, not full-state play or post-error drift.
+New-only retains one old-validation timing error in both seeds; the mixture has
+zero in seed 91 and one in seed 2026. Keep the current reference pending promotion
+checks. Do not infer that this experiment tests image encoders or every predictor.
+
+All six checkpoints and evidence are retained in the matching
+`runs/dataset-6127e81d-20260921` and `logs/dataset-6127e81d-20260921` folders.
+Old controls reproduce archived scores. Raw input hashes, dataset inventory,
+checkpoint reload, and the reserved final-test targets are verified. See the
+[dataset comparison](training.md#checkpoint-trajectory-dataset-comparison).
+
+## 2026-09-21: Upper-head continuation exposes a dataset tradeoff
+
+Freeze the improved paddle predictor and fine-tune only the existing upper-screen
+y and vy cell encoders/output networks. Compare old versus new fitting data with
+identical initialization, inputs, architecture, and optimizer. Each arm uses two
+seeds and a fixed 12,000-update budget. The learned velocity correction remains
+frozen. No dataset fields or persistent feature caches are added.
+
+On 75,297 new-validation upper examples, new-data fitting reduces 62 joint errors
+to 19/13. On 390,843 old-development upper examples it increases 44 errors to
+60/54. Old-data controls improve those sets to 43/41 and 32/29 respectively.
+Every continuation regresses on the smaller old-validation set. The raw heads
+also show the old-data regression, so it is not solely a correction-head issue.
+
+Actual recursive vertical feedback confirms this tradeoff. Mean 128-step endpoint
+y error with new-data continuation falls from 8.3158 to 3.0530 pixels on new
+validation, averaged over the two seeds, while rising from 0.8729 to 1.5529 pixels
+on old development. Mean failed-window counts change from 8,056 to 3,270.5 and
+from 5,518 to 7,462 respectively. Other state fields and true life boundaries
+remain supplied; this does not establish full-game rollout quality.
+
+Retain all four diagnostic checkpoints under `runs/upper-dataset-20260921` and
+keep the original reference unchanged. A mixed fitting pool is the next proposed
+retention test. Frozen parameters, portable reload, baseline window counts,
+dataset inventory, and original checkpoint hashes are verified. No final-test
+transition targets are read. See the [upper-screen continuation record](training.md#upper-screen-dataset-continuation).
+
+
+## 2026-09-22: fixed-size mixed upper-screen fitting
+
+Test a 50/50 old/new mixture with 619,839 fitting transitions, keeping the same
+upper networks, pretrained parent, frozen paddle and dependencies, two seeds,
+and 12,000-update budget. Add a size-matched old-only control and reuse the
+verified matching new-only runs. Mixture and control subsets use fitting rows
+only; no dataset writes or persistent feature caches.
+
+Mean joint upper errors on old development/new validation are 36/46.5 for
+old-only, 57/16 for new-only and 33/22 for mixed fitting. Both mixed seeds have
+33 old-development errors; new-validation errors are 23/21. This supports a
+benefit from data composition at fixed size, without showing that more data
+would be unnecessary. The mixture gives up some new-only specialization while
+recovering old-data accuracy.
+
+Actual 128-step recursive y/vy endpoint MAE is 0.8977/3.8842 pixels for the mix,
+versus 1.5529/3.0530 for new-only and 0.8729/8.3158 for the starting model.
+Mixed legacy-validation upper errors are 5/4 versus zero initially. Retain all
+four new checkpoints as diagnostics and keep the reference unchanged. Other
+state fields and life boundaries are still supplied during rollouts. Verify
+frozen weights, portable reload metrics, hashes, dataset inventories and reused
+control settings. Experiment scripts compile; Ruff and whitespace checks pass.
+See the [full experiment](training.md#fixed-size-mixed-upper-screen-fitting).
+
+
+## 2026-09-22: horizontal pair with independent and shared hidden layers
+
+Fit only on the new checkpoint-trajectory dataset. Compare independent x/vx
+hidden layers with a shared pair, using identical pretrained x initialization,
+new warmed velocity heads, source encodings, training batches and two seeds.
+Each run uses 2,000 head-warmup updates followed by 12,000 fitting updates.
+The original routed vx predictor is an additional historical baseline.
+
+On 205,075 validation transitions, historical joint errors are 231. Independent
+errors are 103/112 and shared errors 111/118. Sharing reduces trainable parameters
+from 447,962 to 231,706 but slightly worsens both seeds' one-step accuracy.
+Near-paddle examples contain most remaining errors. Entirely exact 128-step
+horizontal windows improve from 88.5330% to 93.8424% independent and 93.6562%
+shared. Mean x endpoint drift is 2.6104, 1.4660 and 1.4061 pixels respectively.
+Thus the shared model has slightly lower mean drift despite more imperfect paths.
+
+Keep independent predictors as the accuracy baseline for the next experiment;
+retain the shared candidate as a size tradeoff. No vertical checkpoint or original
+reference changes. The model registry gains an explicit horizontal-pair model,
+with tests for atomic outputs, gradient isolation/sharing, frozen dependencies
+and portable reload. A horizontal evaluator matches brute-force recursive
+prediction and enforces life boundaries. All 401 tests pass, with two skips;
+Ruff and whitespace checks pass. No dataset changes or final-test reads. See
+[the full comparison](training.md#horizontal-pair-on-new-checkpoint-trajectories).
+
+
+## 2026-09-22: four-variable ball-motion merge
+
+Compose fixed first-seed horizontal-independent and new-only vertical parents
+inside one registered `ball_motion` checkpoint. Verify exact parent prediction
+preservation across all 205,075 new-validation sources. The baseline has 129
+joint errors. Train all intended heads together using new fitting data only,
+with two seeds, 6,000 updates each and fixed final-checkpoint evaluation.
+
+Seed 91 gives 123 joint errors, 99.9400% accuracy. Actual four-variable feedback
+improves entirely exact 128-step windows from 92.6608% to 93.3265%, with failed
+windows falling from 12,832 to 11,668. Mean x/y endpoint drift decreases from
+1.8691/7.2169 to 1.6682/6.3050 pixels. Individual x/y/vx/vy errors are 71/31/50/30;
+not every head improves. Seed 2026 retains 129 errors and slightly worsens y MAE,
+so retain it only as a diagnostic. Rare large drift remains in the selected run.
+
+Select `runs/ball-motion-20260922/candidate.pt`, an exact copy of `joint-s91.pt`,
+for the next incremental merge. Keep parent files and the original reference
+unchanged. Brick layout is the next planned addition. Other state and reference
+life boundaries remain supplied; no full-state or learned-termination rollout
+claim. No dataset changes, final-test reads, mining or extra tuning. Frozen
+parameters/buffers, parent hashes and reload metrics verify exactly. All 403 tests
+pass with two skips, including bounded direct/latent train/play checks; Ruff and
+whitespace checks pass. See [the full record](training.md#four-variable-ball-state-merge).

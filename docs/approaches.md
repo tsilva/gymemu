@@ -613,3 +613,97 @@ choosing one coherent pair; it does not average physical positions. The weight
 and active regions are stored in the model specification. A zero weight preserves
 the standalone timing model, and all lookup buffers are derived from saved
 velocity/displacement vocabularies.
+## Factorized paddle vertical prediction
+
+The research-only `paddle_vertical_pair` registry model wraps a frozen
+`vertical_ball_pair`. It replaces predictions only in the existing descending
+paddle region. It uses the same 97 encoded source features, including charge and
+fractional y, and copies the position model's hidden paddle layers for training.
+The current experiment uses a shared 97→256→256→256 ReLU trunk with separate
+three-class timing and four-class outgoing-velocity heads, 158,471 trainable
+parameters in total.
+
+Timing predicts no bounce, a bounce before the first native movement, or a bounce
+before the second. Outgoing negative velocities come from fitting targets.
+For no bounce, displacement is twice current vy and next vy stays current. For a
+first-frame bounce, displacement is twice the predicted outgoing vy. For a
+second-frame bounce, displacement is current vy plus predicted outgoing vy.
+Both bounce cases use the predicted outgoing vy as next vy. This arithmetic
+decodes learned classifications; no collision thresholds or native transition
+rules execute during inference.
+
+Training uses categorical timing supervision and speed supervision only for
+bounce examples. The preparer must verify that this decomposition exactly fits
+the native movements in the selected source region. The complete parent remains
+frozen and in evaluation mode, including outside-region fallback predictions.
+This experiment does not change the direct approach, runner, or player.
+
+With `edge_features=true`, append eight signed raster-edge distances to the
+existing 97 features. Four distances describe the current geometry; four use
+the constant-velocity ball proposal and frozen learned intermediate-paddle
+position. Each group contains ball-right minus paddle-left, paddle-right minus
+ball-left, ball-bottom minus paddle-top, and paddle-bottom minus ball-top,
+divided by 16. RAM-coordinate paddle bounds are 180..183; the ball raster extends
+one pixel right and three pixels below its integer position. Paddle width comes
+from the source state. These are arithmetic distances; they do not return a
+collision decision or execute a game transition.
+
+The resulting trunk is 105→256→256→256 with the same two output heads and
+160,519 trainable parameters. `initialize_trunk_from_pair()` copies loaded
+parent hidden weights and zeros the eight added input columns. Construction
+preserves the control's random stream, including output-head initialization.
+Floating-point summation order may differ after widening the input matrix.
+The optional flag defaults to false so earlier factorized checkpoints load
+with their original 97-feature architecture.
+
+## Horizontal position/velocity pair
+
+`horizontal_ball_pair` predicts next ball x and vx from the same immutable
+118-value source state. Its specification contains an `axis="x"` position
+specification, a finite unique `velocity_values` vocabulary and a `shared` flag.
+The existing x-displacement classes and new vx classes have separate output
+heads. Upper, near-paddle and flight routing uses current state only.
+
+With `shared=true`, the two objectives share the existing position cell encoder
+and region hidden layers. With `shared=false`, the velocity branch has its own
+copies of those hidden layers, allowing independent objectives in one loader
+pass. Source encodings are identical. The nested vertical/horizontal geometry
+dependencies stay frozen and in evaluation mode in both variants. Training code
+must copy loaded position hidden weights into the independent branch when using
+pretrained initialization; constructor copies only its initial random weights.
+
+`forward` returns displacement and velocity logits; `predict` returns N-by-2
+next x/vx. Both outputs see current state, and neither receives the other's
+recorded successor. No native rules run at inference. Complete model specs and
+weights reload through the registry. This diagnostic model is not wired into
+the RGB player or shared training runner.
+
+`evaluate_horizontal_pair` supports reference, x-only, vx-only and joint feedback,
+with reference boundaries and the other state fields supplied. It scores only
+windows that remain within a contiguous life. Reusing reference predictions
+until their inputs change is exact; tests compare against brute-force recursive
+prediction after errors, across multiple life segments.
+
+## Four-variable ball transition
+
+`ball_motion` composes `horizontal_ball_pair` and `paddle_vertical_pair` under
+one registered checkpoint. Its `horizontal` and `vertical` constructor options
+are the corresponding specifications without their `kind` keys. `predict`
+returns N-by-4 values ordered x, combined y, vx, vy. Split combined y into its
+floor and eighth-pixel remainder when updating the 118-field state. Every branch
+reads the original current state; outputs are applied simultaneously.
+
+`forward` exposes horizontal logits, upper y/vy logits, paddle timing/speed
+logits and source-only routing masks for joint training. The horizontal branches,
+vertical upper cell encoders/heads and vertical paddle trunk/heads train. Vertical
+flight, velocity correction, geometry and intermediate-paddle dependencies stay
+frozen. Each objective uses its appropriate current-source subset; paddle speed
+supervision uses true bounces only. This composition preserves specialized
+networks rather than forcing additional parameter sharing.
+
+`evaluate_ball_motion` supports reference, horizontal-only, vertical-only and
+four-variable feedback. Its default is four-variable feedback. All non-ball
+fields and reference life boundaries remain supplied. Tests compare the optimized
+evaluator with brute-force coupled rollouts, including fractional y and cross-axis
+error effects. This model does not yet predict termination, bricks or paddle
+state and is not connected to the RGB player.

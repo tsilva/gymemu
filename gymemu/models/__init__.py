@@ -5,6 +5,7 @@ from gymemu.models.ball_acceleration import BallAcceleration, BallAccelerationSp
 from gymemu.models.ball_direction_geometry import BallDirectionGeometry
 from gymemu.models.ball_horizontal_router import BallHorizontalRouter
 from gymemu.models.ball_horizontal_velocity import BallHorizontalVelocity
+from gymemu.models.ball_motion import BallMotion
 from gymemu.models.ball_position import BallPosition
 from gymemu.models.ball_state import BallStateAutoencoder
 from gymemu.models.ball_velocity import BallVelocityMLP
@@ -13,11 +14,13 @@ from gymemu.models.brick_contact import BrickContact
 from gymemu.models.brick_layout import BrickLayout
 from gymemu.models.controller_history import ControllerHistoryMLP
 from gymemu.models.direct import Autoencoder
+from gymemu.models.horizontal_ball_pair import HorizontalBallPair
 from gymemu.models.latent import FrameCodec, LatentDynamics
 from gymemu.models.life_termination import LifeTermination
 from gymemu.models.paddle import PaddlePositionCNN, PaddleStateCNN
 from gymemu.models.paddle_hit_count import PaddleHitCount
 from gymemu.models.paddle_transition import PaddleTransitionMLP
+from gymemu.models.paddle_vertical_pair import PaddleVerticalPair
 from gymemu.models.paddle_width import PaddleWidth
 from gymemu.models.state_context import HiddenStateProbe, PaddleContextProbe
 from gymemu.models.state_dynamics import StateGRU, StateMLP
@@ -43,6 +46,9 @@ MODELS = {
     "paddle_width": PaddleWidth,
     "life_termination": LifeTermination,
     "vertical_ball_pair": VerticalBallPair,
+    "horizontal_ball_pair": HorizontalBallPair,
+    "ball_motion": BallMotion,
+    "paddle_vertical_pair": PaddleVerticalPair,
     "vertical_collision_timing": VerticalCollisionTiming,
     "vertical_displacement_refinement": VerticalDisplacementRefinement,
     "frame_codec": FrameCodec,

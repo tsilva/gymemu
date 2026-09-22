@@ -1,6 +1,6 @@
 # Learned state-model status
 
-Updated 2026-09-19. These are separate diagnostic models, not an integrated
+Updated 2026-09-22. These are separate diagnostic models, not an integrated
 recursive emulator. Validation selects checkpoints; reserved-test results are
 identified explicitly. Results from different targets and input contracts are
 not interchangeable. Percentages denote exact predictions unless stated otherwise.
@@ -26,6 +26,7 @@ is established. MLP means a fully connected neural network.
 | Next brick-contact memory | 86→128→128→2 ReLU classifier, cross-entropy; 27,906 fitted parameters plus frozen brick/y/velocity parent | Current ball x, RAM y, vx, vy, fractional y, contact, and bricks. Frozen parent supplies 71 ball features, 2 predicted removal probabilities, and 13 probability-weighted brick geometry features | **100% validation**, 0 / 88,590. **100% on the reused 16-episode brick test**, 0 / 45,245, including all 996 activations and 993 clearings. Contact-only feedback remains exact across 52 life segments. Labels derive from audited native replay; all other state inputs remain supplied. |
 | Next capped paddle-hit count | 96→256→256→256→2 ReLU hit classifier, cross-entropy; decode `min(12, count + hit)`. 156,930 fitted parameters plus frozen vertical parent | Hit detection uses current ball x, RAM y, vx, vy, fractional y, paddle x, width and charge. Frozen intermediate-paddle prediction and geometric/binary encoding. Current count enters only the decoder | **100% validation count accuracy**, 0 / 88,590. **99.9978% reused-test count accuracy**, 1 / 45,245; all 377 increments and 801 actual hits detected, one false hit. With count and contact fed back, **99.9912%**, 4 count errors across 52 life segments. Selected detector also has one false validation hit at saturated count 12. |
 | Combined y, fractional y, and vy | Original y/vy pair frozen; 10→64→64→8 ReLU correction, cross-entropy; 5,384 fitted parameters | Current vy, predicted y displacement, and eight original vy probabilities. Original predictors use their established current-state contract | **100% validation** through all 78,806 eligible 128-step windows. Reused-test one-step joint errors **7→3 / 45,245**. Fully exact 128-step windows **98.6965%→99.4286%**, 511→224 failed windows / 39,203. Only vertical fields fed back; other state supplied and reference life boundaries enforced. |
+| Combined ball motion: x, y with fraction, vx, vy | One `ball_motion` checkpoint containing the horizontal independent pair and vertical specialized pair; six CE objectives; 689,916 trainable parameters | Same 118-value current state, simultaneous updates; current non-ball fields supplied | **99.9400% exact joint new-validation accuracy**, 123 / 205,075 errors. **93.3265% fully exact 128-step ball-feedback windows**, 11,668 / 174,841 failed. Mean endpoint errors x **1.6682 px**, y **6.3050 px**. Selected new merge candidate; not a full-state emulator or reserved-test result. |
 | Life-loss terminal flag | 31→64→64→2 ReLU classifier, cross-entropy; 6,338 fitted parameters | Current RAM ball y, fractional y, and vy; scalar/binary encoding includes `y + vy`. No lives, action, or history inputs | **100% validation**, 0 / 88,638 errors, all 48 deaths exact. **100% reused-test accuracy**, 0 / 45,283, all 38 deaths on the exact step and no premature stops across 52 segments. Recorded current ball state; full-state feedback remains untested. Supersedes the older history-based probe with F1 0.299. |
 
 The older context contains eight full state observations, seven prior requested
@@ -184,3 +185,91 @@ errors, or **99.9914% exact one-step joint accuracy**. These previously inspecte
 episodes now serve development explicitly. This is neither a fresh-test score
 nor a rollout improvement; the current checkpoint remains unchanged. See
 [the split and baseline](training.md#vertical-development-split-with-untrained-episodes).
+
+On 2026-09-21, joint vertical feedback across this development set produces
+9,027 failed 128-step windows out of 1,024,358, or 99.1188% entirely exact.
+The targeted factorized paddle candidate lowers failures to 7,055, or 99.3113%
+exact, and mean endpoint y error from 1.5756 to 0.9690 pixels. However, it
+introduces one original-validation timing error, affecting 98 validation
+128-step windows. It is **not promoted**; the current-model table stays unchanged.
+No identical paddle inputs with conflicting targets were found across 536,838
+fitting/development examples. All 64 final-test episodes remain untouched. See
+[the feedback experiment](training.md#development-vertical-feedback-and-factorized-paddle-outcomes).
+
+Adding eight explicit paddle-edge distances to the factorized predictor gives
+7,026 failed development 128-step windows and 0.9173-pixel mean endpoint y error.
+This is a small further gain over its 7,055-window, 0.9690-pixel control. Both
+models still make 85 development one-step errors and the same single original-
+validation timing error. The edge-feature candidate is also **not promoted**;
+the current reference and 64 untouched final-test episodes remain unchanged.
+See [the controlled feature experiment](training.md#paddle-edge-feature-experiment).
+
+A matched comparison with `tsilva/gradlab-breakout-6127e81d` improves this paddle
+branch without changing its architecture. Across two seeds and fixed 12,000-update
+budgets, new-only fitting reduces mean joint errors from 41 to 11 on 96,005 old
+development paddle sources and from 73.5 to 16 on 17,074 new-validation sources.
+The 50/50 mixture averages 11 and 19 errors. New-only retains one old-validation
+timing error in each seed; mixed seed 91 has zero and seed 2026 has one. This tests
+training data for the existing branch with identical pretrained dependencies,
+not the whole emulator. No model is promoted before post-error drift checks;
+the current-model table remains unchanged. Both final-test target sets remain
+reserved. See [the dataset comparison](training.md#checkpoint-trajectory-dataset-comparison).
+
+Upper-screen continuation on the new dataset shows a tradeoff. With the improved
+paddle branch frozen, two new-data runs reduce 62 new-validation upper y/vy
+errors to 19/13, but raise 44 old-development upper errors to 60/54. Mean actual
+128-step endpoint y error improves from 8.3158 to 3.0530 pixels on new validation
+and worsens from 0.8729 to 1.5529 on old development. Matched old-data controls
+improve both larger sets but also introduce legacy-validation errors. These
+checkpoints are **not promoted**. See the
+[upper-screen comparison](training.md#upper-screen-dataset-continuation).
+
+
+The subsequent [fixed-size mixture](training.md#fixed-size-mixed-upper-screen-fitting)
+uses 619,839 rows per fitting condition, the same model and update budget, and two
+optimization seeds. Mean upper errors are 36/46.5 on old-development/new-validation
+with old-only fitting, 57/16 with new-only fitting, and 33/22 with the 50/50 mix.
+Mixed 128-step y drift is 0.8977/3.8842 pixels, compared with 1.5529/3.0530 for
+new-only fitting. This improves the balance across datasets. It retains 5/4
+legacy-validation upper errors and slightly worsens mean old-data drift versus
+the 0.8729-pixel starting model, so neither mixed checkpoint is promoted. The
+paddle branch, reference, datasets and final-test target reservation remain unchanged.
+
+
+## Horizontal pairing on the new dataset
+
+New-only fitting of independent x/vx predictors gives 103/112 joint errors on
+205,075 new-validation sources, mean **99.9476%** exact. A shared-hidden-layer
+pair gives 111/118 errors, mean **99.9442%**, with 231,706 rather than 447,962
+trainable parameters. Both start from historical x features and frozen geometry
+parents; this is not from-scratch fitting. The historical x/routed-vx baseline
+has 231 joint errors on the same sources.
+
+Entirely exact 128-step horizontal windows rise from 88.5330% to 93.8424% for
+independent predictors and 93.6562% for shared layers. Mean endpoint x MAE falls
+from 2.6104 to 1.4660 and 1.4061 pixels respectively. Other fields and reference
+life boundaries remain supplied. The independent pair is the stronger accuracy
+baseline for further experiments; sharing saves parameters but slightly increases
+one-step and exact-path errors. Most remaining errors occur near the paddle.
+Four-variable ball feedback is not established, and no historical reference is
+replaced. See [the horizontal experiment](training.md#horizontal-pair-on-new-checkpoint-trajectories).
+
+
+## Four-variable ball-state merge
+
+The next merge combines the horizontal independent pair and vertical pair into
+one `ball_motion` checkpoint with simultaneous x, combined y, vx and vy outputs.
+The initial composition exactly reproduces both parents on all 205,075 new-
+validation transitions. Joint continuation seed 91 reduces 129 errors to 123,
+or **99.9400%** exact ball-state accuracy. Four-variable 128-step feedback improves
+from 92.6608% to **93.3265%** entirely exact windows. Mean endpoint errors improve
+from x 1.8691 / y 7.2169 to x **1.6682** / y **6.3050** pixels. Individual head
+errors are 71 x, 31 y, 50 vx and 30 vy. Some heads regress slightly, and rare
+large drift remains; this is an integration result, not perfect simulation.
+
+Use `runs/ball-motion-20260922/candidate.pt` for the next merge, copied from the
+fixed final seed-91 continuation. Seed 2026 slightly worsens y drift and stays
+diagnostic. Parent files and the historical reference remain unchanged. Brick
+layout is the next planned merge. Non-ball fields and reference life boundaries
+are still supplied; final-test targets remain reserved. See
+[the merge record](training.md#four-variable-ball-state-merge).
