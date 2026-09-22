@@ -175,6 +175,13 @@ finds that 67 of the 105 divergent segments first fail in ball prediction,
 52 near the paddle. Existing training errors provide a mining pool; vertical
 paddle predictions also show a generalization gap. No weights changed in this audit.
 
+A [separate unified MLP benchmark](docs/training.md#unified-residual-mlp-benchmark)
+trains one shared residual network from scratch for 20 uniform epochs. It reaches
+**98.1852%** exact joint validation accuracy and **13/246** completely exact
+segments, versus **99.9006%** and **141/246** for the container. The training probe
+reaches 99.9969%, indicating a substantial generalization gap. The container stays
+selected; no mining, oversampling or dataset changes were introduced.
+
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)

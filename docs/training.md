@@ -4229,3 +4229,97 @@ RAM-only diagnosis using the recorded snapshot and existing native audit helpers
 Production code, checkpoint weights and shared train/play infrastructure are
 unchanged. Ruff, diagnostic compilation and whitespace checks pass; the production
 suite was not rerun for this documentation/diagnostic-only change.
+
+
+## Unified residual MLP benchmark
+
+Train a separate shared model from scratch on the same pinned train/validation
+split. Use every training transition once per epoch in shuffled batches, with no
+error mining, event oversampling, dataset modifications or final-test reads.
+The established container checkpoint stays unchanged.
+
+The model has **3,361,486 parameters**. Current 119-value inputs
+become 188 scalar/binary features, then a 512-wide projection, six residual blocks
+with two 512-wide linear layers each, final LayerNorm and a single 206-logit
+output layer. Eleven classification objectives share every hidden layer.
+There are no pretrained helpers, region routers or distillation targets.
+Training-derived vocabularies contain 22 dx, 19 dy, eight vx, eight vy, nine
+charge-change and 23 paddle-displacement classes; fixed event heads cover bricks,
+contact, count increment, width and stopping. Validation labels all lie within
+this training-derived output support.
+
+Use seed 2026, 20 epochs, batch 1,024, AdamW with weight decay 1e-4, cosine LR
+3e-4 to 1e-5 and gradient norm clipping at 1. The eleven task mean cross-entropies
+have equal weight. State losses mask terminal rows, including their NaN targets;
+stopping learns from all rows. Count supervision is the capped count increment,
+not the original count branch's uncapped hit-event auxiliary target. Choose the
+lowest CPU validation joint error count at epoch end; earliest epoch breaks ties.
+
+Training processes **32,846,480 row presentations** in
+**21.79 minutes** on Apple MPS, including epoch-end
+CPU validation. The selected checkpoint is epoch **20**,
+`runs/unified-state-mlp-20260922/best.pt`, SHA-256
+`74239a438214c7f07f4f83680e9238a3030162cecd5fb3963030e0c0af56f0da`. All 1,642,324 training transitions are reused
+exactly 20 times; 205,314 validation transitions only measure/select checkpoints.
+The final-test partition remains unread.
+
+| Measure | Existing container | Shared MLP |
+| --- | ---: | ---: |
+| Exact joint one-step accuracy | 99.9006% | 98.1852% |
+| Incorrect transitions | 204 | 3,726 |
+| False / missed one-step stops | 0 / 0 | 7 / 8 |
+| Entire life/data segment exact | 141/246 | 13/246 |
+| Exact death timing | 169/239 | 16/239 |
+| Early / missed deaths | 62 / 8 | 186 / 37 |
+| False stops among seven censored segments | 5 | 6 |
+
+The per-field table evaluates decoded state heads on every one of the 205,075
+nonterminal sources, even if the stop head would prematurely halt. Joint accuracy
+uses actual stopping behavior. Brick accuracy requires the complete layout to
+match; y includes its fraction.
+
+| State field | Container accuracy | Shared MLP accuracy | Shared MLP errors |
+| --- | ---: | ---: | ---: |
+| ball_x | 99.9654% | 99.7006% | 614 |
+| ball_y_with_fraction | 99.9849% | 98.8648% | 2328 |
+| ball_vx | 99.9756% | 99.7703% | 471 |
+| ball_vy | 99.9854% | 99.0711% | 1905 |
+| bricks | 99.9922% | 99.2520% | 1534 |
+| contact | 99.9888% | 99.2227% | 1594 |
+| hit_count | 99.9834% | 99.9308% | 142 |
+| paddle_width | 100.0000% | 100.0000% | 0 |
+| charge | 100.0000% | 99.9980% | 4 |
+| paddle_x | 99.9834% | 99.8318% | 345 |
+
+Full-segment evaluation initializes once, feeds back every predicted field and
+stops on predicted life loss. Actions remain recorded. Missed deaths are censored
+at the original life boundary; no next-life actions or respawn targets are used.
+The unchanged comparator reproduces its previous 204 one-step errors, 141 exact
+segments and 169 exact death timings on the same freshly reconstructed inputs.
+CPU checkpoint reload reproduces the selected epoch's validation results exactly.
+
+This is one shared-network baseline with one seed and a fixed training budget.
+The container's earlier predictors used specialized encodings, intermediate
+supervision, samplers and training schedules. Equal raw input information and
+validation targets therefore do not make this an architecture-only ablation.
+A worse result does not establish that shared MLPs cannot reach the container's
+accuracy. A fixed uniform 65,536-row training probe is diagnostic only; its full
+per-field results are recorded alongside validation. The probe has two errors
+on 65,536 training rows, or 99.9969% exact joint accuracy, versus 98.1852%
+validation accuracy. This is evidence of a large generalization gap in this run;
+it does not establish that insufficient capacity or more training epochs alone
+explain the shortfall.
+
+The separate checkpoint does not replace the container or change the RGB runner
+or player. Artifacts, plan, history, source audits and reproduction scripts are
+under `logs/unified-state-mlp-20260922/`, with weights under the matching `runs/`
+directory. Reproduce from the repo root with
+`PYTHONPATH=. uv run python logs/unified-state-mlp-20260922/reproduce.py`.
+The local pinned snapshot and earlier native audit helpers are required.
+
+Validation: 426 tests passed, two skipped. The full suite includes the existing
+direct/multistage train/play smoke tests; new tests cover shared-layer gradients,
+small-batch fitting, discrete target decoding, terminal masking, unsupported
+labels, absorbing stops and portable checkpoint loading. Ruff, compilation and
+whitespace checks pass. The snapshot inventory and original container hash remain
+unchanged.

@@ -863,3 +863,40 @@ from earlier fixed-length, nonterminal-only rollout scores.
 
 The RGB player and shared experiment runner remain unchanged. This is a portable
 compact-state model with a stopping contract and a dedicated rollout evaluator.
+
+## Unified compact-state MLP
+
+`unified_state_mlp` is a separate model-registry entry with the same N-by-119
+input and N-by-118 output contract as the life-loss container. Every hidden layer
+is shared across tasks. There are no regional routers, pretrained components or
+learned feature dependencies. A single final linear layer emits eleven groups of
+class logits: ball dx/dy/vx/vy, brick event, contact, count increment, width,
+charge change, paddle displacement and termination.
+
+The default network encodes the current inputs into 188 scalar/binary features,
+projects to width 512, applies six residual blocks and a final LayerNorm, then
+emits the logits. Each block is LayerNorm, Linear, SiLU, Linear plus its residual
+connection. Encoding adds no history or hidden state. Actions are one-hot encoded.
+The first ten numeric state values supply scaled scalars and binary features;
+brick occupancy supplies 108 values. Both integer and fractional y are retained.
+
+`fit_vocabulary` in `gymemu/unified_state_training.py` derives six displacement
+and velocity class sets from training episodes only. Save those sets in
+`model_spec`; reject unsupported labels rather than rounding them into another
+class. Fixed event heads use 109 brick outcomes, two contact values, two count
+increments, two widths and two stopping values. The one-removal brick contract
+and capped count match the established container. Decode predicted events and
+movement classes without calling native game rules. Absent brick cells are
+masked during decoding; wall refill and respawn remain unsupported.
+
+Use `encode_targets` and `classification_losses` for supervised training. Average
+each state loss only over nonterminal rows; train stopping on every row. Terminal
+successor labels may be NaN. `joint_loss` weights the eleven task means equally.
+The model supports `forward_encoded` so fixed inputs can be encoded in RAM once.
+Do not persist a new dataset or feature cache without user authorization.
+
+`predict(source, terminated=mask)` skips previously stopped rows and keeps them
+stopped. Active rows share one network execution for state and stopping; ignore
+state outputs when stop is true. Reuse `evaluate_life_rollouts` for direct
+comparison with the container. Inference requires no parent checkpoints.
+This registry entry does not change the RGB approaches, runner or player.
