@@ -4092,3 +4092,27 @@ Training took 21.79 minutes including CPU validation. Save the separate model,
 retain the container, and leave dataset exposure and final-test targets unchanged.
 Full suite: 426 passed, two skipped. See
 [the benchmark](training.md#unified-residual-mlp-benchmark).
+
+## 2026-09-22: Balance the frameskip-1 split before retraining
+
+Replace the provisional inherited seed assignment with a fresh 80/10/10 grouped
+split on the new dataset's episode summaries. Apply the previous split's search
+method and balance thresholds. All 1,000 episodes are retained, with 800/100/100
+assigned to train/validation/test and no environment- or policy-seed overlap.
+Mean normalized brick progress is 0.437384/0.437546/0.437824 and mean return is
+100.4795/100.4890/100.5520. Every checkpoint contributes 40/5/5 episodes.
+
+Save the local split manifest and episode views before training. This step does
+not publish changes to Hugging Face or train a new model. See
+[split preparation](training.md#frameskip-1-split-preparation).
+
+The user subsequently requested publication. Uploaded the frozen assignments,
+materialized transition/episode split views, dataset card, and manifest link in
+[one verified commit](https://huggingface.co/datasets/tsilva/gradlab-breakout-c6d579da/commit/5f6e0ca8c28e2fc27aeda3ead04851a1f8a45a77). All 46 remote hashes match;
+source transition values and the original raw view are preserved.
+
+## 2026-09-22: Retrain the shared MLP on frameskip 1
+
+The matched 32,080-update run improves one-step validation from 98.1852% to 99.6056%. Each new prediction spans one native frame instead of two. At 256 native frames, fully exact sampled feedback windows change from 20.38% to 51.83%.
+
+Keep this as a separate checkpoint. The datasets and policies also differ; the result does not isolate frameskip causally. Test remains reserved. See [the full comparison](training.md#unified-mlp-on-frameskip-1).

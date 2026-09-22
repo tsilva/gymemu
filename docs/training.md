@@ -4323,3 +4323,126 @@ small-batch fitting, discrete target decoding, terminal masking, unsupported
 labels, absorbing stops and portable checkpoint loading. Ruff, compilation and
 whitespace checks pass. The snapshot inventory and original container hash remain
 unchanged.
+
+## Frameskip-1 split preparation
+
+Before retraining the unified MLP, freeze a new grouped 80/10/10 split for
+`tsilva/gradlab-breakout-c6d579da` at revision
+`b2069e01a5a5a3db84f230caf7416bff86494132`. Reusing the frameskip-2 seed assignment
+does not establish balance for these new trajectories.
+
+The local split uses the previous split's documented method: search 300,000
+seed-group allocations, then improve with cross-split swaps. Keep complete
+recorded episodes and all checkpoint recordings of an environment seed together.
+The objective emphasizes normalized brick progress, includes return and episode
+length means and second moments, and matches pooled brick-progress quantile bins.
+Each holdout receives its rounded share of successful episodes. This uses only
+episode summaries, with no model-performance selection.
+
+| Split | Episodes | Raw transitions | Mean normalized bricks destroyed | Mean return | Successful episodes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Train | 800 | 7,665,223 | 0.43738426 | 100.4795 | 257 |
+| Validation | 100 | 946,274 | 0.43754630 | 100.4890 | 32 |
+| Test | 100 | 962,313 | 0.43782407 | 100.5520 | 32 |
+
+Every one of the 20 checkpoints contributes 40/5/5 episodes. Environment and
+policy seeds are disjoint across splits. All previous balance thresholds pass:
+mean deviations below 0.1 pooled standard deviations, relative standard-deviation
+differences below 10%, and brick-bin proportion differences below four percentage
+points. Normalized brick progress retains the publisher's denominator of 216.
+These figures describe complete episodes before life-loss/quality filtering.
+
+The frozen consumer manifest is `logs/unified-state-fs1-20260922/split.json`;
+`prepare.py` selects train/validation episode IDs from it before decoding
+transitions. Episode Parquet views are under the adjacent `balanced-split/`
+directory. Reproduce with `uv run python
+logs/unified-state-fs1-20260922/balance_split.py`. The download script preserves
+this assignment. The preparation step leaves source Hub files unchanged and does not train a
+model. The subsequent user-requested publication adds these split views to the
+same dataset; see the publication receipt below. Keep test membership frozen and
+exclude test transitions from fitting and model selection. This split measures
+held-out seeds within one training run, with checkpoint policies shared across
+splits.
+
+Publication receipt: the balanced split views were uploaded and verified at
+[5f6e0ca8c28e2fc27aeda3ead04851a1f8a45a77](https://huggingface.co/datasets/tsilva/gradlab-breakout-c6d579da/commit/5f6e0ca8c28e2fc27aeda3ead04851a1f8a45a77).
+All 46 published file hashes match the local artifacts. The 9,573,810 transition
+rows were checked against their original source values before upload. The existing
+`all`, frames, and sessions views remain available. Load the `transitions` or
+`episodes` configuration with `split="train"`, `"validation"`, or `"test"`,
+pinning this revision. `trajectory-view.json` now links the split manifest.
+
+## Unified MLP on frameskip 1
+
+Retrain the shared 188-input, 512-wide, six-residual-block MLP from scratch on the
+published balanced frameskip-1 dataset. Pin dataset revision
+`5f6e0ca8c28e2fc27aeda3ead04851a1f8a45a77` and its frozen split manifest. Raw source
+tables filtered by that manifest contain the same values as the published split
+views, verified during publication. Test transitions are excluded from model
+preparation, fitting, and evaluation.
+
+Keep seed 2026, AdamW, batch size 1,024, equal task losses, uniform shuffling,
+weight decay 1e-4, gradient clipping at 1, and cosine learning rate 3e-4 to 1e-5.
+Match the previous run's 32,080 updates and 20 validation checkpoints. The larger
+dataset receives fewer complete epochs. Derive numerical output vocabularies
+from training only, giving 3,347,635 parameters. The fixed state encoding and
+hidden architecture are unchanged.
+
+The one-frame native audit exactly matches 8,584,908 continuing train/validation
+transitions. Controller replay matches all 8,611,497 raw train/validation rows.
+After quality and life-loss filtering, retain 7,644,744 training and 943,949
+validation transitions. No dataset columns or feature caches are written.
+There are 327 retained transitions where charge differs from the usual saturated
+repeat increment; these startup cases remain in training/evaluation.
+
+Training took 26.47 minutes including validation, with 32,848,160 row presentations, or 4.297 epochs. Select update 32,080 by minimum validation joint errors.
+
+| Measure | Previous frameskip 2 | New frameskip 1 |
+| --- | ---: | ---: |
+| Exact joint one-step accuracy | 98.1852% | 99.6056% |
+| Joint errors / transitions | 3,726 / 205,314 | 3,723 / 943,949 |
+| False / missed life-loss stops | 7 / 8 | 0 / 0 |
+
+One-step durations differ. For feedback rollouts, sample 4,096 validation sources
+without replacement in each dataset with seed 9127, feed every predicted state
+variable back, and retain recorded actions. Score the entire window as exact
+only if every state and stop prediction matches. Stop at predicted death; censor
+missed deaths at the recorded life boundary. Exclude short censored windows at
+each horizon. These overlapping windows are diagnostics, not independent trials.
+
+| Native frames | Previous exact windows | New exact windows |
+| --- | ---: | ---: |
+| 2 | 4008/4096 (97.85%) | 4065/4096 (99.24%) |
+| 16 | 3580/4094 (87.45%) | 3869/4096 (94.46%) |
+| 64 | 2415/4092 (59.02%) | 3309/4088 (80.94%) |
+| 256 | 832/4082 (20.38%) | 2110/4071 (51.83%) |
+
+| Predicted field | New validation errors | Accuracy |
+| --- | ---: | ---: |
+| ball_x | 312 / 943,528 | 99.96693% |
+| ball_y_with_fraction | 2,850 / 943,528 | 99.69794% |
+| ball_vx | 252 / 943,528 | 99.97329% |
+| ball_vy | 2,829 / 943,528 | 99.70017% |
+| bricks | 1,346 / 943,528 | 99.85734% |
+| contact | 2,705 / 943,528 | 99.71331% |
+| hit_count | 53 / 943,528 | 99.99438% |
+| paddle_width | 0 / 943,528 | 100.00000% |
+| charge | 18 / 943,528 | 99.99809% |
+| paddle_x | 44 / 943,528 | 99.99534% |
+
+The fixed 65,536-row uniform training probe has 170 joint errors, or 99.7406% accuracy. It is diagnostic only and is never used for checkpoint selection.
+
+The recordings, checkpoint policies, dataset sizes, and balanced seed assignments
+differ, so this is not an isolated causal test of frameskip. Improvements apply
+to these validation datasets and this recipe. Neither the original container nor
+the previous unified checkpoint is replaced.
+
+Checkpoint: `runs/unified-state-fs1-20260922/best.pt`. SHA256: `b188d8115b2e0fa219fd751a8eb1065226d163f3f05a155b156525ad7a25db3f`.
+
+Plan, audits, history, metrics, and scripts are under
+`logs/unified-state-fs1-20260922/`. To reproduce, execute `prepare.py`,
+`train_fs1.py`, and `evaluate_fs1.py` in the same Python process with repository
+imports enabled; run `compare_fs2.py` separately before evaluation. Preparation
+keeps features in RAM and requires the pinned raw snapshots and earlier native
+audit helpers. Reloading the selected checkpoint exactly reproduces validation.
+The previous model also reproduces its 3,726 validation errors.
