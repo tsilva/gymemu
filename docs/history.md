@@ -4007,3 +4007,32 @@ Selected one-step paddle x accuracy is 99.9834%; combined accuracy is
 position and charge. Reference termination remains; autonomous stopping is next.
 Full suite: 417 passed, two skipped. See
 [the experiment](training.md#paddle-position-added-to-the-transition-container).
+
+
+## 2026-09-22: Learned life-loss stopping completes the transition container
+
+Restore terminal transitions in a RAM-only training view, mask their successor
+state and add the historical 6,338-parameter stop classifier. The container
+skips state inference on predicted death and supports an absorbing previous-stop
+mask. Existing state predictors stay frozen; compare two fixed, balanced stop-head
+continuations. No dataset changes or final-test reads.
+
+| Model | One-step false / missed stops | Exact 128-step-or-death windows | Full-segment exact death / early / missed | False stops in censored segments | Fully exact segments |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial composition | 0 / 0 | 89.7222% | 169 / 62 / 8 | 5 | 141 / 246 |
+| Stop tuning seed 91 | 0 / 0 | 89.7222% | 169 / 62 / 8 | 5 | 141 / 246 |
+| Stop tuning seed 2026 | 0 / 0 | 89.7222% | 169 / 62 / 8 | 5 | 141 / 246 |
+
+Selected **stop tuning seed 91** as `runs/ball-life-termination-20260922/candidate.pt`. Both continuations reduce false stops in 128-step survival windows from 3,526 to 3,522, with other stop-timing and exact-window counts unchanged. Both qualify; the predeclared tie-break selects seed 91. Their longer survival exposes 150 more state-transition errors in bounded windows and four more in full-segment evaluation; those raw counts have different numbers of simulated transitions.
+
+One-step stopping is exact on 205,314 validation sources, including all
+239 deaths. Full feedback stops on the correct death step in
+169 / 239 segments; 62
+stop early and 8 miss death. Entire trajectories are exact in
+141 / 246 segments. Misses are censored at
+the reference end; late-stop timing remains unknown.
+
+An offline audit of 217,487 source rows evaluated during selected full-segment inference finds **zero disagreements** between the neural stop flag and the native bottom-boundary timing rule applied to the same predicted inputs. Recorded-action full-segment timing failures therefore arise from earlier state-trajectory divergence in this evaluation. Native rules only audit the predictions; they never alter model outputs.
+
+Full suite: 422 passed, two skipped. See
+[the experiment](training.md#life-loss-termination-added-to-the-transition-container).
