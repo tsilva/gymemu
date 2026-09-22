@@ -2,10 +2,16 @@
 
 from gymemu.models.action_history import ActionHistoryAutoencoder
 from gymemu.models.ball_acceleration import BallAcceleration, BallAccelerationSpatial
+from gymemu.models.ball_bricks import BallBricks
+from gymemu.models.ball_bricks_contact import BallBricksContact
+from gymemu.models.ball_bricks_contact_count import BallBricksContactCount
 from gymemu.models.ball_direction_geometry import BallDirectionGeometry
 from gymemu.models.ball_horizontal_router import BallHorizontalRouter
 from gymemu.models.ball_horizontal_velocity import BallHorizontalVelocity
 from gymemu.models.ball_motion import BallMotion
+from gymemu.models.ball_paddle_charge import BallPaddleCharge
+from gymemu.models.ball_paddle_position import BallPaddlePosition
+from gymemu.models.ball_paddle_width import BallPaddleWidth
 from gymemu.models.ball_position import BallPosition
 from gymemu.models.ball_state import BallStateAutoencoder
 from gymemu.models.ball_velocity import BallVelocityMLP
@@ -48,6 +54,12 @@ MODELS = {
     "vertical_ball_pair": VerticalBallPair,
     "horizontal_ball_pair": HorizontalBallPair,
     "ball_motion": BallMotion,
+    "ball_paddle_width": BallPaddleWidth,
+    "ball_paddle_charge": BallPaddleCharge,
+    "ball_paddle_position": BallPaddlePosition,
+    "ball_bricks": BallBricks,
+    "ball_bricks_contact": BallBricksContact,
+    "ball_bricks_contact_count": BallBricksContactCount,
     "paddle_vertical_pair": PaddleVerticalPair,
     "vertical_collision_timing": VerticalCollisionTiming,
     "vertical_displacement_refinement": VerticalDisplacementRefinement,

@@ -707,3 +707,120 @@ fields and reference life boundaries remain supplied. Tests compare the optimize
 evaluator with brute-force coupled rollouts, including fractional y and cross-axis
 error effects. This model does not yet predict termination, bricks or paddle
 state and is not connected to the RGB player.
+
+## Ball and brick-layout transition
+
+`ball_bricks` combines a `ball_motion` specification and a `brick_layout`
+specification under `motion` and `bricks`, without nested `kind` keys. Its single
+`predict` call returns 112 values: x, combined y, vx, vy, then the 108 brick cells.
+Both branches see the original source state. The ball does not receive predicted
+bricks within the same step, and the brick predictor does not receive newly
+predicted ball coordinates. Apply all outputs to the next state together.
+
+`forward` preserves the ball model's named logits and adds 109 brick logits,
+representing no change or one occupied-cell removal. Train the brick cell encoder,
+removal scorer and no-change head alongside the ball model's trainable modules.
+The brick parent and existing ball dependencies remain frozen. Audit no additions
+and at most one removal before using this contract; wall refills are unsupported.
+
+`evaluate_ball_bricks` offers reference, ball-only, bricks-only and joint feedback.
+Its default feeds all 112 outputs back, with fractional-y conversion, while
+supplying other state and life boundaries. It counts complete-layout errors and
+individual cell errors separately. Tests compare coupled ball/layout feedback
+against brute force and verify that predictions cannot add or remove absent bricks.
+
+## Ball, bricks and contact transition
+
+`ball_bricks_contact` composes `state` (a `ball_bricks` spec) and `contact`
+(a `brick_contact` spec). Its 113 outputs are x, combined y, vx, vy, 108 brick
+cells, then next contact. Every branch reads the original 118-value source.
+The contact head retains its own frozen layout dependency; it does not consume
+the other branch's successor output. Its classifier is 86→128→128→2 ReLU,
+adding 27,906 trainable parameters to the 746,046 ball/layout parameters.
+
+Use `evaluate_ball_bricks(..., contact=True)` with N×113 targets. Joint feedback
+updates input contact column 9 from output column 112, brick input columns
+10:118 from outputs 4:112, and the ball fields together. Contact errors are
+reported separately. Other modes retain reference contact for ablations.
+Life boundaries remain explicit. This experiment does not wire state inference
+into the RGB player or predict termination, paddle state or paddle-hit count.
+
+## Ball, bricks, contact and paddle-hit count transition
+
+`ball_bricks_contact_count` wraps `state`, a `ball_bricks_contact` specification,
+and `count`, a `paddle_hit_count` specification. Its output appends capped count
+at column 113, giving 114 values. The complete state branch stays frozen/eval;
+this stage trains only the added 96→256→256→256→2 ReLU hit classifier. Its
+vertical geometry dependency also stays frozen. Supervise actual hit/no-hit,
+including hits at count 12, and decode `min(12, current_count + predicted_hit)`.
+Every branch reads the original current source. Shared representations remain
+postponed until the state-transition container is complete.
+
+Use `evaluate_ball_bricks(..., contact=True, hit_count=True)` with N×114 targets.
+Joint mode feeds count output 113 into source column 7 along with ball, brick
+and contact predictions. Other modes retain reference count. Contact must be
+enabled when count is enabled, keeping output indices explicit. Report count
+errors separately from joint, contact, layout and ball errors. Reference life
+boundaries still end windows; paddle x, width and charge remain supplied.
+
+## Paddle width added to the state container
+
+`ball_paddle_width` wraps `state`, a `ball_bricks_contact_count` specification,
+and `paddle_width`, a `paddle_width` specification. Output 114 is next width,
+giving 115 outputs. All branches read the original 118-value source. The
+established state branch remains frozen/eval; only the 33→64→64→2 ReLU width
+classifier is trained at this stage, with 6,466 parameters. It uses combined y,
+vertical velocity, current width and their scalar/binary encoding, including a
+constant-velocity proposal feature. It predicts width classes 12 and 16 without
+executing a native collision rule.
+
+Use `evaluate_ball_bricks(..., contact=True, hit_count=True, paddle_width=True)`
+with N×115 targets. Joint mode feeds output 114 into source column 5 along with
+ball, brick, contact and count predictions. Other modes retain reference width.
+Width feedback requires the contact/count output contract. Report width errors
+separately, including real change events in teacher-forced evaluation. Paddle x,
+charge and reference life boundaries remain supplied.
+
+## Paddle charge and action added to the state container
+
+`ball_paddle_charge` wraps `state`, a `ball_paddle_width` specification, and
+`charge`, a `paddle_transition_mlp` specification restricted to the `charge`
+controller field. The input is 119 values: the existing 118-value state followed
+by the current provider action, an integer 0, 1 or 2. The state branch receives
+its original 118 columns and remains frozen/eval. The charge adapter takes only
+current paddle x, charge and action; unused legacy controller slots are zero.
+The added 25→128→128→11 SiLU classifier has 21,259 trainable parameters. It
+classifies a charge delta and adds it to current charge without clipping.
+
+Output 115 is next charge, giving 116 simultaneous outputs. Use
+`evaluate_ball_bricks(..., contact=True, hit_count=True, paddle_width=True,
+paddle_charge=True)` with N×119 sources and N×116 targets. Joint mode feeds
+charge output 115 into source column 6 alongside the other predictions. Action
+column 118 comes from the current recorded transition on every step and is
+never overwritten by feedback. Report charge error, MAE and out-of-range
+predictions separately. Paddle position and reference life boundaries are still
+supplied. The model executes no native controller update rule at inference.
+
+## Paddle position added to the state container
+
+`ball_paddle_position` wraps `state`, a `ball_paddle_charge` specification, and
+`position`, a `paddle_transition_mlp` specification restricted to the `charge`
+controller field. The source stays at 119 values: 118 current state values and
+the current provider action. Output 116 is next paddle x, giving 117 outputs.
+The position branch uses current paddle x, charge and action, with the same
+adapter as the charge branch. It does not consume predicted next charge.
+
+The established state branch stays frozen/eval. Train only the added
+25→128→128→23 SiLU classifier (22,807 parameters) using cross-entropy over integer
+displacements −11 through 11. Decode the winning displacement and add it to
+current paddle x. Neither a native controller rule nor coordinate clipping is
+used at inference. All next-state values are applied together.
+
+Use `evaluate_ball_bricks(..., contact=True, hit_count=True, paddle_width=True,
+paddle_charge=True, paddle_position=True)` with N×119 sources and N×117 targets.
+Joint mode feeds paddle position output 116 into source column 4 alongside the
+other predictions, including charge. The current action still comes from its
+recorded transition. Report paddle-position exact errors, MAE and maximum error
+separately. This enables feedback of every compact state field, but reference
+life boundaries still stop windows and terminal transitions remain excluded.
+Termination and RGB playback integration are separate work.

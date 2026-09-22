@@ -3509,3 +3509,505 @@ four-output decoding, gradients for intended modules, frozen dependencies,
 checkpoint portability, and brute-force equivalence of cross-axis feedback.
 All scripts, plans, metrics, recursive witnesses, selection and verification
 receipts are in `logs/ball-motion-20260922`.
+
+## Ball and brick-layout merge
+
+On 2026-09-22, add brick layout to the selected ball-motion candidate in a single
+registered `ball_bricks` model. Parent checkpoints are
+`runs/ball-motion-20260922/candidate.pt`, SHA-256
+`3bfd3a5cfc5806a18a3cdfbf7394966dc0f1692193e355a706eacc8255ffa7d1`, and
+`runs/brick-layout-20260918/spatial-s2026/best.pt`, SHA-256
+`ffc256bcacfcd7bb9cfd587895e71c1c6cf26e66eca86697e038d70c04ae6c09`.
+The brick initialization is historical; subsequent fitting uses only the new
+checkpoint-trajectory dataset. This is not from-scratch fitting.
+
+The output is x, combined y, vx, vy and all 108 brick cells. Both branches read
+the same current state and apply their outputs simultaneously. Before training,
+verify prediction equality against both parents on all 205,075 validation sources.
+The composition preserves 123 ball-state errors and adds 16 complete-layout
+errors, with 136 jointly incorrect transitions. Cell error counts are not used
+as a substitute for exact complete-layout accuracy.
+
+The pinned new dataset has 34,184 removals among 1,640,422 fitting transitions and
+4,251 among 205,075 validation transitions. Native replay and target audits find
+no additions, multiple removals or wall clears. Retain the 109-class output
+contract: no change or one occupied-cell removal. This does not add support for
+wall refills. Targets, reconstructed hidden fields and all features stay in RAM;
+no dataset columns or final-test targets are touched.
+
+Use two fixed-seed continuations from the identical composition. Keep the prior
+6,000-update AdamW schedule, batch size 192, learning rate 0.00001 decaying to
+0.000001 and weight decay 0.0001. Each batch draws 32 examples per current-region/
+any-ball-velocity-change stratum. Add brick cross-entropy to the six motion
+objectives, averaging removal and no-change losses equally within that same
+batch. The brick branch adds 56,130 trainable parameters, for 746,046 total.
+Existing frozen dependencies stay frozen. There are no shared trainable weights
+between the brick and motion branches, so joint fitting here does not establish
+an effect from representation sharing. No hard mining or intermediate checkpoint
+selection is performed.
+
+Run actual joint ball/layout feedback at horizons 1, 8, 32 and 128. Predicted
+layout becomes the next input layout alongside predicted ball state. Contact
+memory, paddle fields, hit count and reference life boundaries remain supplied.
+Windows overlap and these are still partial-state rollouts. Compare continuations
+against the atomic composition, not against a ball-only metric with fewer outputs.
+
+
+| Model | Ball errors / 205,075 | Complete-layout errors / 205,075 | Joint errors / 205,075 | Fully exact128 / 174,841 | Mean x endpoint error | Mean y endpoint error |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Atomic composition, retained | 123 | 16 | 136 | 92.5407% | 1.7137 px | 6.6627 px |
+| Continuation seed 91 | 121 | 46 | 164 | 91.3642% | 1.9903 px | 8.9587 px |
+| Continuation seed 2026 | 122 | 50 | 169 | 91.1085% | 1.8814 px | 8.7854 px |
+
+Retain the atomic composition for the next merge. It has **99.9337%** exact joint
+ball/layout accuracy and **99.9922%** exact complete-layout accuracy. Both
+continuations slightly improve ball error counts but worsen brick generalization
+and coupled feedback. Ordinary-transition layout errors rise from 7 to 36/41.
+The models have separate trainable branches; this does not demonstrate gradient
+interference from sharing representations. Resampling and continuation are
+possible causes, not isolated findings. Defer further tuning and mining until
+later in the integration sequence.
+
+The retained model has 13,042 imperfect 128-step windows, versus 15,099/15,546
+for continuations. At the endpoint, 6,742 baseline layouts contain wrong cells,
+compared with 9,423/9,215; individual wrong-cell totals are 19,027 versus
+32,164/32,656. Mean ball error is x 1.7137 / y 6.6627 pixels, with maxima 144 and
+870.75 pixels. Rare large drift remains. The prior ball-only rollout score of
+93.3265% supplied true layouts and scored fewer outputs; the new 92.5407% score
+feeds layouts back too. It is a stricter integration test, not a change to parent
+one-step predictions.
+
+The predeclared continuation gate requires no worse joint one-step errors,
+exact128 count, either coordinate endpoint MAE, one-step layout errors or endpoint
+layout errors than the composition. Neither continuation qualifies. Store both
+as diagnostics. Save the exact composed baseline as
+`runs/ball-bricks-20260922/candidate.pt`, SHA-256
+`c12ec04501a1fe1881f8095bcfc6e8c10f5f5079cfb8f074d5061fafcbc7b9fc`.
+The merge itself is complete, and brick-contact memory is the next planned
+addition. Existing parent files and the historical reference remain unchanged.
+
+All three portable checkpoints reproduce their saved validation metrics after
+reload. Frozen parameters/buffers, parent hashes and raw dataset snapshot inventory
+verify unchanged. The full suite passes with 405 tests and two skips, including
+bounded direct and latent train/checkpoint/play checks. Ruff, compilation and
+whitespace checks pass. New tests cover simultaneous ball/layout prediction,
+occupied-cell removal constraints, empty layouts, gradient/freeze boundaries,
+checkpoint reload and brute-force equivalence of coupled feedback across lives.
+Plans, source, audits, per-event scores, recursive witnesses and verification
+are in `logs/ball-bricks-20260922`.
+
+
+## Ball, bricks and contact merge on migrated data
+
+The next merge adds next brick-contact memory to the existing ball/layout model.
+Pin dataset `tsilva/gradlab-breakout-6127e81d` at
+`8f9838c532a2d6b622b4fc0bb5090fe6c534210f`, with migrated split
+`22284897f9fe400efa60772c7e47fc77c870f08b3869cc6d8202b9bac6b24636`.
+Gradlab commits `a9654af4` and `e275acb2` introduce the explicit schema-v1
+contract and durable migration publication. The new view coexists with old
+snapshot paths, so the adapter selects its split explicitly.
+
+Audit all 22 training/validation Parquet hashes, declared schema identities and
+physical Arrow schemas. A bounded decoded-value comparison with the previous
+revision confirms unchanged values and episode assignments across 400 training
+and 50 validation episodes: 1,647,968 and 206,044 transitions respectively.
+The migration adds contract metadata without changing these learning examples.
+Reserved test targets and frame asset shards remain unread. Derive state features in
+RAM; no dataset columns or feature caches are written. After the existing
+life/startup/quality filters, retain 1,640,422 training and 205,075 validation
+transitions. Native replay still verifies all retained ball/layout transitions.
+
+`ball_bricks_contact` reads the existing 118-value current-state vector and
+emits 113 values: x, combined y, vx, vy, 108 bricks, then contact. Compose the
+selected ball/layout checkpoint with `brick-contact-20260919/geometry-s2026/best.pt`
+(contact SHA-256 `4f23f5fc4d2dea3159a15c813bd98e9303883079447a661a3cac692c5ee297b0`).
+Its 86→128→128→2 ReLU head adds 27,906 trainable parameters for 773,952 total.
+Contact retains its own frozen learned layout dependency. All branches read the
+same original source. Full-validation parent predictions match exactly.
+
+Both seeds (91, 2026) start at that composition: 6,000 AdamW updates, batch 192,
+learning rate 1e-5 decaying to 1e-6, weight decay 1e-4. A shared sampled batch
+contains 32 rows from each current-region × velocity-change training stratum.
+Sum the six motion cross-entropies, contact cross-entropy and the brick loss
+balanced between removal/no-change cases in that batch. Dependencies remain
+frozen/eval. No hard mining or intermediate checkpoint selection.
+
+| Model | Ball errors | Layout errors | Contact errors | Joint errors | Exact 128-step windows | x / y MAE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Atomic composition | 123 | 16 | 23 | 145 | 92.2644% | 1.7578 / 7.2773 px |
+| Continuation seed 91 | 121 | 46 | 33 | 186 | 90.5983% | 1.9157 / 8.0000 px |
+| Continuation seed 2026 | 122 | 50 | 29 | 187 | 90.4513% | 1.8523 / 8.1014 px |
+
+Retain atomic composition as `runs/ball-bricks-contact-20260922/candidate.pt`. It has **99.9293%** exact joint accuracy and **99.9888%** contact accuracy. Neither fixed continuation passes the predeclared no-regression gate. The model merge is complete; further tuning stays deferred. The portable model retains specialized branches with separate hidden layers. For both seeds, all 354 ball/layout parameter and buffer tensors exactly match the prior ball/layout-only continuation. Adding the contact loss did not cause the existing brick regression.
+
+There are 174,841 eligible overlapping 128-step windows; the selected
+model has 13,525 imperfect windows. The evaluator
+feeds back ball, bricks and contact simultaneously, and reports each error family
+separately. Other state (paddle, width, charge and hit count) and reference life
+boundaries remain supplied. This is a stricter partial-state test than the prior
+ball/layout run, which supplied true contact. It is not autonomous full-state
+emulation. The selected endpoint maxima are x 144.0000 and
+y 877.5000 pixels; rare large drift remains.
+
+The predeclared gate requires no worse joint one-step error, exact128 count,
+x/y endpoint MAE, or one-step/endpoint layout/contact errors than composition.
+Among qualifying runs choose fewer joint errors, then seed. This is development
+selection, not a fresh final-test estimate. Parent checkpoints and the historical
+reference stay unchanged. Selected SHA-256: `3f23502ae775743f600d59432554146a00e7ea5e142d16ffd4dd0759f1db8d7d`.
+
+Portable reload metrics, frozen parameters/buffers, parent hashes and raw snapshot
+inventory all verify unchanged. The full suite passes: 407 tests, two skips,
+including bounded direct/latent train/checkpoint/play checks; Ruff and whitespace
+checks pass. Focused tests cover contact gradients/frozen dependencies, reload,
+atomic output and brute-force feedback equivalence across life boundaries.
+Reproduction scripts, plans, audits, per-event errors and rollout witnesses are in
+`logs/ball-bricks-contact-20260922/`. Next merge: prior paddle-hit count.
+
+
+## Paddle-hit count added to the transition container
+
+Keep the container approach and postpone a shared MLP until all state predictors
+are integrated. Add the selected `paddle-hit-count-20260919/count-s2026/best.pt`
+head to `ball-bricks-contact-20260922/candidate.pt`. The registered
+`ball_bricks_contact_count` predicts 114 values from the same 118-value source:
+four ball fields, 108 brick cells, contact and capped paddle-hit count.
+Every branch reads the original source, and all outputs are applied together.
+
+Unlike the previous joint continuations, freeze the entire established state
+predictor for this stage. Train only the new 96→256→256→256→2 ReLU hit classifier,
+156,930 parameters. Its geometry dependency also stays frozen/eval. The previous
+two merge experiments already showed regressions from continuing the established
+branches; repeating that training is unnecessary for testing count integration.
+This is still one portable container checkpoint with separate learned branches.
+
+Use the same migrated dataset revision `8f9838c532a2d6b622b4fc0bb5090fe6c534210f`
+and explicit split `22284897f9fe400efa60772c7e47fc77c870f08b3869cc6d8202b9bac6b24636`.
+All 22 train/validation shard SHA-256 values still match the publisher inventory.
+Native replay and life/quality filters yield 1,640,422 training and 205,075
+validation transitions. Features and labels remain in RAM; no dataset columns or
+persistent feature caches are written. Reserved final-test targets remain unread.
+
+The broad paddle region covers all 24,661 training hits and 3,121 validation hits.
+Training has 134,341 paddle-region sources; validation has 17,074. Count increments
+number 14,171 and 1,853; the remaining 10,490 and 1,268 hits occur at saturated
+count 12. Train actual hit/no-hit cross-entropy, including saturated hits, then
+decode `min(12, current_count + predicted_hit)`. Offline checks verify every count
+label against native hits and its alignment with the next source within a life.
+
+Before fitting, verify full-validation equivalence with both parent checkpoints.
+Initial composition has 34 count errors, 47 raw hit errors and 170 joint errors.
+The 47 hit errors are 37 false positives and 10 misses; count saturation hides
+13 of them. Ball, layout and contact errors remain 123, 16 and 23.
+
+Compare two fixed seeds, 91 and 2026, each initialized from the same composition.
+Use 6,000 AdamW updates, batch 192, learning rate 1e-5 cosine-decayed to 1e-6 and
+weight decay 1e-4. Each batch samples 96 actual hits and 96 non-hits from training
+paddle-region sources. No hard-example mining or intermediate checkpoint selection.
+Train only the count branch on these batches; the existing state branch remains
+fixed. All validation targets stay out of fitting.
+
+| Model | Count errors | Hit errors | Joint errors | Entire 128-step window exact | x / y endpoint MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial composition | 34 | 47 | 170 | 91.5089% | 1.8137 / 7.4769 px |
+| Count tuning seed 91 | 28 | 38 | 163 | 91.6015% | 1.8158 / 7.4646 px |
+| Count tuning seed 2026 | 29 | 39 | 163 | 91.6015% | 1.8158 / 7.4646 px |
+
+Selected **initial composition** as `runs/ball-bricks-contact-count-20260922/candidate.pt`. Neither continuation meets the predeclared gate, so retain the initial composition. Both tuned runs improve one-step and exact-window accuracy but increase x endpoint MAE from 1.813656 to 1.815813 pixels, endpoint ball errors from 12,320 to 12,381, and layout errors from 6,609 to 6,611. This is a small trade-off, not a uniform regression.
+
+The selected checkpoint reaches **99.9171%** exact combined accuracy,
+**99.9834%** count accuracy and **99.9771%** raw hit accuracy. Its hit detector
+has 37 false positives and 10 misses.
+Hit precision is 98.8247% and recall is 99.6796%. Overall hit accuracy includes
+many ordinary no-hit transitions; count accuracy also benefits from saturation.
+All candidates preserve existing ball/layout/contact predictions exactly.
+
+Rollouts now feed ball, bricks, contact and count back together. At horizon 128,
+159,995 of 174,841 overlapping windows remain entirely
+exact, **91.5089%**. Endpoint count errors number 4,908;
+ball/layout/contact endpoint errors are 12,320, 6,609
+and 697. Maximum x/y errors are 144.0000 and
+877.5000 pixels, so rare large drift persists. Paddle x, width, charge
+and reference life boundaries remain supplied. This is partial-state feedback;
+the preceding contact merge supplied true hit count and reached 92.2644% exact128.
+
+The predeclared selection gate requires no worse joint/count/hit one-step errors,
+exact128 count, x/y endpoint MAE or endpoint ball/layout/contact/count errors than
+composition. Among qualifying continuations choose fewer joint errors, then count
+errors, then seed. Selection uses development data; final tests remain reserved.
+Selected SHA-256: `c0df5706bf2268e90b94f9a979d89b0977a6d7bc726f03db22603a372dee3493`.
+
+All checkpoints reload with identical validation metrics. Frozen parameters and
+buffers, parent hashes and raw snapshot inventory remain unchanged. Full tests:
+409 passed, two skipped, including direct and latent train/checkpoint/play smoke
+checks. Ruff, compilation and whitespace checks pass. Added tests cover frozen
+state branches, count saturation, checkpoint reload and brute-force equivalence
+of coupled count feedback across life boundaries.
+
+Artifacts and reproduction instructions are in
+`logs/ball-bricks-contact-count-20260922/`. Next integration: paddle width.
+
+
+## Paddle width added to the transition container
+
+Add the historical `paddle-width-20260919/proposal-s2026/best.pt` predictor to
+`ball-bricks-contact-count-20260922/candidate.pt`. The registered
+`ball_paddle_width` model emits 115 values from the existing 118-value source:
+four ball fields, 108 bricks, contact, capped hit count and paddle width. Every
+branch reads the original source; all predictions are applied together. Shared
+MLP consolidation remains deferred until the container predicts the whole state.
+
+Keep the established state branch frozen/eval. Only the added width classifier
+trains: 33→64→64→2 ReLU, 6,466 parameters. Inputs are combined ball y, vertical
+velocity and current width, with scalar/binary encoding and a constant-velocity
+proposal feature. Output classes are 12 and 16 pixels. The model executes no
+native collision rule and uses no successor inputs, images or action history.
+
+Use the same migrated dataset revision `8f9838c532a2d6b622b4fc0bb5090fe6c534210f`
+and split `22284897f9fe400efa60772c7e47fc77c870f08b3869cc6d8202b9bac6b24636`.
+All 22 train/validation shard hashes still match the publisher inventory.
+Native audits and existing life/quality filters retain 1,640,422 training and
+205,075 validation transitions. Features and labels remain in RAM; no dataset
+columns or persistent feature caches are written. Final-test targets stay unread.
+
+Recorded width labels align exactly with the following source inside each life.
+Training contains 624,367 narrow-stay transitions, 1,015,072 wide-stay transitions
+and 983 shrinks from 16 to 12. Validation contains 74,409 narrow-stay, 130,551
+wide-stay and 115 shrinks. Neither split has an in-life widening. Reference life
+boundaries remain explicit; reset behavior is outside this experiment.
+
+The initial composition reproduces both parents on every validation source.
+Width is exact on all 205,075 transitions, including every actual width change.
+Other one-step errors remain ball 123, layout 16, contact 23 and count 34;
+combined errors stay 170. Zero observed width errors is not a guarantee for
+unseen or already-diverged rollout states.
+
+Compare fixed seeds 91 and 2026, both starting at the same composition. Each
+receives 6,000 AdamW updates, batch 192, LR 1e-5 cosine-decayed to 1e-6 and weight
+decay 1e-4. Sample 64 training examples from each of the three observed width
+transition strata per batch. This exposes the rare shrinks without mining
+validation mistakes. Cross-entropy uses recorded next width. All existing state
+parameters remain fixed. No hard mining or intermediate checkpoint selection.
+
+| Model | Width errors | Width-change errors | Joint errors | Entire 128-step window exact | Endpoint width errors | x / y endpoint MAE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Initial composition | 0 | 0 / 115 | 170 | 91.5089% | 960 | 1.8137 / 7.4769 px |
+| Width tuning seed 91 | 0 | 0 / 115 | 170 | 91.5089% | 713 | 1.8137 / 7.4769 px |
+| Width tuning seed 2026 | 0 | 0 / 115 | 170 | 91.5089% | 713 | 1.8137 / 7.4769 px |
+
+Selected **width tuning seed 91** as `runs/ball-paddle-width-20260922/candidate.pt`. Both continuations reduce endpoint width mismatches from 960 to 713 without changing the other measured errors. Both qualify; the predeclared tie-break chooses seed 91.
+
+The selected checkpoint has **100.0000%** one-step width accuracy and
+**99.9171%** exact combined accuracy. Rollouts feed predicted width into
+source column 5 alongside ball, bricks, contact and count. Of 174,841
+overlapping 128-step windows, 159,995 are completely exact,
+**91.5089%**. Endpoint width mismatches number 713.
+These mismatches can follow earlier ball divergence; they do not contradict the
+teacher-forced width score. Paddle x, charge and reference life boundaries remain
+supplied. The previous count merge supplied true width and reached 91.5089% exact128.
+
+Endpoint ball/layout/contact/count errors are 12,320,
+6,609, 697 and 4,908.
+Maximum x/y errors are 144.0000/877.5000 pixels;
+rare large drift remains. This is a partial-state integration test.
+
+The predeclared gate requires no worse joint/width/change-subset one-step errors,
+exact128 count, x/y endpoint MAE or endpoint ball/layout/contact/count/width errors
+than composition, plus at least one strict improvement. If every measure matches
+the composition, retain its original weights. Among qualifying continuations choose fewer joint errors, then width
+errors, then seed. This is development selection. Selected SHA-256:
+`81c780f2ad5cfc9a17bd763e088c9b7d513c01b57010676f3f7e012d7371e817`. Parent checkpoints and the historical reference stay fixed.
+
+Portable reload metrics, frozen tensors, parent hashes and raw snapshot inventory
+all verify unchanged. Full tests: 411 passed, two skipped, including direct and
+latent train/checkpoint/play smoke checks. Ruff, compilation and whitespace
+checks pass. New tests cover atomic width composition, frozen gradients/modes,
+checkpoint reload, and brute-force equivalence of width feedback across lives.
+Plans, reproduction scripts, per-event metrics and rollout witnesses are in
+`logs/ball-paddle-width-20260922/`. Next integration: paddle charge with action input.
+
+
+## Paddle charge added to the transition container
+
+Add `paddle-charge-s2026-20260918/best.pt` to the selected
+`ball-paddle-width-20260922/candidate.pt`. The registered `ball_paddle_charge`
+container accepts the existing 118 state values plus the current provider action
+at column 118. It emits 116 values: ball x, combined y, vx, vy, 108 bricks,
+contact, capped hit count, width and charge. Each branch reads the original
+current state; outputs are applied together. Shared-MLP consolidation remains
+postponed until the state container is complete.
+
+The charge adapter supplies current paddle x, charge and requested action to
+its historical 25→128→128→11 SiLU classifier. Scalar and binary state encoding
+plus action one-hot encoding produce the 25 features. Its classes are charge
+changes −120, −60, −9, −5, −1, 0, 1, 5, 9, 60 and 120. Decode the winning class
+and add it to current charge without clipping. Only its 21,259 parameters train;
+the entire established state branch stays frozen/eval. Inference uses no native
+controller rules or successor information.
+
+Use the same migrated HF revision `8f9838c532a2d6b622b4fc0bb5090fe6c534210f`
+and split `22284897f9fe400efa60772c7e47fc77c870f08b3869cc6d8202b9bac6b24636`.
+All 22 train/validation shards match their publisher hashes. Existing life and
+quality filters retain 1,640,422 training and 205,075 validation transitions.
+Replay the audited controller from reset metadata and full action history in
+RAM to recover current/next charge. Recorded paddle observations match replay;
+next charge agrees with the next source on all 1,638,465 training and 204,829
+validation contiguous pairs. No dataset columns or feature caches are written.
+Final-test targets remain unread.
+
+Requested and effective/provider actions agree on every retained transition.
+Internal replay uses emulator codes 1–3, while this model receives provider
+codes 0–2; the conversion is explicit. Startup/serve behavior remains outside
+this active-play experiment. Training action counts are 542,265 / 565,643 /
+532,514; validation counts are 69,731 / 69,269 / 66,075. Nine charge-delta classes
+occur in training and six in validation, all covered by the original output
+head. Initial composition reproduces both parent predictions on every validation
+source. Charge has zero errors, including all 132,141 actual changes. Existing
+one-step errors stay ball 123, layout 16, contact 23, count 34 and width zero.
+
+Compare fixed seeds 91 and 2026. Both start from the same parent weights and
+receive 6,000 AdamW updates, LR 1e-5 cosine-decayed to 1e-6, weight decay 1e-4,
+and batch 192 with 64 randomly sampled training examples per action. Charge-delta
+cross-entropy is the only training loss. No validation mining or intermediate
+checkpoint selection is used. Rare charge changes remain rare under this
+sampling; perfect observed validation accuracy does not establish full coverage.
+
+| Model | Charge errors | Joint errors | Entire 128-step window exact | Endpoint charge errors | x / y endpoint MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial composition | 0 | 170 | 91.5089% | 0 | 1.8137 / 7.4769 px |
+| Charge tuning seed 91 | 0 | 170 | 91.5089% | 0 | 1.8137 / 7.4769 px |
+| Charge tuning seed 2026 | 0 | 170 | 91.5089% | 0 | 1.8137 / 7.4769 px |
+
+Selected **initial composition** as `runs/ball-paddle-charge-20260922/candidate.pt`. Neither continuation supplies a strict improvement while passing every no-regression check. Charge is integrated into the new checkpoint with its original weights; all previously integrated predictors remain fixed.
+
+Selected one-step charge accuracy is **100.0000%** and exact combined
+accuracy **99.9171%**, with 170 incorrect transitions.
+Joint rollouts feed predicted charge into source column 6 alongside ball,
+bricks, contact, count and width. Each step still receives its recorded current
+action; action is never overwritten by state feedback. Across 174,841
+overlapping 128-step windows, 159,995 are entirely exact
+(**91.5089%**). Endpoint charge errors: 0; charge
+MAE: 0.000000; invalid charge predictions: 0.
+Paddle x and reference life boundaries remain supplied. Thus these are partial
+state rollouts under recorded actions, not closed-loop policy evaluations.
+
+Endpoint ball/layout/contact/count/width errors are 12,320 /
+6,609 / 697 / 4,908 /
+713. Endpoint x/y MAE is 1.8137/7.4769 pixels;
+maximum error is 144.0000/877.5000 pixels.
+
+Selection requires no worse combined/charge/change-subset one-step errors,
+invalid charge predictions, exact128 count, x/y/charge MAE or endpoint field
+errors than initial composition, plus at least one strict improvement. Ties
+retain the parent weights; qualifying continuations sort by joint errors, charge
+errors, then seed. This is development selection, with SHA-256:
+`987e4134ab8d69a4f5217b87ff9f292cf4b957d6090f9b19e6862d15c453cc97`. Parent checkpoints and the historical reference stay fixed.
+
+Reproduce the fixed experiment from the repository root with
+`PYTHONPATH=. uv run python logs/ball-paddle-charge-20260922/reproduce.py`.
+This requires the recorded parent checkpoints, raw snapshot and audit helpers.
+It repeats integrity checks, RAM preparation, baseline comparison, training,
+rollouts and checkpoint selection. Tests and documentation generation are separate.
+
+Full suite: 414 passed, two skipped, including direct and latent
+train/checkpoint/play smoke checks. Ruff, compilation and whitespace checks pass.
+Portable reload, frozen tensors, parent hashes and raw snapshot inventory verify
+unchanged. New tests exercise the action adapter, reject invalid action codes,
+check charge feedback against brute force across life boundaries, and confirm
+that charge training preserves every established predictor. Reproduction scripts,
+plans, per-action/event metrics and rollout witnesses are under
+`logs/ball-paddle-charge-20260922/`. Next integration: paddle position, then
+life-loss termination before autonomous full-state rollouts.
+
+
+## Paddle position added to the transition container
+
+Add `paddle-minimal-charge-s2026-20260918/best.pt` to the selected
+`ball-paddle-charge-20260922/candidate.pt`. The registered `ball_paddle_position`
+container keeps 119 inputs: 118 current-state values and current provider action.
+It emits 117 values: ball x, combined y, vx, vy, 108 bricks, contact, capped hit
+count, width, charge and paddle x. All branches read the original current state,
+then their outputs are applied together. Shared-MLP consolidation remains deferred.
+
+The added 25→128→128→23 SiLU classifier uses current paddle x, charge and action.
+Scalar and binary encoding of x/charge plus one-hot action produce 25 features.
+It classifies integer paddle displacement from −11 through 11, then adds the
+winning class to current paddle x without clipping. Only its 22,807 parameters
+train. Every established state branch, including charge, stays frozen/eval.
+Neither predicted next charge nor native controller rules enter this predictor.
+
+Use migrated HF revision `8f9838c532a2d6b622b4fc0bb5090fe6c534210f` and split
+`22284897f9fe400efa60772c7e47fc77c870f08b3869cc6d8202b9bac6b24636`.
+The 22 train/validation shards still match publisher hashes. Existing life/quality
+filters retain 1,640,422 training and 205,075 validation transitions. Paddle x
+labels come directly from recorded successors, converted to integer pixels.
+They match following source positions on all 1,638,465 training and 204,829
+validation contiguous pairs. Controller replay still audits hidden source state
+and charge labels in RAM. Dataset columns and feature caches are unchanged;
+final-test targets stay unread.
+
+Both splits contain all 23 displacement classes. Requested and executed actions
+agree on every retained active-play transition. The initial composition reproduces
+both parent predictors on every validation source; existing errors stay ball 123,
+layout 16, contact 23, count 34, width zero and charge zero.
+
+Compare two fixed continuations, seeds 91 and 2026. Each starts from the same
+composition and receives 6,000 AdamW updates, batch 192 with 64 randomly sampled
+training rows per action, LR 1e-5 cosine-decayed to 1e-6, and weight decay 1e-4.
+Paddle-displacement cross-entropy is the only fitted loss. No validation mining
+or intermediate checkpoint selection is used.
+
+| Model | Paddle x errors | Joint errors | Entire 128-step window exact | Endpoint paddle x / charge errors | x / y endpoint MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial composition | 79 | 249 | 88.3889% | 105 / 0 | 1.8137 / 7.4769 px |
+| Position tuning seed 91 | 35 | 205 | 90.0675% | 45 / 0 | 1.8137 / 7.4769 px |
+| Position tuning seed 2026 | 34 | 204 | 90.0675% | 43 / 0 | 1.8137 / 7.4769 px |
+
+Selected **position tuning seed 2026** as `runs/ball-paddle-position-20260922/candidate.pt`. The continuation passes every predeclared no-regression check and supplies a strict improvement.
+
+Selected paddle-position accuracy is **99.9834%**, with
+34 / 205,075 errors, MAE 0.00016579 pixels and
+maximum error 1.0000 pixels. Exact combined accuracy is
+**99.9005%**, with 204 incorrect transitions.
+
+Rollouts now feed every compact state field back together. Paddle x output 116
+updates source column 4, while charge output 115 updates column 6. Current action
+is taken from each recorded transition. Across 174,841 overlapping
+128-step windows, 157,475 are entirely correct
+(**90.0675%**). Endpoint paddle-position errors are
+43, MAE 0.000292 pixels, maximum
+4.0000 pixels. Endpoint charge errors are
+0, charge MAE 0.000000, with
+0 out-of-range charge predictions.
+The prior charge container reached 91.5089% exact128 while receiving true paddle
+position; this experiment removes that remaining state correction.
+
+Endpoint ball/layout/contact/count/width errors are 12,320 /
+6,609 / 697 / 4,908 /
+713. Mean endpoint ball x/y errors are
+1.8137/7.4769 pixels, maximum
+144.0000/877.5000 pixels. These are recorded-action,
+within-life rollouts. Reference life boundaries still stop windows; terminal
+transitions and wall refill behavior are outside this experiment. This is not yet
+an autonomous emulator or an RGB player integration.
+
+The predeclared gate requires no worse joint/paddle-x/change-subset one-step
+errors, exact128 count, x/y/paddle-x/charge endpoint MAE, invalid charge predictions
+or endpoint ball/layout/contact/count/width/charge/paddle-x errors than initial
+composition, plus a strict improvement. Ties retain composition; qualifying
+continuations sort by joint errors, paddle-x errors, then seed. Selected SHA-256:
+`0693e80263ccde9eaa2695ced7d913baf733991a75f9c5f90d8f9dc75cd9c77a`. Selection uses development validation, not reserved test.
+
+Portable checkpoint reload metrics agree; frozen tensors, parent hashes and raw
+snapshot inventory remain unchanged. Full suite: 417 passed, two skipped,
+including direct and latent train/checkpoint/play smoke checks. Ruff, compilation
+and whitespace checks pass. New tests verify current-state composition, frozen
+training behavior, checkpoint round trips and coupled paddle position/charge
+feedback against brute force across life boundaries.
+
+Reproduce from the repository root with
+`PYTHONPATH=. uv run python logs/ball-paddle-position-20260922/reproduce.py`.
+This requires the recorded raw snapshot, parent checkpoints and audit helpers.
+It runs integrity checks, RAM preparation, baseline equivalence, training,
+rollouts and selection. Tests and document generation run separately. Metrics,
+plans, per-action/event breakdowns and witnesses are in
+`logs/ball-paddle-position-20260922/`. Next integration: life-loss termination.
