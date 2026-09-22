@@ -1,7 +1,8 @@
 # Learned state-model status
 
-Updated 2026-09-22. These are separate diagnostic models, not an integrated
-recursive emulator. Validation selects checkpoints; reserved-test results are
+Updated 2026-09-22. This includes isolated predictors and partially combined
+state-transition models. Full recursive emulation remains incomplete.
+Validation selects checkpoints; reserved-test results are
 identified explicitly. Results from different targets and input contracts are
 not interchangeable. Percentages denote exact predictions unless stated otherwise.
 Layer lists include encoded input size and output size where the compact contract
@@ -27,6 +28,12 @@ is established. MLP means a fully connected neural network.
 | Next capped paddle-hit count | 96→256→256→256→2 ReLU hit classifier, cross-entropy; decode `min(12, count + hit)`. 156,930 fitted parameters plus frozen vertical parent | Hit detection uses current ball x, RAM y, vx, vy, fractional y, paddle x, width and charge. Frozen intermediate-paddle prediction and geometric/binary encoding. Current count enters only the decoder | **100% validation count accuracy**, 0 / 88,590. **99.9978% reused-test count accuracy**, 1 / 45,245; all 377 increments and 801 actual hits detected, one false hit. With count and contact fed back, **99.9912%**, 4 count errors across 52 life segments. Selected detector also has one false validation hit at saturated count 12. |
 | Combined y, fractional y, and vy | Original y/vy pair frozen; 10→64→64→8 ReLU correction, cross-entropy; 5,384 fitted parameters | Current vy, predicted y displacement, and eight original vy probabilities. Original predictors use their established current-state contract | **100% validation** through all 78,806 eligible 128-step windows. Reused-test one-step joint errors **7→3 / 45,245**. Fully exact 128-step windows **98.6965%→99.4286%**, 511→224 failed windows / 39,203. Only vertical fields fed back; other state supplied and reference life boundaries enforced. |
 | Combined ball motion: x, y with fraction, vx, vy | One `ball_motion` checkpoint containing the horizontal independent pair and vertical specialized pair; six CE objectives; 689,916 trainable parameters | Same 118-value current state, simultaneous updates; current non-ball fields supplied | **99.9400% exact joint new-validation accuracy**, 123 / 205,075 errors. **93.3265% fully exact 128-step ball-feedback windows**, 11,668 / 174,841 failed. Mean endpoint errors x **1.6682 px**, y **6.3050 px**. Selected new merge candidate; not a full-state emulator or reserved-test result. |
+| Combined ball motion and brick layout | One `ball_bricks` checkpoint with specialized ball and 109-class brick-event heads; 746,046 trainable parameters in continuation experiments | Same 118-value current state; all outputs applied together | Retained composition: **99.9337% joint accuracy**, 136 / 205,075 errors; complete layout **99.9922%**, 16 errors. **92.5407%** exact 128-step ball/layout windows. Joint continuations regress layout accuracy and remain diagnostic. Contact/paddle/count state and reference life boundaries still supplied. |
+| Combined ball, bricks and contact | One `ball_bricks_contact` checkpoint; existing ball/layout branches plus 86→128→128→2 contact head; 773,952 trainable parameters | Same 118-value state; 113 outputs applied together | **99.9293%** joint accuracy, 145 / 205,075 errors. Contact **99.9888%**, 23 errors. **92.2644%** exact128 windows. Paddle/count fields and life boundaries still supplied. |
+| Combined ball, bricks, contact and hit count | One `ball_bricks_contact_count` container; added 96→256→256→256→2 hit classifier, 156,930 trainable parameters this stage; existing state branch frozen | Same 118-value state; 114 outputs applied together | **99.9171%** exact joint validation, 170 / 205,075 errors. Count **99.9834%**, 34 errors. **91.5089%** entirely exact128 windows. Paddle x/width/charge and life boundaries supplied. |
+| Combined ball, bricks, contact, count and paddle width | One `ball_paddle_width` container; added 33→64→64→2 ReLU width head, 6,466 trainable parameters this stage; existing state frozen | Same 118-value source; 115 simultaneous outputs | **99.9171%** joint validation accuracy, 170 / 205,075 errors. Width **100.0000%**, 0 errors, 0 / 115 change errors. **91.5089%** entirely exact128 windows. Paddle x/charge and life boundaries supplied. |
+| Combined ball, bricks, contact, count, width and charge | One `ball_paddle_charge` container; added 25→128→128→11 SiLU charge classifier, 21,259 trainable parameters this stage; existing state frozen | 118 state values plus current action; 116 simultaneous outputs. Charge uses paddle x, charge and action | **99.9171%** exact joint validation, 170 / 205,075 errors. Charge **100.0000%**, 0 errors. **91.5089%** entirely exact128 windows; 0 endpoint charge errors. Paddle x and life boundaries supplied. |
+| Combined compact state including paddle position | One `ball_paddle_position` container; added 25→128→128→23 SiLU position classifier, 22,807 fitted parameters this stage; previous predictors frozen | 118 state values plus action; 117 outputs. Position uses current paddle x, charge and action | **99.9005%** exact joint validation, 204 / 205,075 errors. Paddle x **99.9834%**, 34 errors. **90.0675%** entirely exact128 windows, with all compact state fields fed back. Recorded actions and life boundaries supplied. |
 | Life-loss terminal flag | 31→64→64→2 ReLU classifier, cross-entropy; 6,338 fitted parameters | Current RAM ball y, fractional y, and vy; scalar/binary encoding includes `y + vy`. No lives, action, or history inputs | **100% validation**, 0 / 88,638 errors, all 48 deaths exact. **100% reused-test accuracy**, 0 / 45,283, all 38 deaths on the exact step and no premature stops across 52 segments. Recorded current ball state; full-state feedback remains untested. Supersedes the older history-based probe with F1 0.299. |
 
 The older context contains eight full state observations, seven prior requested
@@ -269,7 +276,104 @@ large drift remains; this is an integration result, not perfect simulation.
 
 Use `runs/ball-motion-20260922/candidate.pt` for the next merge, copied from the
 fixed final seed-91 continuation. Seed 2026 slightly worsens y drift and stays
-diagnostic. Parent files and the historical reference remain unchanged. Brick
-layout is the next planned merge. Non-ball fields and reference life boundaries
+diagnostic. Parent files and the historical reference remain unchanged. The subsequent merge adds brick
+layout. Non-ball fields and reference life boundaries
 are still supplied; final-test targets remain reserved. See
 [the merge record](training.md#four-variable-ball-state-merge).
+
+
+## Ball and brick-layout merge
+
+The merged `ball_bricks` model now emits ball state and all 108 brick cells
+from one checkpoint. The composition preserves both parents' predictions exactly.
+On 205,075 new-validation sources it has 123 ball errors, 16 complete-layout
+errors and 136 jointly incorrect transitions, or **99.9337%** exact combined
+accuracy. Coupled feedback gives **92.5407%** entirely exact 128-step windows,
+with mean endpoint errors x 1.7137 / y 6.6627 pixels. Other state and reference
+life boundaries remain supplied; wall refills remain unsupported.
+
+Two joint continuations reduce ball errors to 121/122 but increase layout errors
+to 46/50 and joint errors to 164/169, with worse recursive results. Keep the
+original composition as `runs/ball-bricks-20260922/candidate.pt` and continue the
+merge sequence without additional tuning. The following merge adds brick-contact memory. No dataset changes or final-test reads. See
+[the merge record](training.md#ball-and-brick-layout-merge).
+
+
+## Ball, bricks and contact merge
+
+The `ball_bricks_contact` model now predicts all four ball fields, 108 brick cells
+and contact from one checkpoint. On the migrated dataset it reaches
+**99.9293%** exact joint validation accuracy (145 / 205,075
+incorrect transitions); contact alone is **99.9888%** (23 errors).
+Ball and layout errors are 123 and 16.
+Coupled 128-step feedback gives **92.2644%** entirely
+exact windows, with x/y endpoint MAE 1.7578/7.2773 pixels.
+
+The selected checkpoint is `runs/ball-bricks-contact-20260922/candidate.pt`.
+Both joint continuations regress accuracy, so retain the original composition.
+The merge is complete; further tuning stays deferred. Both seeds reproduce the
+prior ball/layout continuation weights exactly: adding contact loss did not
+cause the existing brick regression.
+
+The migrated revision preserves the old train/validation values and assignments.
+No dataset writes or final-test reads. Paddle state, hit count and reference life
+boundaries remain supplied. The following merge adds prior paddle-hit count. See
+[the experiment](training.md#ball-bricks-and-contact-merge-on-migrated-data).
+
+
+## Paddle-hit count container merge
+
+Selected **initial composition** as `runs/ball-bricks-contact-count-20260922/candidate.pt`. Neither continuation meets the predeclared gate, so retain the initial composition. Both tuned runs improve one-step and exact-window accuracy but increase x endpoint MAE from 1.813656 to 1.815813 pixels, endpoint ball errors from 12,320 to 12,381, and layout errors from 6,609 to 6,611. This is a small trade-off, not a uniform regression.
+It predicts ball state, all 108 bricks, contact and capped hit count together.
+On 205,075 validation transitions, combined accuracy is **99.9171%** with
+170 errors; count accuracy is **99.9834%** with 34 errors.
+Raw hit detection has 47 errors, including 37 false
+positives and 10 misses. Count saturation can hide detector errors.
+
+Only the new count classifier was tuned. Existing ball, layout and contact
+predictions remain unchanged. Joint feedback reaches **91.5089%** entirely
+exact128 windows; mean endpoint x/y error is 1.8137/7.4769 pixels.
+Paddle x, width, charge and life boundaries still come from the reference data.
+No dataset changes or final-test reads. The following integration adds paddle width. See
+[the full record](training.md#paddle-hit-count-added-to-the-transition-container).
+
+
+## Paddle width container merge
+
+Selected **width tuning seed 91** as `runs/ball-paddle-width-20260922/candidate.pt`. Both continuations reduce endpoint width mismatches from 960 to 713 without changing the other measured errors. Both qualify; the predeclared tie-break chooses seed 91.
+The container now predicts ball, bricks, contact, count and width together.
+Width accuracy is **100.0000%** over 205,075 validation transitions, including
+115 / 115 real shrinks. Combined accuracy is
+**99.9171%**, with 170 incorrect transitions.
+
+Joint feedback gives **91.5089%** completely exact128 windows and
+713 endpoint width mismatches. The latter can follow earlier
+ball divergence. Mean endpoint x/y error is 1.8137/7.4769 pixels.
+Paddle x, charge and life boundaries remain supplied. Dataset unchanged, final-test
+targets unread. The following integration adds paddle charge with action input. See
+[the full record](training.md#paddle-width-added-to-the-transition-container).
+
+
+## Paddle charge container merge
+
+Selected **initial composition** as `runs/ball-paddle-charge-20260922/candidate.pt`. Neither continuation supplies a strict improvement while passing every no-regression check. Charge is integrated into the new checkpoint with its original weights; all previously integrated predictors remain fixed.
+Charge uses current paddle x, charge and action. On 205,075 validation transitions,
+charge accuracy is **100.0000%**; combined accuracy stays **99.9171%**.
+With charge fed back, **91.5089%** of 128-step windows are entirely exact,
+with 0 endpoint charge errors. Current actions, paddle x and
+reference life boundaries are supplied. Dataset unchanged; final-test targets
+unread. The following integration adds paddle position. See
+[the full record](training.md#paddle-charge-added-to-the-transition-container).
+
+
+## Paddle position container merge
+
+Selected **position tuning seed 2026** as `runs/ball-paddle-position-20260922/candidate.pt`. The continuation passes every predeclared no-regression check and supplies a strict improvement.
+Paddle-position accuracy is **99.9834%** on 205,075 validation transitions;
+combined accuracy is **99.9005%**. Entirely exact128 windows:
+**90.0675%** with every compact state field fed back. Endpoint paddle
+position errors: 43; charge errors: 0.
+Recorded actions and reference life boundaries remain supplied; terminal
+transitions are excluded. Dataset unchanged; final-test targets unread.
+Next: life-loss termination. See
+[the full record](training.md#paddle-position-added-to-the-transition-container).

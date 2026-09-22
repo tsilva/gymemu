@@ -125,7 +125,43 @@ one-step and exact-path accuracy. Horizontal paddle interactions remain the main
 The next [ball-state merge](docs/training.md#four-variable-ball-state-merge)
 combines x, y with its fractional part, vx and vy in one checkpoint. It reaches
 99.9400% exact joint validation accuracy and 93.3265% entirely exact 128-step
-ball-feedback windows. The selected candidate is ready for the brick-layout merge.
+ball-feedback windows.
+The [ball and brick-layout merge](docs/training.md#ball-and-brick-layout-merge)
+now emits both from one checkpoint, with 99.9337% joint accuracy and 92.5407%
+exact coupled 128-step windows. Joint continuation regressed bricks, so the
+selected candidate preserves the parent weights.
+
+The [ball/bricks/contact merge](docs/training.md#ball-bricks-and-contact-merge-on-migrated-data)
+adds contact memory: **99.9293%** exact joint validation accuracy and
+**92.2644%** exact 128-step windows while feeding all these
+fields back. It uses the verified schema-v1 migration at revision `8f9838c`,
+with unchanged train/validation records. Paddle/count state and life boundaries
+remain supplied.
+
+The [count integration](docs/training.md#paddle-hit-count-added-to-the-transition-container)
+adds capped paddle-hit count while keeping the existing branches frozen. It reaches
+**99.9171%** exact combined validation accuracy, **99.9834%** count accuracy,
+and **91.5089%** entirely exact 128-step windows with count fed back too.
+Paddle x/width/charge and reference life boundaries remain supplied.
+
+The [width integration](docs/training.md#paddle-width-added-to-the-transition-container)
+adds paddle width with **100.0000%** exact validation accuracy, including all
+115 width-change cases. The combined container scores **99.9171%** one-step
+accuracy and **91.5089%** entirely exact128 windows with width fed back.
+Paddle x, charge and reference life boundaries remain supplied.
+
+The [charge integration](docs/training.md#paddle-charge-added-to-the-transition-container)
+adds current action input and predicts next paddle charge with **100.0000%**
+validation accuracy. Combined one-step accuracy is **99.9171%**, with
+**91.5089%** entirely exact128 windows when charge is fed back too.
+Paddle x and reference life boundaries remain supplied.
+
+The [paddle-position integration](docs/training.md#paddle-position-added-to-the-transition-container)
+feeds every compact state field back, including paddle position and charge.
+Paddle-position validation accuracy is **99.9834%**, combined accuracy
+**99.9005%**, and entirely exact128 windows **90.0675%**.
+Actions and life boundaries remain recorded; termination prediction is next.
+
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)

@@ -3848,3 +3848,162 @@ claim. No dataset changes, final-test reads, mining or extra tuning. Frozen
 parameters/buffers, parent hashes and reload metrics verify exactly. All 403 tests
 pass with two skips, including bounded direct/latent train/play checks; Ruff and
 whitespace checks pass. See [the full record](training.md#four-variable-ball-state-merge).
+
+
+## 2026-09-22: ball and brick-layout integration
+
+Merge the selected ball-motion candidate with the historical brick predictor
+inside one registered `ball_bricks` checkpoint. Verify identical parent outputs
+on all 205,075 validation sources. The composition has 123 ball-state errors,
+16 complete-layout errors and 136 joint errors, or 99.9337% exact joint accuracy.
+The native-data audit confirms zero additions, multiple removals or wall clears;
+wall refill prediction remains unsupported.
+
+Two 6,000-update joint continuations use new fitting data only. Ball errors
+slightly improve to 121/122, while layout errors rise to 46/50 and joint errors
+to 164/169. Most extra layout errors occur on ordinary transitions. The branches
+have separate trainable parameters, so this is not evidence of representation-
+sharing interference. Do not start further tuning or mining at this merge step.
+
+With all ball/layout outputs fed back, the composition keeps 92.5407% of eligible
+128-step windows completely exact, versus 91.3642%/91.1085% after continuation.
+Mean x/y endpoint error is 1.7137/6.6627 pixels before continuation and
+1.9903/8.9587 or 1.8814/8.7854 afterward. Keep the original composition as
+`runs/ball-bricks-20260922/candidate.pt`. Both trained alternatives remain
+diagnostic. The merge is complete; brick-contact memory is the next addition.
+Other state and life boundaries remain supplied, and rare large drift persists.
+
+Verify complete checkpoint reload metrics, frozen weights/buffers, parent hashes
+and raw snapshot inventory. All 405 tests pass with two skips, including direct/
+latent train-play smoke checks. Ruff and whitespace checks pass. No dataset
+changes or final-test targets read. See [the full record](training.md#ball-and-brick-layout-merge).
+
+
+## 2026-09-22: Migrated dataset and ball/bricks/contact integration
+
+Gradlab's schema-v1 migration preserves all decoded train/validation records and
+split assignments. Check 22 shard hashes and physical schemas at revision
+`8f9838c532a2d6b622b4fc0bb5090fe6c534210f`; select the new split explicitly because
+old immutable paths remain available. No dataset modification or final-test read.
+
+Compose the selected ball/layout model with the historical learned contact head.
+Parent predictions remain exact: initial ball 123 errors, layout 16, contact 23,
+and joint 145 on 205,075 validation transitions. Compare two fixed 6,000-update
+joint continuations using one sampled batch and preserved frozen dependencies.
+
+| Model | Ball errors | Layout errors | Contact errors | Joint errors | Exact 128-step windows | x / y MAE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Atomic composition | 123 | 16 | 23 | 145 | 92.2644% | 1.7578 / 7.2773 px |
+| Continuation seed 91 | 121 | 46 | 33 | 186 | 90.5983% | 1.9157 / 8.0000 px |
+| Continuation seed 2026 | 122 | 50 | 29 | 187 | 90.4513% | 1.8523 / 8.1014 px |
+
+Retain atomic composition as `runs/ball-bricks-contact-20260922/candidate.pt`. It has **99.9293%** exact joint accuracy and **99.9888%** contact accuracy. Neither fixed continuation passes the predeclared no-regression gate. The model merge is complete; further tuning stays deferred. The portable model retains specialized branches with separate hidden layers. For both seeds, all 354 ball/layout parameter and buffer tensors exactly match the prior ball/layout-only continuation. Adding the contact loss did not cause the existing brick regression.
+
+All ball/bricks/contact outputs are now fed back together in the rollout test.
+Paddle state, hit count and reference life boundaries remain supplied. Thus exact
+window accuracy scores more predicted fields than the previous merge. The
+branches do not share trainable weights; regressions do not establish gradient
+interference. Checkpoints reload with identical metrics, and parent files,
+frozen state and raw data remain unchanged. Full tests: 407 passed, two skipped.
+See [the full record](training.md#ball-bricks-and-contact-merge-on-migrated-data).
+
+
+## 2026-09-22: Paddle-hit count joins the state-transition container
+
+Add next capped hit count to the ball/bricks/contact container. Freeze the
+established predictors and tune only the added hit classifier, following the
+prior joint-continuation regressions. Use unchanged migrated train/validation
+records, audit native count labels, and leave final-test targets unread.
+
+Initial composition preserves parent predictions exactly. It has 34 count
+errors and 47 hit errors on 205,075 validation transitions. Saturation at 12 hides
+13 detector errors, so supervision and diagnostics retain actual hit labels.
+Compare two fixed 6,000-update count-only continuations.
+
+| Model | Count errors | Hit errors | Joint errors | Entire 128-step window exact | x / y endpoint MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial composition | 34 | 47 | 170 | 91.5089% | 1.8137 / 7.4769 px |
+| Count tuning seed 91 | 28 | 38 | 163 | 91.6015% | 1.8158 / 7.4646 px |
+| Count tuning seed 2026 | 29 | 39 | 163 | 91.6015% | 1.8158 / 7.4646 px |
+
+Selected **initial composition** as `runs/ball-bricks-contact-count-20260922/candidate.pt`. Neither continuation meets the predeclared gate, so retain the initial composition. Both tuned runs improve one-step and exact-window accuracy but increase x endpoint MAE from 1.813656 to 1.815813 pixels, endpoint ball errors from 12,320 to 12,381, and layout errors from 6,609 to 6,611. This is a small trade-off, not a uniform regression.
+
+Combined accuracy is 99.9171%; count accuracy is 99.9834%. All candidate
+ball/layout/contact one-step outputs remain unchanged. Feed count back alongside
+them and obtain 91.5089% entirely exact128 windows for the selected model.
+Paddle state and reference life boundaries remain supplied. This does not measure
+full autonomous simulation. All frozen tensors and parent files remain unchanged.
+Full tests: 409 passed, two skipped. See
+[the experiment](training.md#paddle-hit-count-added-to-the-transition-container).
+
+
+## 2026-09-22: Paddle width joins the state-transition container
+
+Add width as output 114 of `ball_paddle_width`. Preserve the existing ball,
+brick, contact and count predictors; tune only the 6,466-parameter width head.
+The initial composition has no width errors on 205,075 validation transitions,
+including all 115 shrinks. Combined one-step errors remain 170. The same migrated
+train/validation data is used without modification; final-test targets remain unread.
+Compare two fixed 6,000-update continuations balanced across width-transition strata.
+
+| Model | Width errors | Width-change errors | Joint errors | Entire 128-step window exact | Endpoint width errors | x / y endpoint MAE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Initial composition | 0 | 0 / 115 | 170 | 91.5089% | 960 | 1.8137 / 7.4769 px |
+| Width tuning seed 91 | 0 | 0 / 115 | 170 | 91.5089% | 713 | 1.8137 / 7.4769 px |
+| Width tuning seed 2026 | 0 | 0 / 115 | 170 | 91.5089% | 713 | 1.8137 / 7.4769 px |
+
+Selected **width tuning seed 91** as `runs/ball-paddle-width-20260922/candidate.pt`. Both continuations reduce endpoint width mismatches from 960 to 713 without changing the other measured errors. Both qualify; the predeclared tie-break chooses seed 91.
+
+Feed width back alongside all previously merged fields. Selected exact-window
+accuracy is 91.5089% at 128 steps. Width mismatch after earlier ball
+errors is distinct from teacher-forced width accuracy. Paddle x, charge and true
+life boundaries remain supplied. Checkpoint reloads and frozen-state checks pass.
+Full suite: 411 passed, two skipped. See
+[the experiment](training.md#paddle-width-added-to-the-transition-container).
+
+
+## 2026-09-22: Paddle charge joins the action-conditioned container
+
+Add the 25→128→128→11 charge classifier to the frozen width container. The
+source now appends the current action to 118 state values; next charge is output
+115. The new dataset's retained requested/executed actions agree, and audited
+controller replay supplies aligned charge labels in RAM. Initial composition has
+zero charge errors over 205,075 validation transitions. Compare two fixed,
+action-balanced 6,000-update continuations, with only charge weights trainable.
+
+| Model | Charge errors | Joint errors | Entire 128-step window exact | Endpoint charge errors | x / y endpoint MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial composition | 0 | 170 | 91.5089% | 0 | 1.8137 / 7.4769 px |
+| Charge tuning seed 91 | 0 | 170 | 91.5089% | 0 | 1.8137 / 7.4769 px |
+| Charge tuning seed 2026 | 0 | 170 | 91.5089% | 0 | 1.8137 / 7.4769 px |
+
+Selected **initial composition** as `runs/ball-paddle-charge-20260922/candidate.pt`. Neither continuation supplies a strict improvement while passing every no-regression check. Charge is integrated into the new checkpoint with its original weights; all previously integrated predictors remain fixed.
+
+Charge feedback achieves 0 endpoint charge errors over
+174,841 overlapping 128-step windows. Exact whole-window accuracy is
+91.5089%; paddle x and reference life boundaries are still supplied.
+Dataset unchanged; final-test targets unread. Full suite: 414 passed, two skipped.
+See [the experiment](training.md#paddle-charge-added-to-the-transition-container).
+
+
+## 2026-09-22: Paddle position completes compact-state feedback
+
+Add the minimal-input paddle-position classifier to the frozen charge container.
+All 117 outputs now feed the next compact state, using recorded actions and life
+boundaries. Fit only the added 22,807-parameter position branch in two fixed,
+action-balanced 6,000-update continuations. Labels use recorded successor paddle
+positions; no dataset modifications or final-test reads.
+
+| Model | Paddle x errors | Joint errors | Entire 128-step window exact | Endpoint paddle x / charge errors | x / y endpoint MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial composition | 79 | 249 | 88.3889% | 105 / 0 | 1.8137 / 7.4769 px |
+| Position tuning seed 91 | 35 | 205 | 90.0675% | 45 / 0 | 1.8137 / 7.4769 px |
+| Position tuning seed 2026 | 34 | 204 | 90.0675% | 43 / 0 | 1.8137 / 7.4769 px |
+
+Selected **position tuning seed 2026** as `runs/ball-paddle-position-20260922/candidate.pt`. The continuation passes every predeclared no-regression check and supplies a strict improvement.
+
+Selected one-step paddle x accuracy is 99.9834%; combined accuracy is
+99.9005%. Entirely exact128 windows: 90.0675%, now with predicted paddle
+position and charge. Reference termination remains; autonomous stopping is next.
+Full suite: 417 passed, two skipped. See
+[the experiment](training.md#paddle-position-added-to-the-transition-container).
