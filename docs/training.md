@@ -4116,3 +4116,116 @@ Plans, checkpoints, per-window counts and audits are under the matching ignored
 paths. RGB player/shared-runner behavior remains unchanged. All compact-state
 branches and learned termination are now in one container; recursive accuracy
 still needs work before shared-MLP consolidation or playable-emulator claims.
+
+
+## First errors in full-state rollouts
+
+Read-only diagnosis on 2026-09-22 of the selected life-termination container,
+SHA-256 `05c5d195c0b280a083ac8c53d5544a9ffe889f199491ab28635c529c793d8916`.
+Use the same migrated dataset revision and explicit train/validation split as the
+termination experiment above. Recheck all 22 raw shard hashes. Reconstruct inputs
+in RAM with the existing native/controller replay audits; do not write dataset
+columns or persistent feature caches. No fitting, checkpoint selection or
+final-test reads occur.
+
+Replay all 246 validation segments with recorded actions. The baseline exactly
+reproduces 141 entirely exact segments, 169 exact deaths, 62 early deaths, eight
+missed deaths, five false stops in censored segments, 12,174 state-error steps and
+165,026 simulated transitions. A missed death is still censored at the reference
+boundary. Trace the first erroneous prediction in each of the 105 divergent
+segments, verifying that its incoming state is exactly the recorded state: these
+are initiating errors, not mistakes caused by earlier erroneous feedback.
+
+| First erroneous transition involves | Segments |
+| --- | ---: |
+| Ball position or velocity | 67: 52 paddle region, 15 upper region |
+| Paddle-hit count | 18 |
+| Paddle position | 14 |
+| Bricks or contact | 12 |
+| Width, charge or stopping | 0 |
+
+Six transitions involve both ball and another category; counts therefore overlap.
+There are 61 ball-only, 38 other-only and six mixed first failures. Median first
+error is transition 332 after initialization (range 18–2,731). Of the 105 first
+errors, 44 occur on actual paddle collisions, 16 on brick collisions, four on
+side-wall-only collisions and 41 on transitions with no recorded collision.
+The source-defined paddle region includes near misses; it is broader than the
+actual collision event.
+
+### Correct the first error once to measure its consequences
+
+These **oracle interventions use validation truth only for diagnosis**. At the
+original first-error transition, replace only the erroneous fields in the named
+category, once per segment. Continue learned feedback without further corrections.
+Do not update weights or treat the resulting scores as deployable accuracy.
+
+| Diagnostic intervention | Corrected transitions | Entire segments exact / 246 | Exact deaths / 239 | Early / missed deaths | False stops / 7 censored segments |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| None | 0 | 141 | 169 | 62 / 8 | 5 |
+| First ball error only | 67 | 179 | 201 | 34 / 4 | 2 |
+| First non-ball error only | 44 | 159 | 172 | 59 / 8 | 5 |
+| All erroneous fields at the first error | 105 | 199 | 205 | 30 / 4 | 2 |
+
+The ball intervention restores 38 completely exact segments. Correcting all
+fields restores 58. Independently verify the latter count against segments with
+at most one erroneous teacher-forced transition. Raw state-error steps fall to
+8,018/184,502 simulated transitions for ball correction and 5,441/187,883 for all
+fields; the denominators change because corrected trajectories survive longer.
+The experiment shows that initial errors cause substantial later drift, while
+additional independent errors remain.
+
+### Coverage, fitting and generalization
+
+Search every nonterminal training row for exact matches to the current inputs
+used by each affected head, respecting its source-defined routing. Integer hashes
+only shortlist matches; verify equality of all selected input values. Compare
+head labels, using displacement for positions and the native hit event for the
+count classifier. No complete 119-value first-error state/action has an exact
+training match. The relevant ball, brick/contact and hit-detector input tuples
+also have no exact matches for these witnesses. This is not evidence of missing
+state: high-dimensional combinations can be novel despite adequate local coverage.
+No conflicting labels are found among the matches, but the absence of matches
+means this test cannot exclude ambiguity for those other heads.
+
+Paddle position has exact training matches for **13/14** first-error cases,
+covering **417** matching rows. All labels agree with validation. This is direct
+evidence that its residual errors include fitting failures on represented inputs.
+Its key is current paddle x, charge and requested action.
+
+Scan all **134,341 training paddle-region transitions** through the unchanged
+container: 306 have some incorrect output, including 58 ball errors, 255 count
+errors and 19 paddle-position errors (overlapping). Horizontal x/vx have 37/30
+errors; vertical y/vy, bricks, contact, width, charge and stopping have zero in
+this region. These are training measurements, not additional validation results.
+Existing data therefore supplies a concrete error-mining pool. In contrast,
+vertical paddle prediction already fits this training region exactly, so merely
+replaying its existing mispredictions provides no examples to fix its validation
+gap. Training has 24,661 actual paddle collisions among 1,640,422 nonterminal
+transitions (~1.50%); collision rarity alone does not establish that previously
+used training samplers underexposed them.
+
+Audit the frozen intermediate-paddle geometry dependency against the pinned native
+one-frame calculation. Each of the horizontal, vertical and count copies has 20
+errors on the training paddle region and six on its 17,074 validation transitions,
+but **none coincide with a first-error witness**. It does not explain these
+initiating failures. Among 69 first-error witnesses located in the paddle region,
+the vertical head has six incorrect bounce-timing classes and three incorrect
+outgoing speeds on actual bounces. The comparator never replaces learned outputs.
+
+Next experiment: use training-only error mining to tune the horizontal ball and
+hit-count heads, retaining ordinary and near-collision examples to guard against
+regression. Paddle position also has a small, directly evidenced fitting problem.
+For vertical timing/speed, test generalization with training-derived near-boundary
+sampling rather than expecting a misprediction-only pool to help. Keep the same
+one-step, per-head and full-segment validation gates; preserve the current
+checkpoint if no candidate improves without unacceptable regressions. The audit
+does not justify adding state variables or changing the dataset yet.
+
+Artifacts and diagnostic scripts are in ignored `logs/state-first-errors-20260922/`.
+`reproduce_first_error.py` replays the pinned 105 one-transition witnesses in about
+2.5 seconds and intentionally exits with an assertion failure while they remain
+wrong; two independent runs reproduced all 105. `reproduce.py` rebuilds the full
+RAM-only diagnosis using the recorded snapshot and existing native audit helpers.
+Production code, checkpoint weights and shared train/play infrastructure are
+unchanged. Ruff, diagnostic compilation and whitespace checks pass; the production
+suite was not rerun for this documentation/diagnostic-only change.

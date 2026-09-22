@@ -4036,3 +4036,31 @@ An offline audit of 217,487 source rows evaluated during selected full-segment i
 
 Full suite: 422 passed, two skipped. See
 [the experiment](training.md#life-loss-termination-added-to-the-transition-container).
+
+
+## 2026-09-22: First-error audit localizes rollout drift
+
+The complete container still yields 141/246 exact validation life/data segments.
+Trace all 105 first divergences while their incoming states are still correct.
+Ball state initiates 67 failures, including 52 near the paddle; hit count appears
+in 18, paddle position in 14 and bricks/contact in 12, with six overlaps. Width,
+charge and stopping never initiate divergence. Intermediate paddle geometry is
+correct at these first-error paddle cases.
+
+| One-time correction using validation truth | Fully exact segments | Exact death timing |
+| --- | ---: | ---: |
+| None | 141/246 | 169/239 |
+| First erroneous ball fields | 179/246 | 201/239 |
+| Every wrong field at the first error | 199/246 | 205/239 |
+
+These are causal diagnostics, not trained improvements. Existing training inputs
+exactly match 13/14 first paddle-position errors, with 417 consistent labels.
+Scanning the entire training paddle region finds 58 ball errors, 255 count errors
+and 19 position errors, giving a training-only mining pool. Vertical y/vy have no
+training errors there but still fail on validation, so their gap needs a
+coverage/generalization experiment rather than misprediction replay alone.
+
+Keep the selected checkpoint and dataset unchanged; final-test targets remain
+unread. Next priority is training-only mining for horizontal ball/count, with
+ordinary and near-collision examples retained. See
+[the full diagnosis](training.md#first-errors-in-full-state-rollouts).

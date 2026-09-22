@@ -395,6 +395,30 @@ segments. Missed deaths are censored at the recorded boundary.
 
 An offline audit of 217,487 source rows evaluated during selected full-segment inference finds **zero disagreements** between the neural stop flag and the native bottom-boundary timing rule applied to the same predicted inputs. Recorded-action full-segment timing failures therefore arise from earlier state-trajectory divergence in this evaluation. Native rules only audit the predictions; they never alter model outputs.
 
-Dataset unchanged; final-test targets unread. Next: analyze the first state
-mistakes in divergent rollouts before hard-example mining or shared-MLP fitting.
+Dataset unchanged; final-test targets unread. The first-error analysis below
+identifies the next training priorities.
 See [the full record](training.md#life-loss-termination-added-to-the-transition-container).
+
+## First-error diagnosis of the complete container
+
+The selected checkpoint is unchanged. Its 105 divergent validation segments
+first fail in ball state in 67 cases (52 paddle region, 15 upper region), hit
+count in 18, paddle position in 14, and bricks/contact in 12. Categories overlap
+on six transitions. Width, charge and termination never initiate divergence.
+The learned intermediate paddle estimate is correct at every first-error case
+in the paddle region.
+
+Correcting only the first erroneous ball prediction with validation truth gives
+179/246 completely exact segments versus 141/246 uncorrected; correcting all
+wrong fields at the first erroneous transition gives 199/246. These are diagnostic
+oracle interventions, **not improved trained-model results**.
+
+Training already contains identical paddle-position inputs for 13/14 first-error
+cases, with 417 consistent matching labels. A scan of all 134,341 training
+paddle-region transitions finds 58 ball errors, 255 count errors and 19 paddle
+position errors; counts overlap. Vertical y/vy have zero training errors in that
+region but still fail on validation. Prioritize training-only mining for horizontal
+ball/count/position, retaining ordinary examples and near-collision cases to test
+generalization. Do not assume replaying existing mistakes alone fixes vertical
+bounce timing. Dataset and final-test partition remain untouched. See
+[the diagnosis](training.md#first-errors-in-full-state-rollouts).
