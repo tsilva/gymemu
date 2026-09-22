@@ -182,6 +182,13 @@ segments, versus **99.9006%** and **141/246** for the container. The training pr
 reaches 99.9969%, indicating a substantial generalization gap. The container stays
 selected; no mining, oversampling or dataset changes were introduced.
 
+A [frameskip-1 retraining run](docs/training.md#unified-mlp-on-frameskip-1)
+uses the same shared architecture and 32,080 updates on the newly balanced dataset.
+It reaches **99.6056%** exact one-step validation. Over 256 native frames,
+completely exact sampled feedback windows improve from **20.38% to 51.83%**.
+The recordings and policies also differ, so this does not isolate frameskip alone.
+The new checkpoint is separate, and test remains reserved.
+
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
 [Controller history probes](docs/training.md#inferring-controller-state-from-history)
