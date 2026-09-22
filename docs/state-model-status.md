@@ -34,7 +34,8 @@ is established. MLP means a fully connected neural network.
 | Combined ball, bricks, contact, count and paddle width | One `ball_paddle_width` container; added 33→64→64→2 ReLU width head, 6,466 trainable parameters this stage; existing state frozen | Same 118-value source; 115 simultaneous outputs | **99.9171%** joint validation accuracy, 170 / 205,075 errors. Width **100.0000%**, 0 errors, 0 / 115 change errors. **91.5089%** entirely exact128 windows. Paddle x/charge and life boundaries supplied. |
 | Combined ball, bricks, contact, count, width and charge | One `ball_paddle_charge` container; added 25→128→128→11 SiLU charge classifier, 21,259 trainable parameters this stage; existing state frozen | 118 state values plus current action; 116 simultaneous outputs. Charge uses paddle x, charge and action | **99.9171%** exact joint validation, 170 / 205,075 errors. Charge **100.0000%**, 0 errors. **91.5089%** entirely exact128 windows; 0 endpoint charge errors. Paddle x and life boundaries supplied. |
 | Combined compact state including paddle position | One `ball_paddle_position` container; added 25→128→128→23 SiLU position classifier, 22,807 fitted parameters this stage; previous predictors frozen | 118 state values plus action; 117 outputs. Position uses current paddle x, charge and action | **99.9005%** exact joint validation, 204 / 205,075 errors. Paddle x **99.9834%**, 34 errors. **90.0675%** entirely exact128 windows, with all compact state fields fed back. Recorded actions and life boundaries supplied. |
-| Life-loss terminal flag | 31→64→64→2 ReLU classifier, cross-entropy; 6,338 fitted parameters | Current RAM ball y, fractional y, and vy; scalar/binary encoding includes `y + vy`. No lives, action, or history inputs | **100% validation**, 0 / 88,638 errors, all 48 deaths exact. **100% reused-test accuracy**, 0 / 45,283, all 38 deaths on the exact step and no premature stops across 52 segments. Recorded current ball state; full-state feedback remains untested. Supersedes the older history-based probe with F1 0.299. |
+| Combined compact state and life-loss termination | One `ball_life_termination` container; added 31→64→64→2 ReLU stop head, 6,338 fitted parameters this stage; state branch frozen | Same 119 state/action values; 117 state outputs valid only when stop output 117 is false. Stop uses current y, fraction and vy | Stop **100%** on 205,314 validation transitions: 239/239 deaths, no false stops. Combined **99.9006%**. Full feedback: exact death timing **169/239**; exact entire segments **141/246**. Recorded actions; missed deaths censored at reference end. |
+| Life-loss terminal flag | 31→64→64→2 ReLU classifier, cross-entropy; 6,338 fitted parameters | Current RAM ball y, fractional y, and vy; scalar/binary encoding includes `y + vy`. No lives, action, or history inputs | **100% validation**, 0 / 88,638 errors, all 48 deaths exact. **100% reused-test accuracy**, 0 / 45,283, all 38 deaths on the exact step and no premature stops across 52 segments. Recorded current ball state; historical isolated result. Supersedes the older history-based probe with F1 0.299. |
 
 The older context contains eight full state observations, seven prior requested
 actions plus the current action, and 32 retained paddle observations/actions.
@@ -375,5 +376,25 @@ combined accuracy is **99.9005%**. Entirely exact128 windows:
 position errors: 43; charge errors: 0.
 Recorded actions and reference life boundaries remain supplied; terminal
 transitions are excluded. Dataset unchanged; final-test targets unread.
-Next: life-loss termination. See
+The following integration adds life-loss termination. See
 [the full record](training.md#paddle-position-added-to-the-transition-container).
+
+
+## Life-loss termination container merge
+
+Selected **stop tuning seed 91** as `runs/ball-life-termination-20260922/candidate.pt`. Both continuations reduce false stops in 128-step survival windows from 3,526 to 3,522, with other stop-timing and exact-window counts unchanged. Both qualify; the predeclared tie-break selects seed 91. Their longer survival exposes 150 more state-transition errors in bounded windows and four more in full-segment evaluation; those raw counts have different numbers of simulated transitions.
+The container now predicts every compact state field and whether to stop. Terminal
+successor state is masked and never fed back. Stop accuracy on recorded sources
+is **100%**, including all 239 deaths; combined one-step accuracy is
+**99.9006%**. With full state feedback, death timing is exact
+in **169 / 239** life segments and entire
+trajectories are exact in **141 / 246** segments.
+There are 62 early deaths, 8 missed
+deaths and 5 false stops on censored
+segments. Missed deaths are censored at the recorded boundary.
+
+An offline audit of 217,487 source rows evaluated during selected full-segment inference finds **zero disagreements** between the neural stop flag and the native bottom-boundary timing rule applied to the same predicted inputs. Recorded-action full-segment timing failures therefore arise from earlier state-trajectory divergence in this evaluation. Native rules only audit the predictions; they never alter model outputs.
+
+Dataset unchanged; final-test targets unread. Next: analyze the first state
+mistakes in divergent rollouts before hard-example mining or shared-MLP fitting.
+See [the full record](training.md#life-loss-termination-added-to-the-transition-container).

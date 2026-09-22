@@ -4011,3 +4011,108 @@ It runs integrity checks, RAM preparation, baseline equivalence, training,
 rollouts and selection. Tests and document generation run separately. Metrics,
 plans, per-action/event breakdowns and witnesses are in
 `logs/ball-paddle-position-20260922/`. Next integration: life-loss termination.
+
+
+## Life-loss termination added to the transition container
+
+Add `life-termination-20260919/stop-s2026/best.pt` to
+`ball-paddle-position-20260922/candidate.pt`. The registered
+`ball_life_termination` model takes the existing 119 current-state/action values
+and emits 117 next-state fields plus a stop flag at column 117. The stop head
+runs first. Only continuing rows invoke the state predictor; stopped rows have
+zero placeholder state fields that the consumer ignores. Passing the previous
+boolean stop mask keeps those rows stopped and skips both networks.
+
+The stop classifier is 31→64→64→2 ReLU, with 6,338 parameters. It uses current
+integer/fractional ball y and vy, scalar/binary encoding and a constant-velocity
+proposal feature. The complete established compact-state branch stays
+frozen/eval. The head executes no native termination rule at inference.
+
+The RAM preparation view now restores life-loss transitions previously excluded
+from state fitting. Their stop labels come from the existing recorded-life-loss
+contract; their successor state is entirely NaN-masked because it can contain a
+respawn. Current terminal-source fractional y/contact come from the preceding
+causal replay output within the same life, verified against the native source
+stop-timing rule. All other state targets retain their previous alignment.
+No dataset columns or persistent feature caches are written. Every life remains
+available as a separate segment; no trajectory crosses death, a data gap or an
+episode boundary.
+
+Dataset revision remains `8f9838c532a2d6b622b4fc0bb5090fe6c534210f`, split
+`22284897f9fe400efa60772c7e47fc77c870f08b3869cc6d8202b9bac6b24636`.
+All 22 train/validation shard hashes match. Training now has 1,642,324 transitions:
+1,640,422 continuing transitions and 1,902 deaths over 1,957 segments. Validation
+has 205,314 transitions: 205,075 continuing transitions and 239 deaths over 246
+segments. Seven validation segments are censored. Final-test targets stay unread.
+
+The initial composition reproduces its continuing-state parent on all applicable
+validation sources. It catches all 239 deaths with no false stops; existing state
+errors remain 204. Compare seeds 91 and 2026 with 6,000 AdamW updates each, LR
+1e-5 cosine-decayed to 1e-6, weight decay 1e-4 and batch 192. Sample 64 training
+rows from each of death, nonterminal y≥190 and nonterminal y<190. Stratum sizes
+are 1,902, 7,369 and 1,633,053. Fit only two-class stop cross-entropy; no terminal
+successor-state loss, validation mining or intermediate checkpoint selection.
+
+| Model | One-step false / missed stops | Exact 128-step-or-death windows | Full-segment exact death / early / missed | False stops in censored segments | Fully exact segments |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial composition | 0 / 0 | 89.7222% | 169 / 62 / 8 | 5 | 141 / 246 |
+| Stop tuning seed 91 | 0 / 0 | 89.7222% | 169 / 62 / 8 | 5 | 141 / 246 |
+| Stop tuning seed 2026 | 0 / 0 | 89.7222% | 169 / 62 / 8 | 5 | 141 / 246 |
+
+Selected **stop tuning seed 91** as `runs/ball-life-termination-20260922/candidate.pt`. Both continuations reduce false stops in 128-step survival windows from 3,526 to 3,522, with other stop-timing and exact-window counts unchanged. Both qualify; the predeclared tie-break selects seed 91. Their longer survival exposes 150 more state-transition errors in bounded windows and four more in full-segment evaluation; those raw counts have different numbers of simulated transitions.
+
+Selected stop classification is exact on all **205,314** validation sources:
+239 / 239 deaths detected, 0
+false stops and 0 missed deaths. Combined one-step state/stop
+accuracy is **99.9006%**, with 204 errors.
+State accuracy excludes terminal successor fields by design.
+
+The dedicated evaluator feeds all state back under recorded actions and halts on
+the first predicted stop. Bounded evaluation starts at every source, includes
+shorter windows that end in death, and excludes shorter censored windows. At
+128 steps or recorded death, 183,472 /
+204,489 windows are entirely exact (**89.7222%**).
+Among 29,648 death-ending windows, 28,510
+stop on the exact step, 172 stop early and
+966 miss the recorded death. There are
+3,522 false stops in windows with no
+reference death. This denominator differs from previous fixed-length nonterminal
+windows; its percentage is not directly comparable to the prior 90.0675% score.
+
+Full-segment evaluation seeds once per segment and never corrects predicted
+state. Of 239 death-ending segments, **169
+stop on the correct step**, 62 stop early and
+8 miss the reference death. Among
+7 censored segments,
+5 stop falsely. Entire-state trajectories
+are exact for **141 / 246 segments
+(57.3171%)**. A missed death is scored as a miss,
+then evaluation is censored at the recorded life end. Eventual late-stop timing
+is unknown; no next-life actions or respawn states are substituted.
+
+An offline audit of 217,487 source rows evaluated during selected full-segment inference finds **zero disagreements** between the neural stop flag and the native bottom-boundary timing rule applied to the same predicted inputs. Recorded-action full-segment timing failures therefore arise from earlier state-trajectory divergence in this evaluation. Native rules only audit the predictions; they never alter model outputs.
+
+The predeclared selection gate permits no increase in teacher false positives or
+missed deaths, or in rollout timing errors, early/false stops or misses, and no
+decrease in exact-window counts at 1/8/32/128 steps or full-segment starts. It
+requires a strict improvement somewhere; ties retain composition. Qualifying
+candidates sort by teacher errors, full-segment timing errors, then seed.
+Selected SHA-256: `05c5d195c0b280a083ac8c53d5544a9ffe889f199491ab28635c529c793d8916`. The parent checkpoints and historical
+reference remain fixed. This is development validation, not a reserved-test score.
+
+Full suite: 422 passed, two skipped, including direct and latent
+train/checkpoint/play smoke checks. Ruff, compilation and whitespace checks pass.
+New tests cover skipped inference and absorbing stop masks, frozen state training,
+portable checkpoints, masked terminal targets, and independent brute-force
+accounting for exact, early, missed and censored stops. Snapshot inventory and
+frozen tensors remain unchanged.
+
+Reproduce with `PYTHONPATH=. uv run python logs/ball-life-termination-20260922/reproduce.py`
+from the repository root.
+The recorded snapshot, parent checkpoints and audit helpers are required. Native
+stop attribution is an additional read-only evaluation in `audit_stopping.py`.
+Plans, checkpoints, per-window counts and audits are under the matching ignored
+`logs/ball-life-termination-20260922/` and `runs/ball-life-termination-20260922/`
+paths. RGB player/shared-runner behavior remains unchanged. All compact-state
+branches and learned termination are now in one container; recursive accuracy
+still needs work before shared-MLP consolidation or playable-emulator claims.

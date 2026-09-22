@@ -160,7 +160,15 @@ The [paddle-position integration](docs/training.md#paddle-position-added-to-the-
 feeds every compact state field back, including paddle position and charge.
 Paddle-position validation accuracy is **99.9834%**, combined accuracy
 **99.9005%**, and entirely exact128 windows **90.0675%**.
-Actions and life boundaries remain recorded; termination prediction is next.
+That experiment used recorded life boundaries; the next integration adds learned stopping.
+
+The [termination integration](docs/training.md#life-loss-termination-added-to-the-transition-container)
+adds learned stopping and masks terminal successor states. All 239 validation
+deaths are detected without false stops on recorded inputs. Full state feedback
+stops on the exact death step in **169/239**
+life segments; **141/246** entire segments
+are exact. Recursive trajectory errors remain; actions are recorded, and missed
+deaths are censored at the reference end.
 
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.

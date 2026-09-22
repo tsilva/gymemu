@@ -824,3 +824,42 @@ recorded transition. Report paddle-position exact errors, MAE and maximum error
 separately. This enables feedback of every compact state field, but reference
 life boundaries still stop windows and terminal transitions remain excluded.
 Termination and RGB playback integration are separate work.
+
+## Life-loss termination in the compact-state container
+
+`ball_life_termination` wraps `state`, a `ball_paddle_position` specification,
+and `termination`, a `life_termination` specification. It accepts the same 119
+current-state/action values. Output columns 0:117 contain next state only when
+output 117 (the stop flag) is zero. On a predicted stop they are zero placeholders
+and must be ignored. The stop head runs first; the state predictor is called only
+for continuing rows. No respawn state is generated or fed back.
+
+The 31→64→64→2 ReLU stop head has 6,338 parameters and uses current RAM ball y,
+fractional y and vy, with scalar/binary encoding and a constant-velocity proposal.
+It learns the decision with two-class cross-entropy. The established
+state branch stays frozen/eval. Include life-loss transitions in the RAM training
+view and supervise their stop labels; mask their entire successor-state target.
+Native replay may audit source phase and terminal labels offline, but production
+inference uses only the neural stop head.
+
+`predict(source, terminated=previous_stop_mask)` accepts an optional boolean mask.
+Previously stopped rows remain stopped and skip both networks, even if their
+unused source fields are invalid. Carry that mask forward, or remove stopped rows
+from the caller's active batch. Resetting or starting another life is an explicit
+caller operation. `forward` exposes named state logits and `terminated` logits;
+training code must mask state losses on recorded terminal transitions.
+
+`evaluate_life_rollouts` feeds all compact state fields back under recorded
+current actions and halts each rollout on its first predicted stop. Bounded
+windows start at every source. Include windows that reach a recorded death before
+the requested horizon; exclude shorter windows ending in a data gap/truncation.
+Full-segment mode starts once per recorded segment and includes censored segments.
+Report exact death timing, premature stops, missed deaths and false stops in
+survival/censored windows separately, alongside whole-trajectory state accuracy.
+If a model misses a recorded death, count the miss and censor evaluation there;
+its eventual late stopping time is unknown, and the next life's states/actions
+must never be used. These termination-aware scores have a different denominator
+from earlier fixed-length, nonterminal-only rollout scores.
+
+The RGB player and shared experiment runner remain unchanged. This is a portable
+compact-state model with a stopping contract and a dedicated rollout evaluator.

@@ -8,6 +8,7 @@ from gymemu.models.ball_bricks_contact_count import BallBricksContactCount
 from gymemu.models.ball_direction_geometry import BallDirectionGeometry
 from gymemu.models.ball_horizontal_router import BallHorizontalRouter
 from gymemu.models.ball_horizontal_velocity import BallHorizontalVelocity
+from gymemu.models.ball_life_termination import BallLifeTermination
 from gymemu.models.ball_motion import BallMotion
 from gymemu.models.ball_paddle_charge import BallPaddleCharge
 from gymemu.models.ball_paddle_position import BallPaddlePosition
@@ -57,6 +58,7 @@ MODELS = {
     "ball_paddle_width": BallPaddleWidth,
     "ball_paddle_charge": BallPaddleCharge,
     "ball_paddle_position": BallPaddlePosition,
+    "ball_life_termination": BallLifeTermination,
     "ball_bricks": BallBricks,
     "ball_bricks_contact": BallBricksContact,
     "ball_bricks_contact_count": BallBricksContactCount,
