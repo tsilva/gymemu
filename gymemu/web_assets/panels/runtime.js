@@ -8,6 +8,7 @@ export class PanelRuntime {
     onLayout,
     onUnmount,
     onError,
+    loadModule = path => import(path),
   }) {
     this.definitionFor = definitionFor;
     this.isSuspended = isSuspended;
@@ -17,6 +18,7 @@ export class PanelRuntime {
     this.onLayout = onLayout;
     this.onUnmount = onUnmount;
     this.onError = onError;
+    this.loadModule = loadModule;
     this.instances = new Map();
     this.loading = new Map();
     this.desired = new Map();
@@ -89,7 +91,7 @@ export class PanelRuntime {
 
   async loadPanel(id, definition) {
     try {
-      const module = await import(definition.module);
+      const module = await this.loadModule(definition.module);
       const current = this.desired.get(id);
       if (!current || current.module !== definition.module) return null;
       definition = current;

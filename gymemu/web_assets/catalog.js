@@ -2,6 +2,7 @@ const $ = selector => document.querySelector(selector);
 const hash = new URLSearchParams(location.hash.slice(1));
 const token = hash.get('token') || sessionStorage.getItem('gymemu-token');
 if (token) sessionStorage.setItem('gymemu-token', token);
+const desktopId = new URLSearchParams(location.search).get('desktop');
 const headers = { 'X-Player-Token': token || '', 'Content-Type': 'application/json' };
 let catalog = null, loading = false;
 
@@ -19,6 +20,7 @@ function route(env, run) {
   const query = new URLSearchParams();
   if (env) query.set('env', env);
   if (run) query.set('run', run);
+  if (desktopId) query.set('desktop', desktopId);
   return `/browse${query.size ? `?${query}` : ''}#${new URLSearchParams({ token: token || '' })}`;
 }
 function link(label, href) {
@@ -50,7 +52,7 @@ async function openCheckpoint(item, button) {
   try {
     await request('/api/open', { method: 'POST', body: JSON.stringify({ checkpoint: item.id }) });
     sessionStorage.setItem('gymemu-catalog-route', location.href);
-    location.href = `/player#${new URLSearchParams({ token: token || '' })}`;
+    location.href = `/player${desktopId ? `?desktop=${desktopId}` : ''}#${new URLSearchParams({ token: token || '' })}`;
   } catch (error) {
     loading = false;
     $('#refresh').disabled = $('#search').disabled = false;

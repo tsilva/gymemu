@@ -11,6 +11,22 @@
 
 Gymemu is a Python toolkit for comparing learned game emulators. Train different models
 or multi-stage pipelines on recorded game frames and actions, then play their predictions.
+
+## Desktop player
+
+`uv run gymemu play` opens the checkpoint navigator in a dedicated Gymemu window.
+Selecting a checkpoint opens the Player in that window; **Diagnostics** opens or
+focuses a second window. Player and Diagnostics have separate app and browser-tab
+icons. Closing both windows stops the local server. `--no-browser` prints complete
+URLs for use in a normal browser or Codex's in-app Browser. The dedicated windows
+use a pinned, SHA-256-verified Neutralinojs runtime cached under
+`~/.cache/gymemu/neutralino`; the first launch downloads it. Installed Gymemu
+includes the compiled Svelte UI and needs no Node.js at runtime.
+
+For source UI development, run `pnpm install --frozen-lockfile`, `pnpm check:web`,
+and `pnpm build:web`. The generated `gymemu/web_assets/dist/` files are included in
+the Python package. Run `pnpm test:web` for the browser-side logic tests.
+
 Play the published state dynamics and RGB decoder together:
 
 ```bash
@@ -59,6 +75,7 @@ recursive paddle-only results.
 [Horizontal-velocity probes](docs/training.md#discrete-horizontal-velocity-probes)
 compare continuous and discrete outputs using controller data and collision memory
 reconstructed in RAM, without adding dataset columns.
+
 The [focused paddle-region experiment](docs/training.md#focused-paddle-region-velocity-probes)
 tests a smaller input contract and separates bounce-direction errors from speed errors.
 [Direction-only probes](docs/training.md#isolating-horizontal-direction) compare
@@ -368,13 +385,13 @@ An edited tile shows a revert button in its bottom-right corner. Revert restores
 that frame and reruns inference while keeping the other edits and current order.
 Switching tabs or windows keeps playback running and clears held keys. Closing the player page pauses playback. Ctrl+C in the terminal stops the server.
 
-The player opens two synchronized browser tabs using Gradlab's paired workspace
-approach. The first contains Original, Prediction, Diff, and the
-playbar. The Diagnostics tab contains Input history, Prediction error,
+The player uses Gradlab's paired workspace approach. Its native Player window
+contains Original, Prediction, Diff, and the playbar. The Diagnostics window contains Input history, Prediction error,
 and custom metric widgets. Its default layout places Input history across the top,
 with a full-width Prediction error chart below.
 Both display snapshots from one inference session.
-The header's Diagnostics/Player link reopens or focuses the companion tab.
+The header's Diagnostics/Player link opens or focuses the companion window.
+With `--no-browser`, the same link opens a browser tab.
 
 The dashboard uses Gradlab's widget structure and theme, with a compact single-row
 topbar and icon buttons for Panels, Add widget, and Reset layout. Comparison panels
@@ -407,9 +424,9 @@ Seeking preserves measurements;
 resetting, changing episode, or switching mode clears them. Unvisited steps are
 unscored and gaps are left visible.
 Original and Prediction have blank footers; the difference footer keeps its gain
-control and legend. `--no-browser` prints both URLs without opening tabs;
+control and legend. `--no-browser` prints both URLs without opening native windows;
 `--port auto` chooses an unused port by default. Diagnostics observes playback and
-does not send keyboard, heartbeat, or pause commands. Leaving the player tab keeps playback running; returning to either tab shows the current server snapshot.
+does not send keyboard, heartbeat, or pause commands. Switching windows keeps playback running; returning to either window shows the current server snapshot.
 
 To inspect one-step predictions without accumulated feedback errors, replay recorded
 episodes with teacher forcing:

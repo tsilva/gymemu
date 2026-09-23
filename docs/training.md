@@ -140,7 +140,7 @@ Playback options such as `--device cpu`, `--autoregressive`, `--start-state`, an
 `--empty-start` apply to each selected checkpoint. In autoregressive mode, missing
 starting scenes remain an error unless an explicit alternative is supplied. Headless playback and
 `--list-start-states` still require a checkpoint argument. Supplying a checkpoint
-directly continues to open the player and diagnostics tabs.
+directly opens the Player window; its **Diagnostics** button opens the companion window.
 
 ## Hierarchical configuration
 
@@ -635,15 +635,20 @@ the first tick initializes the frame without executing a game action.
 
 ## Browser player workspace
 
-`play.py` serves the player on loopback and opens its browser URL. No JavaScript
-installation, build, CDN, or Gradlab installation is needed. Playback opens a player
-tab and a Diagnostics tab. `--no-browser` prints both complete URLs for opening
+`play.py` serves the player on loopback and opens a dedicated Player app window.
+The **Diagnostics** button opens or focuses a second app window with its own icon.
+Both pages use a compiled Svelte shell and the existing playback controllers.
+Installed packages include the compiled assets; source UI changes require
+`pnpm build:web`. The native viewer uses a pinned, verified Neutralinojs runtime
+downloaded on first use. `--no-browser` skips that download and prints both complete URLs for opening
 manually or in Codex's in-app Browser. `--port auto`
 selects an unused port; `--port NUMBER` selects a specific port. Each server has one
 playback session and a random access token shared by its printed URLs. Both tabs
 read the same atomic frame/metric revisions from that session, without duplicate
-inference. Leaving the player tab keeps playback running; closing it pauses playback; Diagnostics only sends explicit chart selections as seek commands; it sends no
-keyboard, heartbeat, or blur commands. Ctrl+C stops the server.
+inference. Switching windows keeps playback running and clears held keys. Closing
+the Player page pauses playback; closing both native windows stops the server.
+Diagnostics only sends explicit chart selections as seek commands; it sends no
+keyboard, heartbeat, or blur commands. Ctrl+C also stops the server.
 
 The UI reuses Gradlab's panel module lifecycle, registry, GridStack layout, fonts,
 and theme, including paired views with per-tab panel placement. Original, Prediction,
@@ -652,7 +657,7 @@ and custom widgets belong to Diagnostics. Its default arrangement puts
 Input history across the full top row, with a full-width Prediction error chart
 below. History tiles use minimal spacing, overlaid top-left frame numbers,
 and no bottom caption. Older default arrangements migrate; custom placements remain. Header links open or focus
-the companion tab. Layout updates use BroadcastChannel with a storage-event fallback
+the companion window in desktop mode, or a tab with `--no-browser`. Layout updates use BroadcastChannel with a storage-event fallback
 and ordered revisions, following Gradlab's workspace synchronization strategy.
 The comparison panels automatically fill the available height above the playbar in
 equal-width columns. All three reserve equal-height footers so the image viewports
