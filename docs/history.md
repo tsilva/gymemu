@@ -4116,3 +4116,60 @@ source transition values and the original raw view are preserved.
 The matched 32,080-update run improves one-step validation from 98.1852% to 99.6056%. Each new prediction spans one native frame instead of two. At 256 native frames, fully exact sampled feedback windows change from 20.38% to 51.83%.
 
 Keep this as a separate checkpoint. The datasets and policies also differ; the result does not isolate frameskip causally. Test remains reserved. See [the full comparison](training.md#unified-mlp-on-frameskip-1).
+
+Published the selected frameskip-1 unified model to [Hugging Face](https://huggingface.co/tsilva/gymemu-breakout-unified-dynamics-fs1). Verified downloaded artifact hashes and standalone inference; the original checkpoint hash is unchanged.
+
+## 2026-09-22: Decode recorded states into RGB
+
+Trained a separate geometry-conditioned pixel MLP (20→64→64→64→9, 10,249
+parameters) on 32,768 recorded frames with palette cross-entropy and explicit
+ball/paddle sampling. The existing split supplies 2,048 fixed validation frames;
+no test targets or dynamics predictions are used. Training took 8.7 minutes.
+
+Excluding HUD rows, the selected decoder has 99.999377% exact RGB pixels and
+1,969/2,048 pixel-perfect frames, with RGB MSE 1.64581e-6. Ball-neighborhood RGB
+error is zero; all 1,769 independently scorable isolated balls are located
+correctly. The four worst reconstructions show top-wall boundary artifacts.
+Explicit game geometry is encoded in features, so this result does not establish
+that a generic bottleneck autoencoder would learn the same mapping. Next evaluate
+the frozen decoder on dynamics predictions to separate rendering errors from
+state-transition errors. See [protocol and limitations](training.md#recorded-state-decoder).
+
+Published the recorded-state decoder on
+[Hugging Face](https://huggingface.co/tsilva/gymemu-breakout-state-decoder-fs1/commit/1aee45f2e741d499985cb666017ae0c15a345e83).
+Verified all 22 downloaded artifact hashes and standalone inference, including
+the model-card quick start. Weights and reported validation results are unchanged.
+
+## 2026-09-22: Longer uniform training of the frameskip-1 MLP
+
+Continue the published weights for 32,080 updates at 1e-5 with fresh AdamW moments and the original sampler position. Architecture and sampling remain unchanged. Joint validation changes from 99.60559% to 99.65846%; exact sampled 256-frame windows change from 51.83% to 55.49%. Preserve the published checkpoint and reserve test. See [the continuation results](training.md#longer-training-for-the-frameskip-1-unified-mlp).
+
+### 2026-09-22: Interactive state dynamics and RGB decoder
+
+Added `gymemu play-state` to compose the published frameskip-1 unified dynamics
+and state decoder without retraining. A complete synthetic source initializes the
+visible playfield. Keyboard actions advance the dynamics, the decoder renders its
+nonterminal output, and every predicted state field feeds back for the next step.
+Native browser checks exercised arrow-key steps, continuous playback, life-loss
+stop, and reset. Tests cover fractional-y and hidden-state feedback, suppression
+of repeated keys, terminal absorption, and data-only model loading. These are
+integration checks, not new dataset metrics or evidence of stable long rollouts.
+
+
+### 2026-09-22: Teacher forcing for composed state playback
+
+Added recorded-state teacher forcing to `play-state`, enabled by default. The
+loader uses the frozen validation split and the same causal hidden-state
+reconstruction as training. Original images join by successor frame ID. The
+browser can switch between independent recorded-state predictions and generated
+state feedback. A three-transition CPU integration smoke on validation episode 6
+reported exact next-state agreement on its final transition. This bounded smoke
+is not an aggregate evaluation or a new rollout-stability result.
+
+## 2026-09-23: Diagnose paddle control during state playback
+
+The published dynamics and decoder reproduce uncommanded motion and wrong-direction motion from the synthetic usage example used for direct autoregressive startup. Its paddle x=80 and charge=2000 are inconsistent: native settling targets x=30, and the first required -25 displacement is outside the learned -6..6 vocabulary. Coherent initialization removes the idle failure. Recorded-start probes still expose rare learned controller errors, including charge 3841 -> 3901 and dependence on unrelated ball position. Keyboard mapping and decoded paddle placement pass targeted checks. No dataset, weights, or production behavior changed. Evidence and runnable reproductions: `logs/paddle-control-diagnosis-20260923/report.md`.
+
+## 2026-09-23: Recorded starts and controller hard-case training
+
+Direct autoregressive play now initializes from a complete recorded state without fetching RGB. Regression tests and browser reset/stepping pass. Controller-output-only fitting regresses and is discarded. A 4,000-update shared-MLP fine-tune on uniform recordings plus training-only controller variations reduces held-out controller stress errors from 64 to 16 and changes 256-frame exactness from 55.49% to 55.69%. Shorter rollouts and a scripted probe regress slightly; illegal charge outputs remain. Save the final model as a separate local candidate, retain the original public weights, and keep test reserved. See [the full results and local playback command](training.md#recorded-initialization-and-controller-fine-tuning).

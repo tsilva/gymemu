@@ -28,6 +28,7 @@ def test_cli_help_and_errors(tmp_path):
     assert run_cli(tmp_path, "--version").strip()
     for command in [
         "play",
+        "play-state",
         "compare",
         "cache-frames",
         "save-start-state",
