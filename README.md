@@ -270,6 +270,10 @@ gymemu --help
 The editable install adds `gymemu` to your shell. Use `gymemu train`, `gymemu play`,
 and `gymemu compare` from any directory. Use absolute dataset/checkpoint paths when
 working elsewhere. `uv tool install . --exclude-newer "7 days"` installs a self-contained copy.
+`uv sync` updates the checkout's `.venv`, while the installed `gymemu` command uses
+its own uv tool environment. After pulling a change that adds dependencies, refresh
+the installed command with `uv tool install . --editable --reinstall --exclude-newer "7 days"`.
+Alternatively, run `uv run gymemu play` from the checkout to use `.venv` directly.
 The original `python train.py` and other repository scripts remain supported.
 
 The locked environment uses Python 3.13. Python 3.11 through 3.13 is supported.
