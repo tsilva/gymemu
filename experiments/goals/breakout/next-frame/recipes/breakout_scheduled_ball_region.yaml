@@ -1,0 +1,17 @@
+# @package _global_
+# Two-epoch test of generated history plus the lower-weight ball objective.
+defaults:
+  - breakout_ball_region
+  - override /approach: scheduled_ball_region
+  - _self_
+name: breakout-scheduled-ball-region
+trainer:
+  epochs: 2
+approach:
+  options:
+    ball_region_weight: 0.03
+    rollout_steps: ${history}
+    schedule:
+      warmup_epochs: 0
+      ramp_epochs: 2
+      max_probability: 0.8

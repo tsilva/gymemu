@@ -11,6 +11,10 @@ from uuid import uuid4
 from gymemu.credentials import CREDENTIAL_PREFIX, r2_credentials
 
 ARTIFACTS = (
+    "run.json",
+    "goal.yaml",
+    "probe.json",
+    "diagnostics.jsonl",
     "resume.pt",
     "best.pt",
     "last.pt",
@@ -101,13 +105,16 @@ class CheckpointStore:
     def __init__(self, config, output):
         validate_storage(config)
         self.output = Path(output)
-        self.enabled = config.get("r2", {}).get("enabled", False)
+        self.enabled = config.get("r2", {}).get("enabled", False) and (
+            config.get("wandb", {}).get("mode") == "online"
+        )
         self.client = None
         self.state = None
         if not self.enabled:
             return
         settings = config["r2"]
         self.bucket = settings["bucket"]
+        self.catalog_prefix = settings["prefix"]
         self.client = r2_client()
         endpoint = self.client.meta.endpoint_url
         # Fail before dataset loading or optimization when access is misconfigured.
@@ -118,7 +125,12 @@ class CheckpointStore:
             if self.state["bucket"] != self.bucket or self.state["endpoint_url"] != endpoint:
                 raise ValueError("R2 retry destination differs from the saved upload receipt")
         else:
-            run_id = uuid4().hex
+            run_file = self.output / "run.json"
+            run_id = (
+                json.loads(run_file.read_text())["id"]
+                if run_file.is_file()
+                else (config.get("run_id") or uuid4().hex)
+            )
             environment = re.sub(r"[^A-Za-z0-9_.-]", "-", config["game"]["env_id"].strip())
             self.state = {
                 "version": 1,
@@ -140,6 +152,7 @@ class CheckpointStore:
     def _files(self):
         files = [self.output / name for name in ARTIFACTS]
         files.extend(sorted(self.output.glob("stages/*/*.pt")))
+        files.extend(sorted(self.output.glob("diagnostics/*.png"))[:12])
         for path in files:
             if path.is_file():
                 if path.is_symlink() or not path.resolve().is_relative_to(self.output.resolve()):
@@ -202,6 +215,41 @@ class CheckpointStore:
                 self.client.put_object(
                     Bucket=self.bucket, Key=key, Body=payload, ContentType="application/json"
                 )
+            run_file = self.output / "run.json"
+            run = json.loads(run_file.read_text()) if run_file.is_file() else {}
+            summary_file = self.output / "summary.json"
+            summary = json.loads(summary_file.read_text()) if summary_file.is_file() else {}
+            goal = run.get("goal") or {}
+            index = {
+                "version": 1,
+                "id": self.state["run_id"],
+                "created_at": run.get("created_at"),
+                "environment": self.state["env_id"],
+                "goal": goal.get("id"),
+                "revision": goal.get("revision"),
+                "variant": goal.get("variant"),
+                "goal_contract": goal.get("contract"),
+                "goal_diff": goal.get("diff", []),
+                "comparability": run.get("comparability"),
+                "recipe_sha256": run.get("recipe", {}).get("sha256"),
+                "wandb_url": (run.get("wandb") or {}).get("url"),
+                "name": summary.get("name") or run.get("id") or self.state["run_id"],
+                "approach": summary.get("approach"),
+                "status": manifest["status"],
+                "best_mse": summary.get("best_mse"),
+                "checkpoint_count": sum(
+                    name.endswith(".pt") and name != "resume.pt"
+                    for name in manifest["objects"]
+                ),
+                "has_final_prediction": "best.pt" in manifest["objects"],
+                "manifest_key": f"{self.state['prefix']}/manifest.json",
+            }
+            self.client.put_object(
+                Bucket=self.bucket,
+                Key=f"{self.catalog_prefix}/catalog/runs/{self.state['run_id']}.json",
+                Body=_json(index),
+                ContentType="application/json",
+            )
             self.state["status"] = manifest["status"]
             self.state.pop("error_type", None)
         except Exception as error:

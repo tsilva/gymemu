@@ -539,7 +539,7 @@ def serve_catalog(catalog, factory, *, port=0, open_browser=True):
             browser = PlaybackBrowser()
         server, url = make_server(session, port, catalog=catalog, desktop_browser=browser)
         print(f"Gymemu navigator: {url}", flush=True)
-        print(f"Local runs: {catalog.root}", flush=True)
+        print(f"Catalog: {catalog.root}", flush=True)
         if browser:
             browser.open(url)
             server.timeout = 0.2
@@ -598,11 +598,16 @@ def make_server(session, port=0, *, workspace_path=None, catalog=None, desktop_b
             if url.path == "/api/catalog" and catalog is not None:
                 if not self.authorized():
                     return self.respond(403, b'{"error":"Unauthorized player request"}')
-                with session.lock:
-                    query = parse_qs(url.query)
-                    result = catalog.snapshot(
-                        run_id=query.get("run", [None])[0],
-                        refresh=query.get("refresh", [""])[0] == "1",
+                try:
+                    with session.lock:
+                        query = parse_qs(url.query)
+                        result = catalog.snapshot(
+                            run_id=query.get("run", [None])[0],
+                            refresh=query.get("refresh", [""])[0] == "1",
+                        )
+                except Exception as error:
+                    return self.respond(
+                        503, json.dumps({"error": f"Catalog unavailable: {error}"}).encode()
                     )
                 return self.respond(200, json.dumps(result, allow_nan=False).encode())
             if url.path == "/api/workspace":

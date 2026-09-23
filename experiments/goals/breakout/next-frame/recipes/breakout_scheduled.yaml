@@ -1,0 +1,14 @@
+# @package _global_
+# Train from scratch with the action-history architecture and generated context.
+defaults:
+  - breakout_actions
+  - override /approach: scheduled_actions
+  - _self_
+name: breakout-scheduled
+approach:
+  options:
+    rollout_steps: ${history}
+    schedule:
+      warmup_epochs: 2
+      ramp_epochs: 6
+      max_probability: 0.8

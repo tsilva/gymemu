@@ -1,0 +1,23 @@
+# @package _global_
+# Plain single-frame RGB reconstruction; no temporal inputs or auxiliary losses.
+defaults:
+  - override /game: breakout_large
+  - override /approach: reconstruction
+  - override /optimizer: adam
+  - _self_
+name: breakout-reconstruction
+history: 1
+seed: 47
+trainer:
+  epochs: 10
+  batch_size: 64
+  learning_rate: 0.001
+  device: cuda
+  precision: bf16
+  threads: 2
+  workers: 2
+  compile: true
+  prefetch: true
+  sync_batches: 100
+  loader: cached
+  frame_cache: data/breakout-676ff638-lz4
