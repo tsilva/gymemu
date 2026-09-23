@@ -48,3 +48,17 @@ runner owns stages, evaluation, and run artifacts. Root scripts are entry points
 - Run uv run pytest, uv run ruff check ., and a bounded train/play smoke for changes
   affecting alignment, startup, checkpoint loading, or player stepping. Exercise both
   direct and multi-stage paths for changes to shared experiment infrastructure.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use a single-context layout with root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
