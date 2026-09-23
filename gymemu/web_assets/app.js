@@ -11,18 +11,33 @@ const token = new URLSearchParams(location.hash.slice(1)).get('token') || sessio
 if (token) sessionStorage.setItem('gymemu-token', token);
 const windowId = location.pathname === '/workspace/stats' ? 'stats' : 'main';
 const isPlayer = windowId === 'main', writer = crypto.randomUUID();
+const desktopId = new URLSearchParams(location.search).get('desktop');
 window.name = `gymemu-${windowId}-${location.host}`;
 document.body.classList.toggle('stats-window', !isPlayer);
 document.body.classList.toggle('player-window', isPlayer);
 document.title = isPlayer ? 'Gymemu player' : 'Gymemu diagnostics';
+const viewerIcon = document.querySelector('link[rel="icon"]');
+viewerIcon.type = 'image/png';
+viewerIcon.href = `/assets/viewer-${isPlayer ? 'player' : 'stats'}.png`;
 const companion = $('#companion-tab'), companionUrl = new URL(location.href);
 companionUrl.pathname = isPlayer ? '/workspace/stats' : '/';
 companionUrl.hash = new URLSearchParams({token:token || ''}).toString();
 companion.href = companionUrl.href;
 companion.target = `gymemu-${isPlayer ? 'stats' : 'main'}-${location.host}`;
-companion.title = isPlayer ? 'Open diagnostics tab' : 'Open player tab';
+companion.title = desktopId
+  ? (isPlayer ? 'Open diagnostics window' : 'Open player window')
+  : (isPlayer ? 'Open diagnostics tab' : 'Open player tab');
 companion.setAttribute('aria-label',companion.title);
 companion.querySelector('span').textContent = isPlayer ? 'Diagnostics' : 'Player';
+const brandUrl = new URL('/', location.href);
+if (desktopId) brandUrl.searchParams.set('desktop',desktopId);
+brandUrl.hash = new URLSearchParams({token:token || ''}).toString();
+$('.app-wordmark').href = brandUrl.href;
+if (desktopId) companion.onclick = async event => {
+  event.preventDefault();
+  try { await request('/api/window', {method:'POST', body:JSON.stringify({window:isPlayer ? 'stats' : 'player'})}); }
+  catch (error) { showToast(error.message); }
+};
 $('#inspection-position').hidden = isPlayer;
 $('#mode').hidden = !isPlayer;
 $('#add-panel').hidden = isPlayer;
@@ -235,6 +250,11 @@ async function boot() {
     grid.on('change',(_event,nodes)=>{if(syncing)return;nodes.forEach(node=>{const p=workspace.panels[node.id];if(p && grid.getColumn()===12) for(const key of ['x','y','w','h']) p.placement[key]=node[key];});persist();});
   }
   runtime=new PanelRuntime({definitionFor:panelDefinition,container:$('#dashboard'),services:{getState:()=>snapshot,command,inspectStep,setChartRange,setChartHoverStep,showToast,updatePanel},
+    loadModule:path=>{
+      const load=window.gymemuPanelModules?.[path];
+      if(!load) throw new Error(`Unknown panel module: ${path}`);
+      return load();
+    },
     onMount:(element,id,_definition,item)=>{
       if(grid) grid.makeWidget(item,placement(id));
       else {item.style.order=['original','prediction','difference'].indexOf(id);element.querySelector('.panel-drag').remove();}
@@ -266,12 +286,13 @@ async function boot() {
   while(active) {
     try {
       const next=await request(`/api/state?after=${revision}`);
-      if(next.catalog && !next.checkpoint) { location.href=`/browse#${new URLSearchParams({token})}`; return; }
+      if(next.catalog && !next.checkpoint) { location.href=`/browse${desktopId ? `?desktop=${desktopId}` : ''}#${new URLSearchParams({token})}`; return; }
       if(next.catalog) {
         const browse=$('#browse-checkpoints'); browse.hidden=false;
         const saved=sessionStorage.getItem('gymemu-catalog-route');
         const destination=new URL(saved || '/browse',location.href);
         if(destination.origin!==location.origin) destination.href=new URL('/browse',location.href).href;
+        if(desktopId) destination.searchParams.set('desktop',desktopId);
         destination.hash=new URLSearchParams({token}).toString();
         browse.href=destination.href;
         browse.onclick=async event=>{event.preventDefault();await command({type:'pause'});location.href=browse.href;};

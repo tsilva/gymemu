@@ -9,6 +9,8 @@ A widget exports `mount({ definition, services })` and returns an `element` plus
 optional `render(snapshot, view)`, `resize()`, and `destroy()` methods. The definition
 contains its stable ID, title, type, enabled state, and config. Register a new type
 with a local module path and minimum size, then add its default instance if needed.
+Add the corresponding static loader in `frontend/main.js` so Vite includes the module
+in the packaged Svelte build. Run `pnpm build:web` after frontend changes.
 Keep model-specific inference out of widgets and the transport.
 
 All images and metadata in a snapshot belong to one playback revision. The browser
@@ -52,7 +54,7 @@ The hover cursor and selected-step reference use actual timestep coordinates.
 `services.updatePanel()` changes a widget's config. Widgets must remove their
 listeners and dispose of retained resources in `destroy()` when applicable.
 
-Run `node --test tests/web_player/*.test.mjs` from the repository root. Assets are
-served directly by Python; no frontend install or build is needed. GridStack 12.6.0
+Run `pnpm test:web` from the repository root. Python serves the committed Svelte
+build from `gymemu/web_assets/dist/`; source changes need `pnpm build:web`. GridStack 12.6.0
 is the checked-in Gradlab vendor asset, not a runtime CDN dependency. See the
 adjacent Gradlab license and third-party notices for copied assets.

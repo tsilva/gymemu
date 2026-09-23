@@ -11,7 +11,6 @@ import queue
 import secrets
 import threading
 import time
-import webbrowser
 from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +24,7 @@ from gymemu.player import PLAYBACK_FPS, handle_key
 from gymemu.replay import ReplayPlayer
 
 ASSETS = Path(__file__).with_name("web_assets")
+DESKTOP_ASSETS = Path(__file__).with_name("desktop")
 
 
 def workspace_revision(value):
@@ -531,22 +531,33 @@ class CatalogSession:
 def serve_catalog(catalog, factory, *, port=0, open_browser=True):
     session = CatalogSession(catalog, factory)
     server = None
+    browser = None
     try:
-        server, url = make_server(session, port, catalog=catalog)
+        if open_browser:
+            from gymemu.desktop_browser import PlaybackBrowser
+
+            browser = PlaybackBrowser()
+        server, url = make_server(session, port, catalog=catalog, desktop_browser=browser)
         print(f"Gymemu navigator: {url}", flush=True)
         print(f"Local runs: {catalog.root}", flush=True)
-        if open_browser:
-            webbrowser.open(url, new=2)
-        server.serve_forever(poll_interval=0.2)
+        if browser:
+            browser.open(url)
+            server.timeout = 0.2
+            while browser.any_open():
+                server.handle_request()
+        else:
+            server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass
     finally:
         if server:
             server.server_close()
+        if browser:
+            browser.close()
         session.close()
 
 
-def make_server(session, port=0, *, workspace_path=None, catalog=None):
+def make_server(session, port=0, *, workspace_path=None, catalog=None, desktop_browser=None):
     token = secrets.token_urlsafe(32)
     workspace_path = workspace_path or Path.home() / ".config/gymemu/player-workspace.json"
     workspace_lock = threading.Lock()
@@ -614,17 +625,25 @@ def make_server(session, port=0, *, workspace_path=None, catalog=None):
             navigator = catalog is not None and url.path in ("/", "/browse")
             dashboard = url.path in ("/", "/player", "/workspace/stats", "/browse")
             page = "catalog.html" if navigator else "index.html"
-            path = ASSETS / (page if dashboard else url.path.removeprefix("/assets/"))
+            icon = {
+                "/assets/viewer-player.png": "player.png",
+                "/assets/viewer-stats.png": "stats.png",
+            }.get(url.path)
+            if icon:
+                path, allowed_root = DESKTOP_ASSETS / icon, DESKTOP_ASSETS
+            else:
+                path = ASSETS / (page if dashboard else url.path.removeprefix("/assets/"))
+                allowed_root = ASSETS
             if not dashboard and not url.path.startswith("/assets/"):
                 return self.respond(404, b"Not found", "text/plain")
-            if not path.resolve().is_relative_to(ASSETS.resolve()) or not path.is_file():
+            if not path.resolve().is_relative_to(allowed_root.resolve()) or not path.is_file():
                 return self.respond(404, b"Not found", "text/plain")
             return self.respond(
                 200, path.read_bytes(), mimetypes.guess_type(path)[0] or "application/octet-stream"
             )
 
         def do_POST(self):
-            if self.path not in ("/api/command", "/api/workspace", "/api/open"):
+            if self.path not in ("/api/command", "/api/workspace", "/api/open", "/api/window"):
                 return self.respond(404, b'{"error":"Not found"}')
             if not self.authorized():
                 return self.respond(403, b'{"error":"Unauthorized player request"}')
@@ -648,7 +667,18 @@ def make_server(session, port=0, *, workspace_path=None, catalog=None):
                     and length > 4096
                 ):
                     raise ValueError("Invalid command size")
-                if self.path == "/api/open":
+                if self.path == "/api/window":
+                    if desktop_browser is None or command.get("window") not in ("player", "stats"):
+                        raise ValueError("Desktop window is unavailable")
+                    path = "/player" if command["window"] == "player" else "/workspace/stats"
+                    target = (
+                        f"http://127.0.0.1:{self.server.server_port}{path}#token={token}"
+                    )
+                    try:
+                        desktop_browser.open(target, command["window"])
+                    except Exception as error:
+                        return self.respond(500, json.dumps({"error": str(error)}).encode())
+                elif self.path == "/api/open":
                     if catalog is None:
                         raise ValueError("The checkpoint navigator is unavailable")
                     try:
@@ -689,8 +719,13 @@ def serve(player, *, checkpoint, keymap, port=0, open_browser=True, scale=3, mod
         player, checkpoint, keymap, scale=scale, mode_factory=mode_factory
     ).start()
     server = None
+    browser = None
     try:
-        server, url = make_server(session, port)
+        if open_browser:
+            from gymemu.desktop_browser import PlaybackBrowser
+
+            browser = PlaybackBrowser()
+        server, url = make_server(session, port, desktop_browser=browser)
         player_url, stats_url = dashboard_urls(url)
         print(f"Gymemu player: {url}", flush=True)
         print(f"Gymemu diagnostics: {stats_url}", flush=True)
@@ -698,13 +733,18 @@ def serve(player, *, checkpoint, keymap, port=0, open_browser=True, scale=3, mod
             "Space/action keys step; Tab plays; R resets; C selects next. Ctrl+C stops server.",
             flush=True,
         )
-        if open_browser:
-            webbrowser.open(player_url, new=2)
-            webbrowser.open(stats_url, new=2, autoraise=False)
-        server.serve_forever(poll_interval=0.2)
+        if browser:
+            browser.open(player_url)
+            server.timeout = 0.2
+            while browser.any_open():
+                server.handle_request()
+        else:
+            server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass
     finally:
         if server:
             server.server_close()
+        if browser:
+            browser.close()
         session.close()

@@ -195,7 +195,10 @@ def test_http_commands_security_assets_and_workspace(running_server):
     for path in (
         "",
         "workspace/stats",
-        "assets/app.js",
+        "assets/dist/app.js",
+        "assets/dist/catalog.js",
+        "assets/viewer-player.png",
+        "assets/viewer-stats.png",
         "assets/panels/runtime.js",
         "assets/vendor/gridstack/gridstack-all.js",
     ):
@@ -204,6 +207,41 @@ def test_http_commands_security_assets_and_workspace(running_server):
             assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
     with pytest.raises(HTTPError):
         urlopen(root + "assets/../web_player.py", timeout=5)
+    with pytest.raises(HTTPError) as error:
+        api(url, "/api/window", {"window": "stats"})
+    assert error.value.code == 400
+
+
+def test_desktop_window_endpoint_uses_authenticated_fixed_roles(tmp_path):
+    class Browser:
+        def __init__(self):
+            self.opened = []
+
+        def open(self, url, role):
+            self.opened.append((url, role))
+
+    browser = Browser()
+    s = session().start()
+    server, url = make_server(
+        s, workspace_path=tmp_path / "workspace.json", desktop_browser=browser
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert api(url, "/api/window", {"window": "stats"}) == {"ok": True}
+        assert browser.opened == [(url.replace("/#token=", "/workspace/stats#token="), "stats")]
+        with pytest.raises(HTTPError) as error:
+            api(url, "/api/window", {"window": "other"})
+        assert error.value.code == 400
+        with pytest.raises(HTTPError) as error:
+            api(url, "/api/window", {"window": "player"}, Origin="https://evil.example")
+        assert error.value.code == 403
+        assert len(browser.opened) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        s.close()
+        thread.join(timeout=3)
 
 
 def test_paired_tabs_share_one_inference_revision(running_server):
@@ -234,10 +272,14 @@ def test_workspace_persists_paired_layout_and_ignores_delayed_writes(running_ser
 
 
 @pytest.mark.parametrize("open_browser", [True, False])
-def test_serve_opens_or_prints_both_tabs(monkeypatch, capsys, open_browser):
+def test_serve_opens_desktop_player_or_prints_urls(monkeypatch, capsys, open_browser):
+    import gymemu.desktop_browser as desktop
     import gymemu.web_player as web
 
     class Server:
+        def handle_request(self):
+            pass
+
         def serve_forever(self, **_):
             raise KeyboardInterrupt
 
@@ -246,13 +288,26 @@ def test_serve_opens_or_prints_both_tabs(monkeypatch, capsys, open_browser):
 
     url = "http://127.0.0.1:12345/#token=test"
     opened = []
-    monkeypatch.setattr(web, "make_server", lambda *_: (Server(), url))
-    monkeypatch.setattr(web.webbrowser, "open", lambda target, **kw: opened.append((target, kw)))
+    class Browser:
+        def __init__(self):
+            self.polls = 0
+
+        def open(self, target, role="player"):
+            opened.append((target, role))
+
+        def any_open(self):
+            self.polls += 1
+            return self.polls == 1
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web, "make_server", lambda *_, **__: (Server(), url))
+    monkeypatch.setattr(desktop, "PlaybackBrowser", Browser)
     player = session().player
     web.serve(player, checkpoint="model.pt", keymap={}, open_browser=open_browser)
     urls = dashboard_urls(url)
-    assert [target for target, _ in opened] == (list(urls) if open_browser else [])
-    assert all(options["new"] == 2 for _, options in opened)
+    assert opened == ([(url, "player")] if open_browser else [])
     output = capsys.readouterr().out
     assert all(target in output for target in urls)
     assert not player.model.calls
