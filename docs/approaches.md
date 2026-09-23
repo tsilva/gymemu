@@ -900,3 +900,49 @@ stopped. Active rows share one network execution for state and stopping; ignore
 state outputs when stop is true. Reuse `evaluate_life_rollouts` for direct
 comparison with the container. Inference requires no parent checkpoints.
 This registry entry does not change the RGB approaches, runner or player.
+
+## Recorded-state neural renderer
+
+`state_renderer` is a registered model for an isolated same-state reconstruction
+experiment. It is not wired into the shared RGB runner or player. Inputs have 112
+physical-unit fields: ball x, integer RAM ball y, paddle x, paddle width, then
+108 row-major brick occupancy values. Pixel coordinates supply the other input.
+`from_dynamics` selects these fields from nonterminal unified outputs; callers
+must stop terminal rows before rendering.
+
+The encoder builds 20 spatial features, including clipped distances to objects
+and fixed game boundaries, local brick occupancy, and coordinates within a brick.
+A shared 20→64→64→64→9 SiLU MLP predicts palette classes independently at each
+pixel. The palette is fitted to training images only. This explicit geometry is
+an inductive bias, not a learned image encoder or a simulator renderer. The
+network learns pixel colors and visibility from dataset targets. `render` returns
+float32 RGB NCHW and blacks out HUD rows 0–16, whose state is unsupported.
+
+Save `model_spec` (including palette) and `model` state dict; reload through
+`build_model` with `torch.load(..., weights_only=True)`. Reconstruction training
+and metrics are separate from dynamics training and next-frame RGB comparisons.
+See [the experiment protocol](training.md#recorded-state-decoder).
+
+### State dynamics with a separate renderer
+
+`gymemu.state_playback.StatePlayback` implements the browser player protocol for
+the published unified state model plus `state_renderer`. Use `gymemu play-state`
+and `configs/state_playback.yaml`; this pipeline is separate from the RGB training
+approaches. Model construction still goes through `build_model`. The orchestrator
+maps the 118-value dynamics output into the next 119-value source and uses only
+visual fields for rendering. Terminal placeholders are neither rendered nor fed
+back. Reset clones the complete initial source.
+
+Players can expose `playback_fps`, `finished`, and `history_editable` capabilities
+to the shared browser transport. Defaults preserve existing RGB playback. Keep
+model-specific field conversion in the orchestrator rather than adding branches
+for individual approaches to the shared player or runner.
+
+`gymemu.state_replay.StateReplay` implements the existing `ReplayPlayer` contract
+for independent one-step state predictions. Its loader selects one episode from
+the pinned split, checks transition and frame-ID continuity, reconstructs hidden
+source fields causally, and loads referenced RGB assets by ID. No controller or
+collision reconstruction runs inside the model's generated rollout. Replay keeps
+termination agreement separate from state and RGB comparisons and does not stop
+on a predicted terminal. A generic `context_note` lets players explain their
+input semantics and per-step comparisons in Playback settings.

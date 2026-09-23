@@ -11,6 +11,21 @@
 
 Gymemu is a Python toolkit for comparing learned game emulators. Train different models
 or multi-stage pipelines on recorded game frames and actions, then play their predictions.
+Play the published state dynamics and RGB decoder together:
+
+```bash
+uv run gymemu play-state
+# Interactive generated play also starts from a complete recorded state.
+uv run gymemu play-state --autoregressive
+```
+
+The player opens paused in teacher-forcing mode. Space predicts from the recorded
+state and action, with Prediction, Original, and Diff panels. Select Autoregressive
+for interactive play from the episode's starting state, using Left/Right/Space.
+Tab toggles continuous play and R resets. `--autoregressive` starts directly from
+the selected episode's complete recorded state. See
+[state playback](docs/training.md#interactive-state-dynamics-and-decoder) for details.
+
 Hydra config files control the game, models, training stages, and experiment settings.
 
 The default approach is the original direct RGB CNN. An experimental latent approach
@@ -188,6 +203,18 @@ It reaches **99.6056%** exact one-step validation. Over 256 native frames,
 completely exact sampled feedback windows improve from **20.38% to 51.83%**.
 The recordings and policies also differ, so this does not isolate frameskip alone.
 The new checkpoint is separate, and test remains reserved.
+The [published model](https://huggingface.co/tsilva/gymemu-breakout-unified-dynamics-fs1) includes standalone PyTorch inference code and the full state contract.
+
+State playback initializes from a complete recorded state, including controller
+charge. A [controller fine-tuning experiment](docs/training.md#recorded-initialization-and-controller-fine-tuning)
+improves controller stress accuracy but still exhibits some rollout failures;
+its separate local playback configuration is documented with the results.
+
+A [longer training run](docs/training.md#longer-training-for-the-frameskip-1-unified-mlp)
+adds 32,080 updates with the same architecture and uniform sampling. Exact
+one-step validation improves to **99.6585%**, and completely exact sampled
+256-frame windows reach **55.49%**. These continued weights are saved separately;
+the published model remains unchanged.
 
 The [state-model status table](docs/state-model-status.md) lists each target,
 its model and inputs, measured accuracy, and remaining gaps.
@@ -668,3 +695,10 @@ with two frames and one action achieved 0.713/0.815-pixel ball x/y MAE, but did
 not meet the earlier accuracy criterion across all variables; paddle accuracy
 also decreased. See [joint paddle/ball results](docs/history.md#2026-09-17-joint-current-paddle-and-ball-state)
 and [training options](docs/training.md#joint-current-paddle-and-ball-state).
+
+A separate [recorded-state decoder experiment](docs/training.md#recorded-state-decoder)
+reconstructs Breakout playfields from ball/paddle positions and brick occupancy.
+It uses explicit spatial features and a small palette-classification MLP; HUD
+rendering and integration with dynamics playback remain outside this benchmark.
+The decoder is available on [Hugging Face](https://huggingface.co/tsilva/gymemu-breakout-state-decoder-fs1)
+with standalone PyTorch inference, validation metrics and reconstruction examples.

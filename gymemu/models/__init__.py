@@ -31,6 +31,7 @@ from gymemu.models.paddle_vertical_pair import PaddleVerticalPair
 from gymemu.models.paddle_width import PaddleWidth
 from gymemu.models.state_context import HiddenStateProbe, PaddleContextProbe
 from gymemu.models.state_dynamics import StateGRU, StateMLP
+from gymemu.models.state_renderer import StateRenderer
 from gymemu.models.unified_state import UnifiedStateMLP
 from gymemu.models.vertical_ball_pair import VerticalBallPair
 from gymemu.models.vertical_collision_timing import VerticalCollisionTiming
@@ -72,6 +73,7 @@ MODELS = {
     "paddle_position_cnn": PaddlePositionCNN,
     "state_mlp": StateMLP,
     "unified_state_mlp": UnifiedStateMLP,
+    "state_renderer": StateRenderer,
     "state_paddle_context_probe": PaddleContextProbe,
     "state_hidden_probe": HiddenStateProbe,
     "paddle_transition_mlp": PaddleTransitionMLP,

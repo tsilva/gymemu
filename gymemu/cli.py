@@ -6,6 +6,7 @@ import sys
 from importlib.metadata import version
 
 COMMANDS = {
+    "play-state": ("Play state dynamics with a learned RGB decoder", "play_state"),
     "dynamics": ("Train and evaluate single-ball state-only dynamics", "dynamics"),
     "train": ("Train an emulator using Hydra configs or a recipe", "train"),
     "play": ("Play a trained emulator in the browser", "play"),

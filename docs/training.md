@@ -4446,3 +4446,239 @@ imports enabled; run `compare_fs2.py` separately before evaluation. Preparation
 keeps features in RAM and requires the pinned raw snapshots and earlier native
 audit helpers. Reloading the selected checkpoint exactly reproduces validation.
 The previous model also reproduces its 3,726 validation errors.
+
+Published the frameskip-1 unified model as [tsilva/gymemu-breakout-unified-dynamics-fs1](https://huggingface.co/tsilva/gymemu-breakout-unified-dynamics-fs1), pinned at [0de847b1a306b50669debded82794fd491c6bb1a](https://huggingface.co/tsilva/gymemu-breakout-unified-dynamics-fs1/commit/0de847b1a306b50669debded82794fd491c6bb1a). The repository includes standalone PyTorch weights/code, the unchanged original checkpoint, input/output contract, model card, training history, evaluation metrics, and artifact hashes. All 19 downloaded file hashes match; the downloaded verification script and exact model-card quick start pass. This publication does not add test evaluation or change model weights.
+
+## Recorded-state decoder
+
+The 2026-09-22 experiment trains `state_renderer` on recorded visual states and
+matching RGB frames from `tsilva/gradlab-breakout-c6d579da`, revision
+`5f6e0ca8c28e2fc27aeda3ead04851a1f8a45a77`. It uses the existing episode/seed-grouped
+train/validation membership; test remains reserved. No dataset columns change.
+Select 32,768 train and 2,048 validation frames uniformly without replacement
+(seed 20260922), from successors with ball y > 0, trustworthy brick grids and no
+initial-wall flag. Join successor labels to `successor_frame_id` by ID, never
+array offset. Training and validation selected frame IDs do not overlap.
+
+The visual state is ball x/integer RAM y, paddle x/width and 108 brick bits.
+Fixed spatial features feed a 10,249-parameter 20→64→64→64→9 SiLU pixel MLP.
+Training uses palette cross-entropy with four equally weighted regions:
+128 uniform playfield, 64 ball-neighborhood, 32 paddle-neighborhood and 32
+brick-wall pixels per frame. Each update samples 32 training frames. The extra
+object weighting prevents background pixels from dominating the objective.
+Run 12,000 AdamW updates, seed 2026, learning rate 0.003 decaying to 0.00003,
+weight decay 0.00001 and gradient clipping 5. Select the checkpoint with lowest
+float32 RGB MSE over every playfield pixel in all fixed validation frames,
+evaluating every 1,000 updates. HUD rows 0–16 are excluded; full RGB MSE is saved
+separately and includes the deliberately black HUD.
+
+Scripts, sample identity, provenance, history and reports live under
+`logs/state-decoder-fs1-20260922/`. Run `prepare.py`, `train.py` and `report.py` in
+that order in one Python process with repository imports enabled. Preparation
+uses the local pinned dataset snapshots and keeps sampled states/images in RAM.
+Checkpoint: `runs/state-decoder-fs1-20260922/best.pt`. This is a structured neural
+renderer benchmark, not evidence about an unconstrained autoencoder. It has not
+yet been evaluated on predicted-state rollouts or integrated into the player.
+
+The selected update 12,000 checkpoint reached **99.999377% exact RGB pixels**,
+**1,969/2,048 (96.1426%) pixel-perfect playfields**, and masked float32 RGB MSE
+**1.64581e-6**, after 523 seconds including validation. There are 394 wrong pixels
+across 79 frames (maximum 71 in one frame). The ball neighborhood has zero RGB
+error across the sample; an independent isolated-sprite detector confirms exact
+ball placement in all 1,769 scorable frames. The other 279 frames are not scored
+by that detector because their ground-truth ball is not uniquely isolated.
+Full RGB MSE is 0.00301980, dominated by the omitted HUD, so masked scores must
+not be compared directly with existing full next-frame RGB baselines.
+
+Visual inspection of the four worst reconstructions shows artifacts along the
+lower edge of the top wall. Checkpoint reload reproduces all validation metrics;
+CPU and MPS renders match on a 16-frame probe. The original dynamics checkpoint
+hash is unchanged. Validation selected the checkpoint; this is not a test result
+or a guarantee about unseen/predicted states. The reconstruction comparison and
+`summary.json` are in the experiment log directory.
+
+Published the unchanged decoder to
+[tsilva/gymemu-breakout-state-decoder-fs1](https://huggingface.co/tsilva/gymemu-breakout-state-decoder-fs1),
+revision `1aee45f2e741d499985cb666017ae0c15a345e83`. The 22 published artifact hashes
+match downloaded files. Standalone verification and the exact model-card quick
+start pass from the Hub cache. The package includes the original checkpoint,
+inference weights/code, input contract, provenance, measurements and comparison
+image. Publication adds no training or test evaluation.
+
+## Longer training for the frameskip-1 unified MLP
+
+Continue the published model with another 32,080 uniformly sampled updates,
+keeping the architecture, numerical class vocabularies, split, batch size, losses,
+weight decay, and gradient clipping unchanged. Use a constant learning rate of
+1e-5, the original run's final rate. AdamW moments restart because the published
+checkpoint did not save optimizer state. Recreate the original sampler position
+from its seed and update count, continuing the partially consumed fifth epoch.
+This is a low-rate weight continuation, not an exact optimizer resume.
+
+Reproduce the parent's full validation metrics, fixed training probe, and all
+sampled rollout results before fitting. Choose the minimum joint validation
+error count over the parent and 20 continuation checkpoints, earliest tie.
+Rollouts use the same 4,096 roots and denominators and do not select checkpoints.
+
+The additional run takes 38.99 minutes of elapsed run time including validation, a memory optimization pause, and replayed updates, and brings total exposure to 8.594 epochs. Select added update 32,080, total update 64,160. All 32,080 planned updates complete.
+
+To reduce memory pressure, pack the binary brick inputs in RAM and verify exact
+round-trip equality for every affected value. Resume from the last saved optimizer
+and sampler checkpoint, discarding and replaying uncheckpointed updates. The
+retained update count, sampling, features, and objective remain unchanged.
+
+| Measure | Published parent | Continued model |
+| --- | ---: | ---: |
+| Exact joint one-step validation | 99.60559% | 99.65846% |
+| Joint errors / 943,949 | 3,723 | 3,224 |
+| Fixed training-probe accuracy | 99.74060% | 99.87946% |
+| False / missed life-loss stops | 0 / 0 | 0 / 0 |
+| Entire 2-native-frame window exact | 4065/4096 (99.24%) | 4075/4096 (99.49%) |
+| Entire 16-native-frame window exact | 3869/4096 (94.46%) | 3908/4096 (95.41%) |
+| Entire 64-native-frame window exact | 3309/4088 (80.94%) | 3422/4088 (83.71%) |
+| Entire 256-native-frame window exact | 2110/4071 (51.83%) | 2259/4071 (55.49%) |
+
+| State field | Parent errors | Continuation errors |
+| --- | ---: | ---: |
+| ball_x | 312 | 241 |
+| ball_y_with_fraction | 2,850 | 2,440 |
+| ball_vx | 252 | 204 |
+| ball_vy | 2,829 | 2,439 |
+| bricks | 1,346 | 1,185 |
+| contact | 2,705 | 2,306 |
+| hit_count | 53 | 53 |
+| paddle_width | 0 | 2 |
+| charge | 18 | 20 |
+| paddle_x | 44 | 116 |
+
+State-field denominators are 943,528 nonterminal transitions. Rollouts feed back
+all predicted state while retaining recorded actions, stop on predicted death,
+and censor missed deaths at reference boundaries. Test remains reserved; the
+dataset and published parent weights remain unchanged.
+
+Selected checkpoint: `runs/unified-state-fs1-continue-20260922/best.pt`. SHA256: `411c4624695578aa1a72b304fb0f530f178df202d7c0cf85a28080db6af50023`.
+
+Artifacts and scripts are under `logs/unified-state-fs1-continue-20260922/`.
+Run `prepare.py`, `train_continue.py`, then `evaluate_continue.py` in the same
+Python process with repository imports enabled. This requires the pinned raw
+snapshot and the original run's audit/evaluation helpers. Features remain in RAM.
+`resume-last.pt` saves optimizer moments and sampler state for future exact
+continuation. Verify the selected CPU reload, 256 CPU/MPS predictions, original
+checkpoint hash, and the saved sampler/optimizer round trip.
+
+Longer training reduces joint validation errors by 13.4% and increases exact
+256-frame windows by 3.66 percentage points on the fixed validation sample.
+The training probe improves from 170 to 79 errors, a larger relative reduction
+than validation (3,723 to 3,224), so generalization remains a concern. Vertical
+ball motion and contact still dominate errors; paddle-position errors increase
+from 44 to 116 despite the overall gain. The final checkpoint is best, so this
+run does not establish that further training has reached a plateau.
+
+## Interactive state dynamics and decoder
+
+Run `uv run gymemu play-state` to combine the published frameskip-1 unified
+state dynamics and state decoder in the browser player. It opens paused in
+teacher-forcing mode using the first episode in the pinned validation split.
+The mode selector and direct `--autoregressive` launch both start from the
+selected episode's first eligible recorded state. Direct autoregressive startup
+loads state metadata without fetching recorded RGB assets. `--start-source`
+explicitly selects a custom complete state; there is no synthetic fallback. Tab toggles continuous play and R resets and pauses.
+
+In teacher forcing, Space advances one recorded transition. Every prediction
+receives the recorded source state and executed action, including controller
+charge, fractional y, hit count, and contact memory. The loader reconstructs these
+fields from preceding observations using the preparation contract from training.
+It verifies controller positions against recordings. No predicted states feed
+back, even after a false terminal prediction. Inactive or unreliable rows are
+skipped; the timeline indexes eligible transitions. Use Playback settings to see
+the original recorded step, exact next-state agreement, and predicted/recorded
+life-loss flags.
+
+Original displays the recorded successor image, joined by frame ID. Prediction
+shows the decoded predicted state. Diff and RGB MSE compare full float32 RGB,
+including the decoder's black HUD. Terminal targets do not score state agreement.
+If either side is terminal, RGB MSE is unavailable; predicted terminal placeholders
+are never decoded. Replay continues to the end of the selected recorded episode.
+This is inspection, not a new aggregate accuracy evaluation.
+
+```bash
+uv run gymemu play-state --episode-id 6
+uv run gymemu play-state --headless-steps 32 --output logs/state-replay.png
+uv run gymemu play-state --autoregressive
+uv run gymemu play-state --start-source path/to/source.json
+uv run gymemu play-state --headless-actions 1,1,2,0 --output logs/state-play.png
+```
+
+`--episode-id` selects another episode in `--split validation`, the default.
+`--split train` and `--split test` require explicit selection; no test data is read
+by default. One episode is loaded per launch. `--dataset PATH` accepts a complete
+local snapshot containing the configured split and original trajectory assets.
+The pinned model/dataset revisions, split identity, key bindings, and 60-step/s
+target cadence are in `configs/state_playback.yaml`. The synthetic Hub usage
+example is not a playable default state.
+Model downloads include only JSON and weights; inference uses local registered
+implementations and never imports Hub Python files.
+
+In autoregressive mode, each fresh Left, Right, or Space key press executes one
+native-frame prediction. Every predicted field feeds the next dynamics input;
+decoded pixels are display output only. No recorded frames correct the rollout.
+Predicted life loss stops playback and preserves the last valid image. These
+models do not implement respawn. Actual continuous speed depends on inference
+and browser transport time.
+
+Launching with `--autoregressive` uses the published synthetic full-wall example.
+A custom start file contains `{"source": [[...119 values...]]}` in the published
+dynamics input order and physical units. Its last value is an action placeholder
+replaced by each key press. A screenshot alone cannot provide hidden state.
+RGB history editing is disabled for both state modes. The HUD remains black,
+and errors can accumulate during autoregression.
+
+## Recorded initialization and controller fine-tuning
+
+Direct `gymemu play-state --autoregressive` now starts from the selected episode's first eligible recorded state. It uses the same reconstruction as teacher forcing, including controller charge and hidden ball context, and does not fetch RGB assets. Explicit `--start-source` remains available. Missing data raises an error rather than falling back to the synthetic Hub usage example. The mode selector and reset preserve this starting state. Default teacher-forcing behavior is unchanged.
+
+The startup regression test fails on the previous implementation, which tries to open the synthetic example. It passes after the fix. An additional test proves state loading works with image assets and publication metadata absent. Real CPU player smoke, native Codex in-app browser stepping/reset, both direct and multi-stage CLI train/play tests, 449 passing tests, two skipped tests, Ruff, and whitespace checks pass.
+
+### Training and selection
+
+Start from the longer-trained local checkpoint, not from the older public weights. Architecture remains the shared 188-input, width-512, six-residual-block MLP. No native rules are inserted into inference.
+
+Generate 262,144 controller variations in RAM from training-only roots and unrelated training-only ball/brick contexts. Replay verified controller rules to label only charge and paddle position. Roots outside charge 1500..2500 have already passed the startup repeat acceleration; hold actions in 16-step blocks. The synthetic labels use repeat=60, and original recorded examples retain their actual startup labels. This is causal augmentation for controller outputs, not a claim that all mixed full-game states are jointly reachable. No augmented ball or brick targets are invented. No dataset files or columns change, and no test transitions are decoded.
+
+First try 4,000 output-head-only updates with a frozen trunk. All four checkpoints and three smaller weight blends regress full validation, so discard that approach. This does not prove frozen features can never work; it rejects this bounded recipe.
+
+Then restart from the parent and fine-tune the unchanged shared network for 4,000 updates at learning rate 3e-6. Each batch contains 768 uniformly sampled original training rows, 128 uniform controller variations, and 128 mined controller failures. Minimize the mean of the original eleven objectives plus 0.2 times the mean of the two controller objectives on variations. Refresh training failures every 1,000 updates. Mined errors decrease from 349 to 12. All normal and augmented fitting examples are training-derived. Native-label oracle use is confined to preparation/training/evaluation.
+
+The original selection rule picks update 2,000 by full one-step validation errors. It has 3,111 joint errors but slightly worse 256-frame rollout exactness, 55.32%. Evaluate the final update separately because it has the better controller-field score. Retain update 4,000 as a separate local candidate: 3,120 joint errors, better controller stress performance and slightly better 256-frame rollouts, with regressions at shorter horizons. This selection extension is adaptive validation tuning, not a fresh test result. Preserve `best.pt` as the 2,000-update one-step selection and `candidate.pt` as the final controller candidate.
+
+### Results
+
+All standard one-step comparisons use the same 943,949 validation transitions, with 943,528 nonterminal field targets. Rollouts use the same 4,096 roots and horizon-specific denominators, predicted-state feedback, and recorded actions. Exact windows require every state and termination prediction to match. Overlapping windows are not independent trials; the small 256-frame gain is not a statistical significance claim.
+
+| Measure | Published model | Longer-trained parent | Controller candidate |
+| --- | ---: | ---: | ---: |
+| Exact next-state accuracy | 99.60559% | 99.65846% | 99.66947% |
+| Paddle-position errors | 44 | 116 | 84 |
+| Charge errors | 18 | 20 | 18 |
+| Exact 16-frame windows | 94.46% | 95.41% | 95.21% |
+| Exact 64-frame windows | 80.94% | 83.71% | 83.41% |
+| Exact 256-frame windows | 51.83% | 55.49% | 55.69% |
+| Controller stress joint errors / 65,536 | 52 | 64 | 16 |
+| Controller stress illegal charge outputs | 32 | 32 | 7 |
+| Controller stress illegal position outputs | 6 | 8 | 1 |
+
+The stress set is generated after checkpoint selection using validation-derived roots/contexts and a separate fixed seed. It tests varied controller/game contexts under teacher forcing; it is distinct from the standard dataset and from long free-running play. The one known published charge-overflow fixture is correct in both the longer-trained parent and the new candidate, so its repair cannot be credited to this fine-tune. The inconsistent synthetic-start fixture still fails, which is why the startup code fix is essential.
+
+The scripted free-running probe remains mixed. From the same 15 nonterminal recorded roots and idle/right/left sequences, the parent runs 3,159 steps with 4 charge errors, no position errors, and 14 steps carrying invalid charge. The new candidate runs 3,184 steps with 5 charge errors, one position error, and 15 invalid-charge steps. Predicted death changes the denominators. Better controller stress and one-step metrics do not establish glitch-free interaction. The new candidate still emits seven illegal charges in the broader stress set. No hard range mask or native controller replacement was added.
+
+### Use the local candidate
+
+```sh
+uv run gymemu play-state --config logs/controller-repair-20260923/playback.yaml --autoregressive
+```
+
+The normal configuration still points to the unchanged published model, now with corrected recorded-state initialization. The explicit configuration above selects the new local candidate and the existing published decoder. No Hugging Face files were uploaded or replaced.
+
+Artifacts are under `logs/controller-repair-20260923/` and `runs/controller-repair-20260923/`. `run.py` reproduces preparation and the head-only attempt; in the same Python process, run `interpolate.py`, `finetune.py`, `evaluate_control.py`, `evaluate_final.py`, and `package.py` for the subsequent experiments and selected export. Full features and hidden activations stay in RAM. JSON records retain settings, provenance, every validation check, controller diagnostics and hashes. Standalone local component loading reproduces all 256 tested CPU predictions exactly, and CPU/MPS outputs agree on those rows.
+
+Candidate SHA256: `09bb5df6f46ced6e0df2cc2ce286cc4d11b15a5afafa6c2bdc7278ed00b66b3f`.

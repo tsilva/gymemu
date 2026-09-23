@@ -86,6 +86,8 @@ class PlaybackSession:
             self.history_revision += 1
 
     def validate_history_revision(self, command):
+        if not getattr(self.player, "history_editable", True):
+            raise ValueError("This player uses state inputs; RGB history cannot be edited")
         if getattr(self.player, "mode", None) == "reconstruction":
             raise ValueError(
                 "Reconstruction uses the current recorded frame; history edits are unavailable"
@@ -197,7 +199,7 @@ class PlaybackSession:
             self.history[self.player.steps] = {"step": self.player.steps, "mse": self.player.mse}
 
     def advance(self, action=None):
-        if self.replay and self.player.finished:
+        if getattr(self.player, "finished", False):
             self.pause()
             return
         start = time.perf_counter()
@@ -243,7 +245,7 @@ class PlaybackSession:
         elif kind == "blur":
             self.player.held_keys.clear()
         elif kind == "play":
-            self.player.continuous = not (self.replay and self.player.finished)
+            self.player.continuous = not getattr(self.player, "finished", False)
             self.last_heartbeat = time.monotonic()
         elif kind == "step":
             self.pause()
@@ -374,7 +376,7 @@ class PlaybackSession:
             "selection": player.episode.episode_id if self.replay else player.start_index,
             "choices": choices,
             "has_prediction": player.has_prediction,
-            "finished": self.replay and player.finished,
+            "finished": getattr(player, "finished", False),
             "action": player.recorded_action if self.replay else (player.last_action),
             "action_values": player.actions,
             "keymap": self.keymap,
@@ -389,7 +391,8 @@ class PlaybackSession:
                 else list(range(player.config["history"]))
             ),
             "history_revision": self.history_revision,
-            "history_editable": getattr(player, "mode", None) != "reconstruction",
+            "history_editable": getattr(player, "history_editable", True)
+            and getattr(player, "mode", None) != "reconstruction",
             "history_edited_frames": sorted(self.history_edits),
             "history_reordered": bool(
                 self.history_preview
@@ -399,6 +402,7 @@ class PlaybackSession:
             "scale": self.scale,
             "action_history": player.config.get("action_history", 1),
             "state_fields": player.config.get("state_fields", []),
+            "context_note": getattr(player, "context_note", None),
             "loading": self.loading,
             "images": images,
             "error": self.error,
@@ -418,7 +422,7 @@ class PlaybackSession:
         return self
 
     def run(self):
-        deadline = time.monotonic() + 1 / PLAYBACK_FPS
+        deadline = time.monotonic() + 1 / getattr(self.player, "playback_fps", PLAYBACK_FPS)
         while not self.closed.is_set():
             pending = None
             try:
@@ -437,7 +441,7 @@ class PlaybackSession:
                     self.error = str(error)
                     self.publish()
                 # Inference never catches up with a burst of missed frames.
-                deadline = time.monotonic() + 1 / PLAYBACK_FPS
+                deadline = time.monotonic() + 1 / getattr(self.player, "playback_fps", PLAYBACK_FPS)
             except Exception as error:
                 self.pause()
                 self.error = str(error)
@@ -445,7 +449,7 @@ class PlaybackSession:
                 if pending is not None:
                     pending.set_exception(error)
             if not self.player.continuous:
-                deadline = time.monotonic() + 1 / PLAYBACK_FPS
+                deadline = time.monotonic() + 1 / getattr(self.player, "playback_fps", PLAYBACK_FPS)
 
     def submit(self, command):
         if self.closed.is_set():

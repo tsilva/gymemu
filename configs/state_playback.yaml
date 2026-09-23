@@ -1,0 +1,18 @@
+# Separate frameskip-1 pipeline; RGB baseline settings remain in game/breakout.yaml.
+game: breakout
+action_values: [0, 1, 2]
+key_actions:
+  left: 2
+  right: 1
+  space: 0
+playback_fps: 60
+dynamics:
+  repository: tsilva/gymemu-breakout-unified-dynamics-fs1
+  revision: 0de847b1a306b50669debded82794fd491c6bb1a
+decoder:
+  repository: tsilva/gymemu-breakout-state-decoder-fs1
+  revision: 1aee45f2e741d499985cb666017ae0c15a345e83
+replay:
+  repository: tsilva/gradlab-breakout-c6d579da
+  revision: 5f6e0ca8c28e2fc27aeda3ead04851a1f8a45a77
+  split_id: bb52cc995e2817362e3c68be0ff82f1d9cfdec87d7edb8c7d9ea2929d3d5b800

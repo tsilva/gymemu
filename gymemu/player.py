@@ -6,7 +6,6 @@ import numpy as np
 import torch
 
 from gymemu.data import frame_stack, pad_actions, validate_states
-from gymemu.replay import ReplayPlayer
 
 PLAYBACK_FPS = 30
 
@@ -187,7 +186,7 @@ def handle_key(player, key, keymap, *, down=True, repeat=False):
         player.reset(cycle=True)
     elif key == "tab":
         player.continuous = not player.continuous
-        if isinstance(player, ReplayPlayer) and player.finished:
+        if getattr(player, "finished", False):
             player.continuous = False
     elif key in keymap and key not in player.held_keys:
         player.held_keys.append(key)
