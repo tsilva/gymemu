@@ -13,18 +13,6 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 
-[options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
-exclude-newer-span = "P7D"
-
-[options.exclude-newer-package]
-env-gradoom-turbo-torch = false
-env-vizdoom-turbo = false
-env-breakoutatari2600-turbo-native = false
-env-stableretro-turbo = false
-env-supermariobrosnes-turbo-emu = false
-gradlab = false
-
 [manifest]
 constraints = [
     { name = "aiohttp", specifier = ">=3.14.3" },
