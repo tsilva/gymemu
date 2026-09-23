@@ -12,6 +12,11 @@
 Gymemu is a Python toolkit for comparing learned game emulators. Train different models
 or multi-stage pipelines on recorded game frames and actions, then play their predictions.
 
+Published experiments follow Environment → Research Goal → Goal Revision or Variant →
+Run → Checkpoint → Player. The private R2 catalog records Run state and comparable
+held-out RGB MSE. See [training and publication](docs/training.md) for direct training,
+offline sync, and the checked-in recipe workflow.
+
 ## Desktop player
 
 `uv run gymemu play` opens the checkpoint navigator in a dedicated Gymemu window.

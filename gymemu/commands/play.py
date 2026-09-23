@@ -248,8 +248,8 @@ def main(argv=None):
             or args.list_start_states
         ):
             parser.error("Headless playback and scene listing require a checkpoint")
-        from gymemu.catalog import CheckpointCatalog
-        from gymemu.remote_catalog import RemoteCatalog
+        from gymemu.catalog import LocalCatalog
+        from gymemu.research_catalog import ResearchCatalog
         from gymemu.web_player import PlaybackSession, serve_catalog
 
         def session_factory(checkpoint):
@@ -261,12 +261,9 @@ def main(argv=None):
             )
 
         serve_catalog(
-            CheckpointCatalog(
-                args.runs_dir,
-                remote=None
-                if args.local_only
-                else RemoteCatalog(bucket=args.r2_bucket, prefix=args.r2_prefix),
-            ),
+            LocalCatalog(args.runs_dir)
+            if args.local_only
+            else ResearchCatalog(bucket=args.r2_bucket, prefix=args.r2_prefix),
             session_factory,
             port=port,
             open_browser=not args.no_browser,

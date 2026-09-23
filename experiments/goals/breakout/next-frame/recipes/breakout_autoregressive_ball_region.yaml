@@ -1,0 +1,16 @@
+# @package _global_
+# Differentiable RGB feedback with loss at every valid future step.
+defaults:
+  - breakout_ball_region
+  - override /approach: autoregressive_ball_region
+  - _self_
+name: breakout-autoregressive-ball-region
+trainer:
+  epochs: 10
+  batch_size: 8
+  compile: false
+approach:
+  options:
+    ball_region_weight: 0.03
+    rollout_steps: 8
+    rollout_schedule: [1, 2, 4, 8]

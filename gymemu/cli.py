@@ -14,6 +14,8 @@ COMMANDS = {
     "cache-frames": ("Build a lossless dataset frame cache", "cache_frames"),
     "save-start-state": ("Save a named playback start state", "save_start_state"),
     "upload-checkpoints": ("Upload run checkpoints to R2", "upload_checkpoints"),
+    "sync": ("Publish a completed offline Run", "sync"),
+    "experiment": ("Launch a resolved recipe on dstack", "experiment"),
 }
 
 

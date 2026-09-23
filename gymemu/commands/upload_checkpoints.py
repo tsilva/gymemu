@@ -1,6 +1,7 @@
 """Retry R2 publication for an existing Gymemu run without retraining."""
 
 import argparse
+import json
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -22,6 +23,13 @@ def main(argv=None):
         raise SystemExit(
             "R2 upload is still pending; inspect credentials and connectivity, then retry"
         )
+    run_file = output / "run.json"
+    if run_file.is_file() and store.state["status"] == "complete":
+        run = json.loads(run_file.read_text())
+        if run["status"] == "publication_pending":
+            run["status"] = "complete"
+            run_file.write_text(json.dumps(run, indent=2) + "\n")
+            store.sync(final=True)
     print(f"Uploaded run manifest: {store.uri}")
 
 

@@ -1,0 +1,13 @@
+# @package _global_
+# Measured CUDA execution variant; see docs/performance.md for matched results.
+defaults:
+  - breakout_autoregressive_ball_region
+  - _self_
+name: breakout-autoregressive-fast
+approach:
+  options:
+    feedback_dtype: autocast
+trainer:
+  batch_size: 32
+  compile: true
+  compile_layout_optimization: false

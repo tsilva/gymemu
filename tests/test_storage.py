@@ -3,6 +3,7 @@
 import hashlib
 import json
 import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -54,6 +55,13 @@ class FakeS3:
 def fake_s3(monkeypatch):
     client = FakeS3()
     monkeypatch.setattr("gymemu.storage.r2_client", lambda: client)
+    from gymemu.tracking import Tracker
+
+    @contextmanager
+    def fake_tracking(*args, **kwargs):
+        yield Tracker()
+
+    monkeypatch.setattr("gymemu.engine.track_run", fake_tracking)
     return client
 
 
@@ -61,7 +69,7 @@ def config_for(snapshot, output, approach="direct"):
     cfg = compose_config(["game=custom", f"approach={approach}", "experiment=smoke"])
     cfg.game.dataset = str(snapshot)
     cfg.game.env_id = "Fixture-v0"
-    cfg.wandb.mode = "disabled"
+    cfg.wandb.mode = "online"
     cfg.output = str(output)
     return cfg
 
@@ -73,6 +81,11 @@ def test_uploaded_checkpoint_and_scene_restore_playback(snapshot, tmp_path, fake
     receipt = json.loads((output / "r2.json").read_text())
     manifest = json.loads(fake_s3.objects[f"{receipt['prefix']}/manifest.json"])
     assert manifest["status"] == receipt["status"] == "complete"
+    index = json.loads(fake_s3.objects[f"runs/catalog/runs/{receipt['run_id']}.json"])
+    assert index["id"] == receipt["run_id"]
+    assert index["status"] == "complete"
+    assert index["manifest_key"] == f"{receipt['prefix']}/manifest.json"
+    assert index["best_mse"] == json.loads((output / "summary.json").read_text())["best_mse"]
     assert manifest["bucket"] == "gymemu"
     assert all(bucket == "gymemu" for bucket in fake_s3.buckets)
     assert receipt["prefix"].startswith("runs/Fixture-v0/")
@@ -139,6 +152,20 @@ def test_failed_upload_keeps_previous_manifest_until_retry(snapshot, tmp_path, f
     assert any(value == previous for k, value in fake_s3.objects.items() if "/manifests/" in k)
 
 
+def test_finished_training_waits_for_required_publication(snapshot, tmp_path, fake_s3):
+    cfg = config_for(snapshot, tmp_path / "run")
+    fake_s3.fail_manifest = True
+    with pytest.raises(RuntimeError, match="local files are intact"):
+        train(cfg)
+    run = json.loads((tmp_path / "run/run.json").read_text())
+    assert run["status"] == "publication_pending"
+    run_id = run["id"]
+    fake_s3.fail_manifest = False
+    upload_main([str(tmp_path / "run")])
+    assert json.loads((tmp_path / "run/r2.json").read_text())["run_id"] == run_id
+    assert json.loads((tmp_path / "run/run.json").read_text())["status"] == "complete"
+
+
 @pytest.mark.parametrize("failure", ["corrupt_head", "fail_manifest"])
 def test_upload_verification_and_manifest_failure_remain_retryable(
     snapshot, tmp_path, fake_s3, failure
@@ -163,6 +190,58 @@ def test_disabled_and_old_recipes_need_no_sdk_or_credentials(tmp_path, monkeypat
         store.sync(final=True)
         assert store.summary() == {}
         assert not (tmp_path / "r2.json").exists()
+
+
+def test_disabled_wandb_keeps_run_offline_even_if_r2_is_configured(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "boto3", None)
+    store = CheckpointStore(
+        {
+            "game": {"env_id": "Fixture-v0"},
+            "wandb": {"mode": "disabled"},
+            "r2": {"enabled": True, "bucket": "gymemu", "prefix": "runs"},
+        },
+        tmp_path,
+    )
+    store.sync(final=True)
+    assert not store.enabled
+    assert not (tmp_path / "r2.json").exists()
+
+
+def test_offline_run_syncs_under_its_original_identity(snapshot, tmp_path, fake_s3, monkeypatch):
+    from gymemu.commands.sync import main as sync_main
+
+    cfg = config_for(snapshot, tmp_path / "offline")
+    cfg.wandb.mode = "disabled"
+    output = train(cfg)
+    run_id = json.loads((output / "run.json").read_text())["id"]
+    assert not (output / "r2.json").exists()
+    assert not fake_s3.objects
+
+    class FakeRun:
+        url = "https://wandb.ai/test/gymemu/runs/abc"
+        summary = {}
+
+        def log(self, value):
+            pass
+
+        def finish(self, exit_code=0):
+            pass
+
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=lambda **kwargs: FakeRun()))
+    sync_main([str(output)])
+    receipt = json.loads((output / "r2.json").read_text())
+    assert receipt["run_id"] == run_id
+    assert f"runs/catalog/runs/{run_id}.json" in fake_s3.objects
+    run_path = output / "run.json"
+    run = json.loads(run_path.read_text())
+    run["status"] = "publication_pending"
+    run["publication"] = "offline"
+    run_path.write_text(json.dumps(run))
+    sync_main([str(output)])
+    retried = json.loads(run_path.read_text())
+    assert retried["id"] == run_id
+    assert retried["status"] == "complete"
+    assert retried["publication"] == "online"
 
 
 def test_missing_credentials_fail_before_dataset_access(snapshot, tmp_path, monkeypatch):

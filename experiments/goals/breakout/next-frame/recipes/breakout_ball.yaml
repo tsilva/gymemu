@@ -1,0 +1,8 @@
+# @package _global_
+# Joint image/ball prediction using the action-history recipe's dataset and budget.
+defaults:
+  - breakout_actions
+  - override /approach: ball_state
+  - override /model: ball_state_cnn
+  - _self_
+name: breakout-ball

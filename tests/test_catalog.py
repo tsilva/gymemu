@@ -135,10 +135,31 @@ def test_cli_without_checkpoint_opens_catalog_without_loading_model(tmp_path, mo
 
     monkeypatch.setattr("gymemu.web_player.serve_catalog", serve)
     monkeypatch.setattr(play, "load_model", lambda *args: pytest.fail("Loaded before selection"))
-    play.main(["--runs-dir", str(tmp_path), "--no-browser", "--device", "cpu"])
+    play.main(["--runs-dir", str(tmp_path), "--local-only", "--no-browser", "--device", "cpu"])
     assert captured["root"] == tmp_path
     assert captured["options"] == {"port": 0, "open_browser": False}
     for arguments in (["--headless-actions", "0"], ["--list-start-states"]):
         with pytest.raises(SystemExit) as error:
             play.main(arguments)
         assert error.value.code == 2
+
+
+def test_catalog_http_reports_unavailable_authority(tmp_path):
+    class Unavailable:
+        def snapshot(self, **kwargs):
+            raise OSError("R2 unavailable")
+
+    catalog = Unavailable()
+    host = CatalogSession(catalog, lambda _: None)
+    server, url = make_server(host, catalog=catalog, workspace_path=tmp_path / "workspace.json")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(HTTPError) as error:
+            api(url, "/api/catalog")
+        assert error.value.code == 503
+        assert "Catalog unavailable" in error.value.read().decode()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)

@@ -1,0 +1,12 @@
+# @package _global_
+# Same model parameters, targets, rollout length, and Bernoulli curriculum.
+defaults:
+  - breakout_scheduled
+  - _self_
+name: breakout-scheduled-fast
+model:
+  factor_actions: true
+approach:
+  options:
+    feedback_dtype: autocast
+    selective_threshold: 0.2

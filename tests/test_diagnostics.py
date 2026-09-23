@@ -190,6 +190,24 @@ def test_probe_masks_episode_tails_and_uses_predicted_feedback(snapshot, tmp_pat
     assert (tmp_path / "probe.png").exists()
 
 
+def test_goal_probe_uses_exact_episode_offset_and_frame_ids(snapshot):
+    dataset = Windows(Frames(snapshot, compact=True), read_episodes(snapshot, "heldout"), 2, [0, 2])
+    probe = RolloutProbe(
+        dataset,
+        horizon=2,
+        starts=[{"episode": 2, "offset": 1, "frame_ids": [50, 60]}],
+    )
+    assert probe.manifest()["starts"] == [
+        {"episode": 2, "offset": 1, "frame_ids": [50, 60]}
+    ]
+    with pytest.raises(ValueError, match="frame IDs"):
+        RolloutProbe(
+            dataset,
+            horizon=2,
+            starts=[{"episode": 2, "offset": 1, "frame_ids": [50, 99]}],
+        )
+
+
 @pytest.mark.parametrize("approach", ["direct", "latent", "autoregressive_ball_region"])
 def test_diagnostics_preserve_training_weights_and_log_local_evidence(snapshot, tmp_path, approach):
     cfg = compose_config(
