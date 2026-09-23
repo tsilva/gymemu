@@ -22,6 +22,7 @@ from PIL import Image
 
 from gymemu.player import PLAYBACK_FPS, handle_key
 from gymemu.replay import ReplayPlayer
+from gymemu.research_catalog import ResearchCatalog
 
 ASSETS = Path(__file__).with_name("web_assets")
 DESKTOP_ASSETS = Path(__file__).with_name("desktop")
@@ -604,6 +605,11 @@ def make_server(session, port=0, *, workspace_path=None, catalog=None, desktop_b
                         result = catalog.snapshot(
                             run_id=query.get("run", [None])[0],
                             refresh=query.get("refresh", [""])[0] == "1",
+                            **(
+                                {"cursor": query.get("cursor", [None])[0], "page_size": 50}
+                                if isinstance(catalog, ResearchCatalog)
+                                else {}
+                            ),
                         )
                 except Exception as error:
                     return self.respond(

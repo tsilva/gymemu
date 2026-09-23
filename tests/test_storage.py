@@ -36,6 +36,7 @@ class FakeS3:
         if self.fail_upload:
             raise OSError("simulated offline storage")
         self.objects[key] = stream.read()
+        stream.close()  # boto3's upload_fileobj consumes and closes its input.
         self.metadata[key] = ExtraArgs["Metadata"]
         self.uploads.append(key)
 
@@ -45,16 +46,24 @@ class FakeS3:
             "Metadata": self.metadata[Key],
         }
 
-    def put_object(self, *, Bucket, Key, Body, ContentType):
+    def put_object(self, *, Bucket, Key, Body, ContentType, IfMatch=None, IfNoneMatch=None):
         if self.fail_manifest and Key.endswith("/manifest.json"):
             raise OSError("simulated manifest upload failure")
+        current = self.objects.get(Key)
+        if IfNoneMatch == "*" and current is not None:
+            raise ValueError("precondition failed: object exists")
+        if IfMatch is not None and (
+            current is None or '"' + hashlib.md5(current).hexdigest() + '"' != IfMatch
+        ):
+            raise ValueError("precondition failed: object changed")
         self.objects[Key] = Body
+        return {"ETag": '"' + hashlib.md5(Body).hexdigest() + '"'}
 
 
 @pytest.fixture
 def fake_s3(monkeypatch):
     client = FakeS3()
-    monkeypatch.setattr("gymemu.storage.r2_client", lambda: client)
+    monkeypatch.setattr("gymemu.storage.r2_client", lambda **kwargs: client)
     from gymemu.tracking import Tracker
 
     @contextmanager
@@ -70,6 +79,7 @@ def config_for(snapshot, output, approach="direct"):
     cfg.game.dataset = str(snapshot)
     cfg.game.env_id = "Fixture-v0"
     cfg.wandb.mode = "online"
+    cfg.r2.public_base_url = "https://gymemu-assets.example.test"
     cfg.output = str(output)
     return cfg
 
@@ -87,7 +97,14 @@ def test_uploaded_checkpoint_and_scene_restore_playback(snapshot, tmp_path, fake
     assert index["manifest_key"] == f"{receipt['prefix']}/manifest.json"
     assert index["best_mse"] == json.loads((output / "summary.json").read_text())["best_mse"]
     assert manifest["bucket"] == "gymemu"
-    assert all(bucket == "gymemu" for bucket in fake_s3.buckets)
+    assert set(fake_s3.buckets) == {"gymemu", "gymemu-public"}
+    assert "best.pt" in manifest["public_objects"]
+    assert "start-scene.npz" in manifest["public_objects"]
+    assert "resume.pt" not in manifest["public_objects"]
+    assert "run.json" not in manifest["public_objects"]
+    for name, public in manifest["public_objects"].items():
+        assert public["url"].startswith("https://gymemu-assets.example.test/inference/")
+        assert fake_s3.objects[public["url"].split("/", 3)[-1]] == (output / name).read_bytes()
     assert receipt["prefix"].startswith("runs/Fixture-v0/")
     assert {
         "resume.pt",
@@ -181,6 +198,43 @@ def test_upload_verification_and_manifest_failure_remain_retryable(
     setattr(fake_s3, failure, False)
     store.sync(final=True)
     assert store.state["status"] == "complete"
+
+
+def test_mutable_manifest_rejects_concurrent_change(snapshot, tmp_path, fake_s3):
+    cfg = config_for(snapshot, tmp_path)
+    store = CheckpointStore(OmegaConf.to_container(cfg, resolve=True), tmp_path)
+    (tmp_path / "best.pt").write_bytes(b"weights")
+    store.sync(final=True)
+    pointer = f"{store.state['prefix']}/manifest.json"
+    fake_s3.objects[pointer] = b'{"other": "writer"}'
+    with pytest.raises(RuntimeError, match="R2 upload incomplete"):
+        store.sync(final=True)
+    assert fake_s3.objects[pointer] == b'{"other": "writer"}'
+
+
+def test_public_copy_uses_same_file_when_checkpoint_is_replaced(snapshot, tmp_path, fake_s3):
+    cfg = config_for(snapshot, tmp_path)
+    store = CheckpointStore(OmegaConf.to_container(cfg, resolve=True), tmp_path)
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"first version")
+    original_upload = fake_s3.upload_fileobj
+
+    def replace_after_private_upload(stream, bucket, key, *, ExtraArgs, Config):
+        original_upload(stream, bucket, key, ExtraArgs=ExtraArgs, Config=Config)
+        if bucket == "gymemu":
+            newer = tmp_path / "best.tmp"
+            newer.write_bytes(b"second version")
+            newer.replace(checkpoint)
+
+    fake_s3.upload_fileobj = replace_after_private_upload
+    store.sync(final=True)
+    manifest = json.loads(fake_s3.objects[f"{store.state['prefix']}/manifest.json"])
+    private = manifest["objects"]["best.pt"]
+    public = manifest["public_objects"]["best.pt"]
+    assert private["sha256"] == public["sha256"]
+    assert fake_s3.objects[private["key"]] == b"first version"
+    assert fake_s3.objects[public["url"].split("/", 3)[-1]] == b"first version"
+    assert checkpoint.read_bytes() == b"second version"
 
 
 def test_disabled_and_old_recipes_need_no_sdk_or_credentials(tmp_path, monkeypatch):

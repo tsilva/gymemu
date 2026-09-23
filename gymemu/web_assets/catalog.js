@@ -7,6 +7,56 @@ const headers = { 'X-Player-Token': token || '', 'Content-Type': 'application/js
 let catalog = null;
 let loading = false;
 let requestId = 0;
+let nextCursor = null;
+
+function mergePage(page) {
+  if (!catalog) catalog = { environments: [], warnings: [] };
+  for (const incomingEnv of page.environments) {
+    let env = catalog.environments.find(item => item.id === incomingEnv.id);
+    if (!env) { env = { id: incomingEnv.id, goals: [] }; catalog.environments.push(env); }
+    for (const incomingGoal of incomingEnv.goals) {
+      let goal = env.goals.find(item => item.id === incomingGoal.id);
+      if (!goal) { goal = { ...incomingGoal, revisions: [] }; env.goals.push(goal); }
+      for (const incomingRevision of incomingGoal.revisions) {
+        let revision = goal.revisions.find(item => item.id === incomingRevision.id);
+        if (!revision) { revision = { id: incomingRevision.id, variants: [], runs: [] }; goal.revisions.push(revision); }
+        for (const incomingVariant of incomingRevision.variants) {
+          let variant = revision.variants.find(item => item.id === incomingVariant.id);
+          if (!variant) { variant = { ...incomingVariant, runs: [] }; revision.variants.push(variant); }
+          for (const run of incomingVariant.runs) {
+            const old = variant.runs.findIndex(item => item.id === run.id);
+            if (old < 0) variant.runs.push(run);
+            else if (run.checkpoints.length || !variant.runs[old].checkpoints.length) variant.runs[old] = run;
+          }
+          variant.runs.sort((a, b) => b.modified - a.modified);
+          variant.run_count = variant.runs.length;
+          variant.first_activity = Math.min(...variant.runs.map(item => item.created));
+          variant.last_activity = Math.max(...variant.runs.map(item => item.modified));
+        }
+        revision.runs = revision.variants.flatMap(item => item.runs).sort((a, b) => b.modified - a.modified);
+        revision.variants.sort((a, b) => a.id.localeCompare(b.id));
+      }
+      goal.revisions.sort((a, b) => a.id.localeCompare(b.id));
+    }
+    env.goals.sort((a, b) => a.id.localeCompare(b.id));
+  }
+  catalog.environments.sort((a, b) => a.id.localeCompare(b.id));
+  catalog.warnings.push(...page.warnings);
+  if (nextCursor) {
+    for (const env of catalog.environments) for (const goal of env.goals) for (const revision of goal.revisions) for (const run of revision.runs) run.rank = null;
+  }
+  if (!nextCursor) {
+    const groups = new Map();
+    for (const env of catalog.environments) for (const goal of env.goals) for (const revision of goal.revisions) for (const run of revision.runs) {
+      run.rank = null;
+      if (run.status === 'complete' && run.comparability && run.best_mse != null && run.has_final_prediction) {
+        if (!groups.has(run.comparability)) groups.set(run.comparability, []);
+        groups.get(run.comparability).push(run);
+      }
+    }
+    for (const runs of groups.values()) runs.sort((a, b) => a.best_mse - b.best_mse || a.id.localeCompare(b.id)).forEach((run, index) => { run.rank = index + 1; });
+  }
+}
 
 async function request(path, options = {}) {
   const response = await fetch(path, { ...options, headers });
@@ -75,7 +125,7 @@ function renderDetails(goal, revision, variant, run) {
   }
   if (variant) {
     const p = document.createElement('p');
-    p.textContent = `${variant.run_count} Runs. First activity: ${date(variant.first_activity)}. Last activity: ${date(variant.last_activity)}.`;
+    p.textContent = `${variant.run_count} ${nextCursor ? 'loaded ' : ''}Runs. First activity: ${date(variant.first_activity)}. Last activity: ${date(variant.last_activity)}.`;
     details.append(p);
     if (variant.diff?.length) {
       const changes = document.createElement('ul');
@@ -213,7 +263,8 @@ function render() {
     body.append(row);
   }
   renderDetails(goal, revision, variant, run);
-  $('#item-count').textContent = `${items.length} of ${all.length}`;
+  $('#item-count').textContent = `${items.length} of ${all.length}${nextCursor ? ' loaded' : ''}`;
+  $('#load-more').hidden = !nextCursor;
   $('#catalog-status').hidden = true;
   $('.catalog-table').hidden = !items.length;
   $('#catalog-empty').hidden = Boolean(items.length);
@@ -236,6 +287,8 @@ function setRefreshing(refreshing) {
 async function refresh(reload = true) {
   const currentRequest = ++requestId;
   if (loading) return;
+  const selectedRun = new URLSearchParams(location.search).get('run');
+  if (!reload && catalog && !selectedRun) { render(); return; }
   setRefreshing(true);
   $('#catalog-status').hidden = false;
   $('#catalog-status').textContent = 'Loading catalog…';
@@ -247,7 +300,10 @@ async function refresh(reload = true) {
     if (reload) query.set('refresh', '1');
     const result = await request(`/api/catalog?${query}`);
     if (currentRequest !== requestId) return;
-    catalog = result;
+    const firstPage = !catalog || reload;
+    if (reload) catalog = null;
+    if (firstPage) nextCursor = result.next_cursor;
+    mergePage(result);
     render();
   } catch (error) {
     if (currentRequest === requestId) {
@@ -257,6 +313,18 @@ async function refresh(reload = true) {
   } finally {
     if (currentRequest === requestId) setRefreshing(false);
   }
+}
+async function loadMore() {
+  if (!nextCursor || loading) return;
+  const cursor = nextCursor;
+  $('#load-more').disabled = true;
+  try {
+    const result = await request(`/api/catalog?${new URLSearchParams({ cursor })}`);
+    nextCursor = result.next_cursor;
+    mergePage(result);
+    render();
+  } catch (error) { showError(error.message); }
+  finally { $('#load-more').disabled = false; }
 }
 $('.app-wordmark').href = route();
 $('#search').oninput = render;
@@ -270,6 +338,7 @@ $('#search-close').onclick = () => {
   $('#search-disclosure summary').focus();
 };
 $('#refresh').onclick = () => refresh(true);
+$('#load-more').onclick = loadMore;
 window.addEventListener('popstate', () => { $('#search').value = ''; refresh(false); });
 if (!token) {
   $('#catalog-status').hidden = true;

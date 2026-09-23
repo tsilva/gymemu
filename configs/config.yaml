@@ -30,6 +30,8 @@ r2:
   enabled: true
   bucket: gymemu
   prefix: runs
+  public_bucket: gymemu-public
+  public_base_url: https://gymemu-assets.tsilva.eu
 
 hydra:
   job:
