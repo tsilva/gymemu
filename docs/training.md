@@ -1,6 +1,8 @@
 # Training guide
 
 Install the command with `uv tool install . --editable --exclude-newer "7 days"` from the checkout.
+After dependency changes, rerun it with `--reinstall`; `uv sync` updates only the
+checkout's `.venv`, not the installed command's uv tool environment.
 Run `gymemu --help` to list subcommands. The `uv run gymemu` examples below use
 the locked project environment; the installed `gymemu` command also works outside
 the checkout. Relative dataset, output, and checkpoint paths use your current directory.
