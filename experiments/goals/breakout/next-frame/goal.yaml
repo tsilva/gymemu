@@ -1,0 +1,18 @@
+id: next-frame
+environment: Breakout-Atari2600-v0
+question: Predict the next RGB frame from recorded history and executed action.
+dataset:
+  id: tsilva/gradlab-breakout-trajectories
+  revision: 676ff6388f4218d3c3a3ce9f2f33e075fa7314a3
+evaluation:
+  split: heldout
+  targets: all
+  metric: next_frame_rgb_mse
+  precision: float32
+  normalization: uint8/255
+  bootstrap: included
+probes:
+  horizon: 32
+  starts:
+    - episode: 5
+      offset: 23

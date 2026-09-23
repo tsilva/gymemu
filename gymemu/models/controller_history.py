@@ -31,8 +31,7 @@ class ControllerHistoryMLP(nn.Module):
         features = [scalars, valid, F.one_hot(history[..., 4].long(), 4).float()]
         for k, (bits, offset) in enumerate(((8, 0), (9, 160), (5, 0))):
             encoded = (
-                (integers[..., k, None] + offset)
-                >> torch.arange(bits, device=history.device)
+                (integers[..., k, None] + offset) >> torch.arange(bits, device=history.device)
             ) & 1
             features.append((encoded.float() * 2 - 1) * valid)
         return torch.cat(features, -1).flatten(1)

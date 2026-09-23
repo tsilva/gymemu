@@ -3,6 +3,24 @@
 Recipes collect the settings for an experiment in YAML. They use the existing Hydra
 composition and the same runner for direct and multi-stage approaches.
 
+The Breakout next-frame Research Goal is checked in at
+`experiments/goals/breakout/next-frame/goal.yaml`. Its `recipes/` directory lists
+the available procedures. `configs/recipe/` keeps the existing Hydra names as
+compatibility aliases; a launch checks that the selected Goal recipe matches its
+alias. A saved standalone `recipe.yaml` remains replayable with `train.py --recipe`.
+Recipe overrides affect the resolved Run configuration. Goal overrides affect a
+content-identified Goal Variant and appear as a normalized difference in the catalog.
+
+Launch a queued recipe with finite compute bounds:
+
+```bash
+uv run gymemu experiment launch \
+  --recipe-file experiments/goals/breakout/next-frame/recipes/breakout_cnn.yaml \
+  --compute local --max-duration 1h --dry-run
+uv run gymemu experiment launch --recipe-file runs/saved/recipe.yaml \
+  --compute spot --max-duration 2h --max-hourly-price 2.00
+```
+
 ## Named recipes
 
 | Recipe | Purpose |

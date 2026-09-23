@@ -5,11 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
+import re
 import time
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import torch
@@ -26,6 +30,7 @@ from gymemu.data import Frames, Windows, read_episodes, resolve_dataset
 from gymemu.diagnostics import Health, RolloutProbe
 from gymemu.optimizers import build_optimizer, validate_optimizer
 from gymemu.recipes import save_reproduction
+from gymemu.research import load_goal, resolve_goal
 from gymemu.runtime import device_for
 from gymemu.scenes import write_scene
 from gymemu.storage import CheckpointStore, validate_storage
@@ -53,6 +58,9 @@ def _positive(value, name):
 
 
 def validate(config):
+    run_id = config.get("run_id")
+    if run_id is not None and not re.fullmatch(r"[0-9a-f]{32}", str(run_id)):
+        raise ValueError("run_id must be a 32-character lowercase hex ID")
     validate_tracking(config)
     validate_storage(config)
     _positive(config["history"], "history")
@@ -432,6 +440,35 @@ def _train(cfg, stop_requested):
     evaluation_contract = _evaluation_contract(
         identity, eval_episodes, evaluation, trainer, model.evaluation_metric
     )
+    goal = None
+    if game.get("research_goal"):
+        environment, goal_id = game["research_goal"].split("/", 1)
+        goal = resolve_goal(load_goal(environment, goal_id), config.get("goal_overrides"))
+        contract = goal["contract"]
+        expected = {
+            "environment": game["env_id"],
+            "dataset.id": game["dataset"],
+            "dataset.revision": game["revision"],
+            "evaluation.split": game["eval_split"],
+            "evaluation.targets": "all",
+            "evaluation.metric": model.evaluation_metric,
+            "evaluation.precision": "float32",
+            "evaluation.normalization": evaluation_contract["normalization"],
+            "evaluation.bootstrap": evaluation_contract["bootstrap"],
+        }
+        for field, actual in expected.items():
+            selected = contract
+            for key in field.split("."):
+                selected = selected[key]
+            if selected != actual:
+                raise ValueError(f"Research Goal {field} differs from this Run")
+        if trainer["limit_episodes"] is not None or trainer["eval_batches"] is not None:
+            raise ValueError("Research Goal fixes all held-out targets; remove evaluation limits")
+        if (
+            not trainer.get("diagnostics", {}).get("enabled", False)
+            or not model.predictive_objectives
+        ):
+            raise ValueError("Research Goal requires the fixed rollout probe")
     config["output"] = str(output)
     metadata = {
         "format_version": 2,
@@ -463,6 +500,35 @@ def _train(cfg, stop_requested):
         stream.write(OmegaConf.to_yaml(OmegaConf.create(config)))
     recipe_sha256 = save_reproduction(output, config, cfg, device, evaluation_contract["dataset"])
     metadata["recipe_sha256"] = recipe_sha256
+    reproduction = json.loads((output / "reproduction.json").read_text())
+    run_manifest = {
+        "version": 1,
+        "id": storage.state["run_id"] if storage.enabled else (config.get("run_id") or uuid4().hex),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "environment": game["env_id"],
+        "goal": goal,
+        "comparability": hashlib.sha256(
+            json.dumps(evaluation_contract, sort_keys=True).encode()
+        ).hexdigest(),
+        "evaluation": evaluation_contract,
+        "recipe": {
+            "sha256": recipe_sha256,
+            "resolved": config,
+            "overrides": config.get("launch_overrides")
+            or (list(HydraConfig.get().overrides.task) if HydraConfig.initialized() else []),
+        },
+        "source": {"git_commit": reproduction["git_commit"], "image": reproduction["container"]},
+        "stages": [stage["name"] for stage in spec["stages"]],
+        "compute": {
+            "placement": os.environ.get("GYMEMU_COMPUTE_PLACEMENT", "local"),
+            "device": str(device),
+        },
+        "publication": "online" if storage.enabled else "offline",
+        "status": "running",
+    }
+    (output / "run.json").write_text(json.dumps(run_manifest, indent=2) + "\n")
+    if goal:
+        (output / "goal.yaml").write_text(OmegaConf.to_yaml(OmegaConf.create(goal["contract"])))
     (output / "config.json").write_text(json.dumps(metadata, indent=2) + "\n")
     write_scene(output / "start-scene.npz", game, metadata, frames, splits)
     options = {
@@ -488,11 +554,13 @@ def _train(cfg, stop_requested):
     diagnostics = trainer.get("diagnostics", {})
     probe = None
     if diagnostics.get("enabled", False) and model.predictive_objectives:
+        probe_contract = goal["contract"]["probes"] if goal else {}
         probe = RolloutProbe(
             evaluation,
             samples=diagnostics["samples"],
-            horizon=diagnostics["horizon"],
+            horizon=probe_contract.get("horizon", diagnostics["horizon"]),
             sprite=game.get("ball_sprite"),
+            starts=probe_contract.get("starts"),
         )
         (output / "probe.json").write_text(json.dumps(probe.manifest(), indent=2) + "\n")
     parameters = sum(p.numel() for p in model.parameters())
@@ -513,7 +581,14 @@ def _train(cfg, stop_requested):
         parameters=parameters,
         training_examples=len(training),
         recipe_sha256=recipe_sha256,
+        run_id=run_manifest["id"],
     ) as tracker:
+        if tracker.run is not None:
+            run_manifest["wandb"] = {
+                "id": run_manifest["id"],
+                "url": getattr(tracker.run, "url", None),
+            }
+            (output / "run.json").write_text(json.dumps(run_manifest, indent=2) + "\n")
         if recovery:
             save_training(
                 output / "resume.pt",
@@ -735,7 +810,15 @@ def _train(cfg, stop_requested):
             },
         }
         (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-        storage.sync(final=True)
+        run_manifest["status"] = "complete"
+        run_manifest["best_mse"] = best_rgb
+        (output / "run.json").write_text(json.dumps(run_manifest, indent=2) + "\n")
+        try:
+            storage.sync(final=True)
+        except Exception:
+            run_manifest["status"] = "publication_pending"
+            (output / "run.json").write_text(json.dumps(run_manifest, indent=2) + "\n")
+            raise
         tracker.complete(summary)
     print(f"Checkpoint: {output / 'best.pt'}", flush=True)
     return output

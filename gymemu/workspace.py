@@ -22,11 +22,7 @@ def build_workspace(entity, project, declaration=None):
             title = ", ".join(keys)
             layout = wr.Layout(x=(index % 2) * 12, y=(index // 2) * 8, w=12, h=8)
             if panel.get("kind") == "media":
-                panels.append(
-                    wr.MediaBrowser(
-                        title=title, media_keys=keys, layout=layout
-                    )
-                )
+                panels.append(wr.MediaBrowser(title=title, media_keys=keys, layout=layout))
                 continue
             if not section.get("legacy", False):
                 for key in keys:

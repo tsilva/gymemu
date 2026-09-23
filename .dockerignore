@@ -8,6 +8,8 @@
 !gymemu/**
 !configs/
 !configs/**
+!experiments/
+!experiments/**
 !start_states/
 !start_states/**
 !containers/

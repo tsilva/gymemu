@@ -99,44 +99,29 @@ There is no generated-frame feedback. History editing and autoregressive playbac
 are unavailable for these checkpoints. A latent-pipeline checkpoint can also use
 `--reconstruction` to inspect its codec independently.
 
-## Browse saved checkpoints
+## Browse published research
 
 ```bash
 uv run gymemu play
-uv run gymemu play --runs-dir /absolute/path/to/runs
+uv run gymemu play /absolute/path/to/best.pt
 ```
 
-Without a checkpoint argument, the browser opens an environment → training run →
-checkpoint navigator for local and R2 runs. It discovers local run directories recursively, including
-Hydra timestamped runs, and sorts runs and checkpoints by their latest save time.
-Each run lists its root checkpoint files and `stages/<stage>/*.pt` checkpoints.
-Stage checkpoints use `start-scene.npz` from the run directory. Selecting a
-checkpoint loads it into the existing player in paused mode; the **Checkpoints**
-link returns to the catalog. Only one checkpoint is active per navigator server.
+The token-protected local browser reads the private R2 catalog. Its path is
+Environment → Research Goal → Goal Revision → Goal Variant → Run → Checkpoint.
+The Goal page lists checked-in recipes. A Run page shows its authoritative
+publication state, comparable held-out RGB MSE, recovery file names, and resolved
+Goal and Run YAML. Search, breadcrumbs, Refresh, and browser Back/Forward work at
+each level. Opening a Checkpoint starts the Player paused in teacher-forcing mode.
 
-Open Search at each level to filter the list. The field focuses automatically;
-the × button clears and closes it. Use the breadcrumbs and browser Back to navigate.
-The Refresh icon spins and stays disabled while the list reloads.
-Refresh discovers new files. Runs without checkpoints display an empty state;
-unreadable runs display a notice. Older runs missing `config.json` use safely loaded
-checkpoint metadata for their environment ID, with **Unknown environment** when no
-ID was saved. Discovery does not construct inference models.
-
-R2 uses the existing credential profile and defaults to bucket `gymemu`, prefix
-`runs`. Override these with `--r2-bucket` and `--r2-prefix`. Each row identifies its
-local or R2 source. Opening an R2 run lists its current checkpoints and retained
-versions from immutable manifests, deduplicating repeated publications of the same
-file contents. Earlier versions show a short content hash. A remote run's count
-initially covers current checkpoint files and expands when its history is loaded.
-
-Selection downloads the checkpoint and the starting scene from the same manifest
-into `~/.cache/gymemu/checkpoints/`. Both downloads and cached files are checked
-against the published SHA-256 hashes and sizes. Selecting another checkpoint reuses
-verified cached files. Checkpoint loading still uses `weights_only=True` and the
-model registry. It does not execute Python targets from manifests or metadata.
-
-Use `--local-only` to avoid contacting R2. If R2 is unavailable, the navigator shows
-a notice and keeps local runs accessible. Refresh retries remote discovery.
+The catalog reads at most 50 Run projections per browser request. **Load more Runs**
+continues the R2 listing; search and comparable rank cover the loaded Runs, and
+rank is shown only after the last page is loaded. It does not scan local run directories or
+all R2 artifacts per request. An unavailable R2 catalog returns an error instead of
+an empty history. `resume.pt` is listed in recovery details and cannot be selected
+for playback. Inference Checkpoints and their starting scenes are downloaded into
+`~/.cache/gymemu/checkpoints/` with SHA-256 and size checks. Explicit local
+Checkpoint paths still open unpublished Runs; `--local-only --runs-dir PATH`
+retains the older local directory browser for migration work.
 
 Playback options such as `--device cpu`, `--autoregressive`, `--start-state`, and
 `--empty-start` apply to each selected checkpoint. In autoregressive mode, missing
@@ -348,18 +333,29 @@ for authentication and run settings.
 
 ## R2 checkpoint storage
 
-Training uploads run artifacts to the `gymemu` R2 bucket by default,
-independently of the W&B mode. This is a separate bucket from Gradlab's model storage.
-`r2.enabled=false` disables all R2 access. Old standalone recipes without an `r2`
-section retain local-only storage.
+Online W&B training uploads Run artifacts and a catalog record to the private
+`gymemu` R2 bucket. It copies only inference-ready Checkpoints and their playback
+scene to the separate public `gymemu-public` bucket at
+`https://gymemu-assets.tsilva.eu`. Recovery files, Run metadata, metrics, and
+diagnostics stay in the private bucket. The browser reads Run metadata with the
+private token, then downloads selected playback files over public HTTPS and checks
+their size and SHA-256 before loading them. Disabled or offline W&B mode keeps the Run local, even when
+`r2.enabled=true`. Use `gymemu sync RUN_DIRECTORY` after completion to publish
+that Run under its original ID. `r2.enabled=false` also keeps the Run local.
 
 Provision the bucket once in the same Cloudflare account you use for Gradlab:
 
 1. In **R2 object storage**, create a bucket named `gymemu`. Keep it private.
 2. Create an R2 API token with **Object Read & Write** permission scoped to that bucket.
-3. Export its account endpoint, access key ID, and secret access key in the training
+3. Create a separate `gymemu-public` bucket and connect the public custom domain
+   `gymemu-assets.tsilva.eu`. Create an Object Read & Write token scoped only to
+   this bucket, with a limited lifetime; rotate it before expiry.
+4. Export the private token's account endpoint, access key ID, and secret access key in the training
    process as `GYMEMU_MODELS_R2_ENDPOINT_URL`, `GYMEMU_MODELS_R2_ACCESS_KEY_ID`, and
    `GYMEMU_MODELS_R2_SECRET_ACCESS_KEY`.
+5. Export the public token's matching account endpoint and keys as
+   `GYMEMU_PUBLIC_R2_ENDPOINT_URL`, `GYMEMU_PUBLIC_R2_ACCESS_KEY_ID`, and
+   `GYMEMU_PUBLIC_R2_SECRET_ACCESS_KEY`.
 
 See Cloudflare's [bucket creation](https://developers.cloudflare.com/r2/buckets/create-buckets/)
 and [R2 token instructions](https://developers.cloudflare.com/r2/api/tokens/).
@@ -387,6 +383,12 @@ variables is set, all three must be supplied; the client never mixes environment
 values with Keychain credentials. On remote training hosts, inject the three variables
 through the host's secret manager or process environment.
 
+The public token can use an analogous `~/.config/gymemu/public-r2.toml` profile.
+Use `GYMEMU_PUBLIC_R2_CONFIG` to choose another path. Its `keychain` references
+must point to the public token, not the private token. A local installation can
+therefore upload both buckets without putting secrets in the repository. The public
+token created for this installation expires on 2027-09-23.
+
 ```bash
 # With W&B authentication and the three R2 variables already configured
 uv run gymemu train output=runs/breakout-stored
@@ -397,8 +399,11 @@ uv run gymemu train r2.bucket=gymemu r2.prefix=experiments
 # Local-only smoke with no W&B or R2 credentials
 uv run gymemu train experiment=smoke wandb.mode=disabled r2.enabled=false
 
-# Retry publication using an existing run's saved R2 destination
+# Retry a failed online publication under its saved Run ID
 uv run gymemu upload-checkpoints runs/breakout-stored
+
+# Publish a completed offline Run to W&B, R2, and the catalog
+uv run gymemu sync runs/offline-run
 ```
 
 Legacy argparse commands accept `--no-r2` to disable uploads and `--env-id` for a
@@ -431,8 +436,10 @@ At completion, the trainer requires a successful final upload before marking the
 run successful. A final upload failure raises an error while preserving the local
 training results for retry. `summary.json` and the W&B summary include
 `r2_manifest_uri` and `r2_run_id`. A later retry updates R2 and its local receipt; it
-does not reopen or backfill a finished W&B run. R2 also stores `resume.pt`, including
-the optimizer and progress required to continue training after a restart.
+does not reopen or backfill a finished W&B run. `gymemu sync <run-directory>` can
+publish a completed local Run to W&B and R2 under its original Run ID. R2 also
+stores `resume.pt`, including the optimizer and progress required to continue
+training after a restart.
 
 ## Run artifacts
 

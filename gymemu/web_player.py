@@ -22,6 +22,7 @@ from PIL import Image
 
 from gymemu.player import PLAYBACK_FPS, handle_key
 from gymemu.replay import ReplayPlayer
+from gymemu.research_catalog import ResearchCatalog
 
 ASSETS = Path(__file__).with_name("web_assets")
 DESKTOP_ASSETS = Path(__file__).with_name("desktop")
@@ -539,7 +540,7 @@ def serve_catalog(catalog, factory, *, port=0, open_browser=True):
             browser = PlaybackBrowser()
         server, url = make_server(session, port, catalog=catalog, desktop_browser=browser)
         print(f"Gymemu navigator: {url}", flush=True)
-        print(f"Local runs: {catalog.root}", flush=True)
+        print(f"Catalog: {catalog.root}", flush=True)
         if browser:
             browser.open(url)
             server.timeout = 0.2
@@ -598,11 +599,21 @@ def make_server(session, port=0, *, workspace_path=None, catalog=None, desktop_b
             if url.path == "/api/catalog" and catalog is not None:
                 if not self.authorized():
                     return self.respond(403, b'{"error":"Unauthorized player request"}')
-                with session.lock:
-                    query = parse_qs(url.query)
-                    result = catalog.snapshot(
-                        run_id=query.get("run", [None])[0],
-                        refresh=query.get("refresh", [""])[0] == "1",
+                try:
+                    with session.lock:
+                        query = parse_qs(url.query)
+                        result = catalog.snapshot(
+                            run_id=query.get("run", [None])[0],
+                            refresh=query.get("refresh", [""])[0] == "1",
+                            **(
+                                {"cursor": query.get("cursor", [None])[0], "page_size": 50}
+                                if isinstance(catalog, ResearchCatalog)
+                                else {}
+                            ),
+                        )
+                except Exception as error:
+                    return self.respond(
+                        503, json.dumps({"error": f"Catalog unavailable: {error}"}).encode()
                     )
                 return self.respond(200, json.dumps(result, allow_nan=False).encode())
             if url.path == "/api/workspace":
@@ -671,9 +682,7 @@ def make_server(session, port=0, *, workspace_path=None, catalog=None, desktop_b
                     if desktop_browser is None or command.get("window") not in ("player", "stats"):
                         raise ValueError("Desktop window is unavailable")
                     path = "/player" if command["window"] == "player" else "/workspace/stats"
-                    target = (
-                        f"http://127.0.0.1:{self.server.server_port}{path}#token={token}"
-                    )
+                    target = f"http://127.0.0.1:{self.server.server_port}{path}#token={token}"
                     try:
                         desktop_browser.open(target, command["window"])
                     except Exception as error:

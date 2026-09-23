@@ -97,8 +97,7 @@ class DesktopWindow:
             auth = json.loads(auth_file.read_text())
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(
-                    f"ws://127.0.0.1:{int(auth['nlPort'])}"
-                    f"?connectToken={auth['nlConnectToken']}"
+                    f"ws://127.0.0.1:{int(auth['nlPort'])}?connectToken={auth['nlConnectToken']}"
                 ) as socket:
                     for method in ("window.show", "window.unminimize", "window.focus"):
                         request_id = uuid4().hex

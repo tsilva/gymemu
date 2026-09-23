@@ -60,8 +60,10 @@ packages = ["gymemu"]
 [tool.hatch.build.targets.wheel.force-include]
 "configs" = "gymemu/configs"
 "start_states" = "gymemu/start_states"
+"experiments" = "gymemu/experiments"
+"ops/dstack/verified-image.txt" = "gymemu/ops/dstack/verified-image.txt"
 "pyproject.toml" = "gymemu/pyproject.toml"
 "uv.lock" = "gymemu/uv.lock"
 
 [tool.hatch.build.targets.sdist]
-include = ["/gymemu", "/configs", "/start_states", "/README.md", "/LICENSE", "/uv.lock"]
+include = ["/gymemu", "/configs", "/experiments", "/ops/dstack/verified-image.txt", "/start_states", "/README.md", "/LICENSE", "/uv.lock"]

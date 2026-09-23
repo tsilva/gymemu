@@ -90,7 +90,9 @@ class Tracker:
 
 
 @contextmanager
-def track_run(config, output, *, evaluation, parameters, training_examples, recipe_sha256):
+def track_run(
+    config, output, *, evaluation, parameters, training_examples, recipe_sha256, run_id=None
+):
     settings = config.get("wandb", {})
     if settings.get("mode", "disabled") == "disabled":
         yield Tracker()
@@ -107,6 +109,8 @@ def track_run(config, output, *, evaluation, parameters, training_examples, reci
         mode=settings["mode"],
         dir=str(output),
         config=config,
+        id=run_id,
+        resume="allow" if run_id else None,
         reinit="create_new",
     )
     try:

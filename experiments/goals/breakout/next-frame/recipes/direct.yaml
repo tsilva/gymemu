@@ -1,0 +1,12 @@
+# @package _global_
+# Generic reference recipe. Select game=custom for another compatible dataset.
+defaults:
+  - override /approach: direct
+  - override /model: direct_cnn
+  - override /optimizer: adam
+  - _self_
+history: 8
+seed: 47
+trainer:
+  epochs: 10
+  learning_rate: 0.001

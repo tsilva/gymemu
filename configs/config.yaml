@@ -13,6 +13,9 @@ history: 8
 seed: 47
 output: null
 resume: null
+run_id: null
+goal_overrides: {}
+launch_overrides: []
 # Saved run recipes fill this to detect changed dataset content on replay.
 expected_dataset: null
 
@@ -27,6 +30,8 @@ r2:
   enabled: true
   bucket: gymemu
   prefix: runs
+  public_bucket: gymemu-public
+  public_base_url: https://gymemu-assets.tsilva.eu
 
 hydra:
   job:

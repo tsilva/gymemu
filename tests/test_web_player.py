@@ -288,6 +288,7 @@ def test_serve_opens_desktop_player_or_prints_urls(monkeypatch, capsys, open_bro
 
     url = "http://127.0.0.1:12345/#token=test"
     opened = []
+
     class Browser:
         def __init__(self):
             self.polls = 0

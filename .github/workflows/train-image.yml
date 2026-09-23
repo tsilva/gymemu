@@ -2,6 +2,11 @@ name: Training image
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the tested immutable image for this ref to GHCR
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -44,7 +49,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           df -h /
       - name: Authenticate to GHCR
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: (github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || (github.event_name == 'workflow_dispatch' && inputs.publish)
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
@@ -63,10 +68,12 @@ jobs:
             -v "$RUNNER_TEMP/gymemu-verification:/workspace" \
             "$IMAGE:sha-$GITHUB_SHA" smoke --device cpu
       - name: Publish tested image
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: (github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || (github.event_name == 'workflow_dispatch' && inputs.publish)
         run: |
           docker push "$IMAGE:sha-$GITHUB_SHA"
-          docker tag "$IMAGE:sha-$GITHUB_SHA" "$IMAGE:main"
-          docker push "$IMAGE:main"
-          docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:sha-$GITHUB_SHA" > "$RUNNER_TEMP/image-ref.txt"
-          printf 'Training image: `%s`\n' "$(cat "$RUNNER_TEMP/image-ref.txt")" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$GITHUB_REF" = 'refs/heads/main' ]; then
+            docker tag "$IMAGE:sha-$GITHUB_SHA" "$IMAGE:main"
+            docker push "$IMAGE:main"
+          fi
+          docker inspect --format "{{index .RepoDigests 0}}" "$IMAGE:sha-$GITHUB_SHA" > "$RUNNER_TEMP/image-ref.txt"
+          printf 'Training image: %s\n' "$(cat "$RUNNER_TEMP/image-ref.txt")" >> "$GITHUB_STEP_SUMMARY"
