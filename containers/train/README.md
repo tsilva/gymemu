@@ -6,7 +6,9 @@ native bfloat16 and a driver compatible with the locked CUDA runtime. The image
 contains no datasets or credentials.
 
 GitHub Actions builds and CPU-tests the image before publishing
-`ghcr.io/tsilva/gymemu/train:sha-<commit>` and `:main`. Copy the **digest reference**
+`ghcr.io/tsilva/gymemu/train:sha-<commit>` and, on `main`, `:main`.
+An explicitly dispatched branch build can publish only its commit tag.
+Copy the **digest reference**
 from the workflow summary for runs. Tags can move. Dependency build layers are
 cached separately from application code.
 
@@ -67,7 +69,7 @@ unavailable inside Linux containers. For local-only runs, pass
 
 Use the existing dstack 0.20.28 coordinator and `main` project through Gradlab's
 private operator SSH tunnel. Set `DSTACK_SERVER_URL` and `DSTACK_TOKEN` privately.
-The project needs the four named online secrets above. Private GHCR images also
+The project needs the seven named online secrets above. Private GHCR images also
 need registry pull credentials configured on the coordinator.
 
 ```bash
