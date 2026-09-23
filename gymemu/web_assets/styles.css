@@ -114,6 +114,8 @@ button.primary { background: var(--color-interaction); color: var(--color-canvas
 button.quiet { background: transparent; }
 :focus-visible { outline: 2px solid var(--color-interaction); outline-offset: 3px; }
 .app-header { display: flex; gap: .8rem; align-items: center; min-height: 3rem; padding: .38rem 1rem; border-bottom: 1px solid var(--color-border-translucent); background: var(--color-header-surface); }
+.hotreload-warning { display: none; }
+body[data-hot-reload="true"] .hotreload-warning { display: inline-flex; flex-shrink: 0; padding: .2rem .45rem; border: 1px solid var(--color-error-text); border-radius: 5px; background: var(--color-error-surface); color: var(--color-error-text); font-size: var(--font-size-xs); font-weight: var(--font-weight-bold); }
 .app-wordmark { flex-shrink: 0; color: var(--color-interaction); text-decoration: none; font: var(--font-weight-bold) var(--font-size-xs) var(--font-family-brand); letter-spacing: var(--letter-spacing-brand); }
 .header-divider { flex-shrink: 0; width: 1px; height: 1.3rem; background: var(--color-outline-strong); }
 .session-heading { display: flex; min-width: 0; flex: 1; }

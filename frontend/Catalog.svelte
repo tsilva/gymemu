@@ -1,5 +1,6 @@
 <header class="app-header">
     <a class="app-wordmark" href="/" aria-label="Gymemu environments">GYMEMU</a>
+    <span class="hotreload-warning" role="status" title="Live UI changes reload this navigator automatically">Hot reload active</span>
     <span class="header-divider" aria-hidden="true"></span>
     <nav id="breadcrumbs" aria-label="Checkpoint navigation"></nav>
   </header>

@@ -22,6 +22,10 @@ class DesktopWindow:
     def __init__(self, executable: Path, url: str, title: str, role: str) -> None:
         self.profile = tempfile.TemporaryDirectory(prefix="gymemu-viewer-")
         self.process: subprocess.Popen | None = None
+        self._close_listener: threading.Thread | None = None
+        self._close_ready = threading.Event()
+        self._close_error: BaseException | None = None
+        self._close_lock = threading.Lock()
         root = Path(self.profile.name)
         try:
             (root / "public").mkdir()
@@ -48,7 +52,9 @@ class DesktopWindow:
                                 "height": 960,
                                 "minWidth": 800,
                                 "minHeight": 600,
-                                "exitProcessOnClose": True,
+                                # Neutralino 6.9.0 traps in its macOS close callback
+                                # when it exits the process from that callback.
+                                "exitProcessOnClose": False,
                                 "useSavedState": False,
                                 "injectGlobals": False,
                                 "injectClientLibrary": False,
@@ -95,6 +101,17 @@ class DesktopWindow:
                     )
                 await asyncio.sleep(0.05)
             auth = json.loads(auth_file.read_text())
+            if self._close_listener is None:
+                self._close_listener = threading.Thread(
+                    target=self._run_close_listener, args=(auth,), daemon=True
+                )
+                self._close_listener.start()
+                if not await asyncio.to_thread(self._close_ready.wait, 5):
+                    raise RuntimeError("Desktop viewer close listener did not connect")
+                if self._close_error is not None:
+                    raise RuntimeError(
+                        "Desktop viewer close listener failed"
+                    ) from self._close_error
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(
                     f"ws://127.0.0.1:{int(auth['nlPort'])}?connectToken={auth['nlConnectToken']}"
@@ -120,17 +137,43 @@ class DesktopWindow:
                         else:
                             raise RuntimeError("Desktop viewer disconnected")
 
+    def _run_close_listener(self, auth: dict) -> None:
+        asyncio.run(self._listen_for_close(auth))
+
+    async def _listen_for_close(self, auth: dict) -> None:
+        address = (
+            f"ws://127.0.0.1:{int(auth['nlPort'])}"
+            f"?connectToken={auth['nlConnectToken']}"
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(address) as socket:
+                    self._close_ready.set()
+                    async for message in socket:
+                        if message.type != aiohttp.WSMsgType.TEXT:
+                            continue
+                        if json.loads(message.data).get("event") == "windowClose":
+                            return
+        except BaseException as error:
+            self._close_error = error
+            self._close_ready.set()
+        finally:
+            # Closing the watchdog pipe stops Neutralino outside its native
+            # close callback. A lost listener also stops an orphaned viewer.
+            await asyncio.to_thread(self.close)
+
     def close(self) -> None:
-        if self.process is not None:
-            if self.process.stdin is not None:
-                self.process.stdin.close()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.terminate()
-                self.process.wait(timeout=5)
-            self.process = None
-        self.profile.cleanup()
+        with self._close_lock:
+            if self.process is not None:
+                if self.process.stdin is not None and not self.process.stdin.closed:
+                    self.process.stdin.close()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.terminate()
+                    self.process.wait(timeout=5)
+                self.process = None
+            self.profile.cleanup()
 
 
 class PlaybackBrowser:

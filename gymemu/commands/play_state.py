@@ -34,9 +34,15 @@ def main(argv=None):
     parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto")
     parser.add_argument("--port", default="auto")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--hotreload", action="store_true", help="Reload source UI changes")
     parser.add_argument("--headless-actions", help="Comma-separated provider actions")
     parser.add_argument("--output", type=Path, default=Path("logs/state-play.png"))
     args = parser.parse_args(argv)
+    if args.hotreload:
+        from gymemu.play_dev_assets import source_checkout_root
+
+        if source_checkout_root() is None:
+            parser.error("--hotreload requires a source checkout")
     if args.teacher_forcing is None:
         args.teacher_forcing = args.headless_actions is None and args.start_source is None
     if args.teacher_forcing and (args.headless_actions is not None or args.start_source):
@@ -113,6 +119,7 @@ def main(argv=None):
             port=port,
             open_browser=not args.no_browser,
             mode_factory=mode_factory,
+            hot_reload=args.hotreload,
         )
     except (ValueError, OSError) as error:
         parser.error(str(error))

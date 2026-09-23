@@ -28,9 +28,12 @@ use a pinned, SHA-256-verified Neutralinojs runtime cached under
 `~/.cache/gymemu/neutralino`; the first launch downloads it. Installed Gymemu
 includes the compiled Svelte UI and needs no Node.js at runtime.
 
-For source UI development, run `pnpm install --frozen-lockfile`, `pnpm check:web`,
-and `pnpm build:web`. The generated `gymemu/web_assets/dist/` files are included in
-the Python package. Run `pnpm test:web` for the browser-side logic tests.
+For source UI development, run `pnpm install --frozen-lockfile`, then launch
+`uv run gymemu play --hotreload` (or add `--hotreload` with a checkpoint). Vite
+reloads frontend changes in the open viewer and the header marks hot reload as
+active. The flag requires a source checkout and installed Node dependencies.
+Run `pnpm check:web`, `pnpm build:web`, and `pnpm test:web` before shipping changes.
+The generated `gymemu/web_assets/dist/` files are included in the Python package.
 
 Play the published state dynamics and RGB decoder together:
 
