@@ -15,6 +15,7 @@ from PIL import Image
 from gymemu.checkpoints import load_model
 from gymemu.config import compose_config
 from gymemu.engine import train
+from gymemu.research import load_goal
 from gymemu.scenes import load_scene
 from play import Player
 
@@ -67,6 +68,8 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--online", action="store_true", help="Also verify configured W&B and R2")
     args = parser.parse_args()
+    if load_goal("breakout", "next-frame")["id"] != "next-frame":
+        raise RuntimeError("The training image is missing its checked-in Research Goal")
     if args.device == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError("GPU smoke requires an allocated CUDA GPU")
