@@ -72,6 +72,8 @@ def write_recipe(path, config, template=None):
     result = _freeze(raw, copy.deepcopy(config), set(config))
     result["output"] = None
     result["resume"] = None
+    result["run_id"] = None
+    result["launch_overrides"] = []
     result["game"]["dataset"] = config["game"]["dataset"]
     result["game"]["revision"] = config["game"]["revision"]
     # These are output-routing defaults, not inherited model/training settings.
@@ -93,11 +95,14 @@ def save_reproduction(output, config, cfg, device, dataset_identity):
     files.update(PACKAGE_DIR.rglob("*.py"))
     files.update(path for path in (PACKAGE_DIR / "web_assets").rglob("*") if path.is_file())
     files.update((ROOT / "configs").rglob("*.yaml"))
+    files.update((ROOT / "experiments").rglob("*.yaml"))
     files.update((ROOT / "start_states").rglob("*.npz"))
     files.update(ROOT / name for name in ("pyproject.toml", "uv.lock", ".python-version"))
     files.update((ROOT / "containers/train").glob("*.py"))
     files.update((ROOT / "containers/train").glob("*.sh"))
     files.update((ROOT / "containers/train").glob("Dockerfile"))
+    files.update((ROOT / "ops/dstack").glob("*.py"))
+    files.update((ROOT / "ops/dstack").glob("*.txt"))
     files.add(ROOT / ".dockerignore")
     files = sorted(path for path in files if path.is_file())
     source_hashes = {}

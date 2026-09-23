@@ -10,9 +10,7 @@ from gymemu.models import build_model
 
 
 def model_spec():
-    return dict(
-        kind="paddle_hit_count", vertical=specification("y")["vertical"], width=16, depth=1
-    )
+    return dict(kind="paddle_hit_count", vertical=specification("y")["vertical"], width=16, depth=1)
 
 
 def test_hit_decoder_keeps_or_increments_count_and_preserves_saturated_hits():

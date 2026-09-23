@@ -146,6 +146,7 @@ def test_train_reload_metrics_and_generated_playback(snapshot, tmp_path, recipe,
     cfg = compose_config([f"recipe={recipe}", "experiment=smoke"])
     cfg.game.dataset = str(snapshot)
     cfg.game.revision = None
+    cfg.game.research_goal = None
     cfg.game.start.episode_id = 2
     cfg.game.start.frame_position = 1
     cfg.wandb.mode = "disabled"

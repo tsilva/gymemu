@@ -4,16 +4,18 @@
     <nav id="breadcrumbs" aria-label="Checkpoint navigation"></nav>
   </header>
   <main class="catalog-shell">
-    <div class="catalog-heading"><div><span class="eyebrow">CHECKPOINT LIBRARY</span><h1 id="catalog-title" tabindex="-1">Environments</h1><p id="catalog-description">Choose an environment to browse its training runs.</p></div><button id="refresh" class="quiet icon-only" type="button" aria-label="Refresh" aria-busy="false" title="Refresh this list"><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-refresh"></use></svg></button></div>
+    <div class="catalog-heading"><div><span class="eyebrow">RESEARCH CATALOG</span><h1 id="catalog-title" tabindex="-1">Environments</h1><p id="catalog-description">Choose an Environment.</p></div><button id="refresh" class="quiet icon-only" type="button" aria-label="Refresh" aria-busy="false" title="Refresh this list"><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-refresh"></use></svg></button></div>
     <details id="search-disclosure" class="catalog-search-disclosure">
       <summary><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-search"></use></svg>Search</summary>
       <div class="catalog-search"><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-search"></use></svg><input id="search" type="search" aria-label="Search environments" placeholder="Search environments" autocomplete="off"><button id="search-close" class="quiet icon-only catalog-search-close" type="button" aria-label="Close search" title="Close search"><svg class="icon" aria-hidden="true"><use href="/assets/tabler-icons.svg#ti-x"></use></svg></button></div>
     </details>
     <span id="item-count"></span>
-    <p id="catalog-status" role="status">Loading runs…</p>
+    <p id="catalog-status" role="status">Loading catalog…</p>
     <div id="catalog-error" role="alert" hidden></div>
     <div class="catalog-table"><table><thead id="catalog-columns"></thead><tbody id="catalog-items"></tbody></table></div>
     <p id="catalog-empty" hidden></p>
+    <button id="load-more" type="button" hidden>Load more Runs</button>
+    <section id="catalog-details" aria-label="Selection details"></section>
     <details id="catalog-warnings" hidden><summary>Some runs could not be read</summary><ul></ul></details>
     <p class="catalog-root" id="catalog-root"></p>
   </main>

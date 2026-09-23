@@ -198,17 +198,36 @@ class Health:
 class RolloutProbe:
     """Fixed episode-local starts, recorded actions, and predicted RGB/state feedback."""
 
-    def __init__(self, dataset, *, samples=8, horizon=32, sprite=None):
+    def __init__(self, dataset, *, samples=8, horizon=32, sprite=None, starts=None):
         self.sprite, self.horizon = sprite, horizon
         self.starts = []
         # Include bootstrap/early history, then spread starts across held-out windows.
-        indices = list(
-            dict.fromkeys(
-                [0, min(1, len(dataset) - 1)]
-                + np.linspace(0, len(dataset) - 1, max(1, samples - 2), dtype=int).tolist()
-            )
-        )
-        for index in indices[:samples]:
+        if starts is None:
+            indices = list(
+                dict.fromkeys(
+                    [0, min(1, len(dataset) - 1)]
+                    + np.linspace(0, len(dataset) - 1, max(1, samples - 2), dtype=int).tolist()
+                )
+            )[:samples]
+        else:
+            indices = []
+            for selected in starts:
+                matches = [
+                    (number, episode)
+                    for number, episode in enumerate(dataset.episodes)
+                    if int(episode.episode_id) == selected["episode"]
+                ]
+                if len(matches) != 1:
+                    raise ValueError("Goal probe episode is absent or ambiguous")
+                number, episode = matches[0]
+                offset = selected["offset"]
+                if not 0 <= offset < len(episode.frames):
+                    raise ValueError("Goal probe offset is outside its episode")
+                actual = episode.frames[offset : offset + horizon].tolist()
+                if selected.get("frame_ids") and selected["frame_ids"] != actual:
+                    raise ValueError("Goal probe frame IDs differ from the pinned dataset")
+                indices.append((int(dataset.ends[number - 1]) if number else 0) + offset)
+        for index in indices:
             number = int(np.searchsorted(dataset.ends, index, side="right"))
             position = index - (int(dataset.ends[number - 1]) if number else 0)
             episode = dataset.episodes[number]

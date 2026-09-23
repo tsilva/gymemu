@@ -24,6 +24,7 @@ COPY .dockerignore ./
 COPY *.py ./
 COPY gymemu ./gymemu
 COPY configs ./configs
+COPY experiments ./experiments
 COPY start_states ./start_states
 COPY containers/train ./containers/train
 COPY README.md ./

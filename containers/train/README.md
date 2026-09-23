@@ -6,7 +6,9 @@ native bfloat16 and a driver compatible with the locked CUDA runtime. The image
 contains no datasets or credentials.
 
 GitHub Actions builds and CPU-tests the image before publishing
-`ghcr.io/tsilva/gymemu/train:sha-<commit>` and `:main`. Copy the **digest reference**
+`ghcr.io/tsilva/gymemu/train:sha-<commit>` and, on `main`, `:main`.
+An explicitly dispatched branch build can publish only its commit tag.
+Copy the **digest reference**
 from the workflow summary for runs. Tags can move. Dependency build layers are
 cached separately from application code.
 
@@ -52,10 +54,14 @@ outputs. Inject these runtime variables through private env files or provider se
 - `GYMEMU_MODELS_R2_ENDPOINT_URL`
 - `GYMEMU_MODELS_R2_ACCESS_KEY_ID`
 - `GYMEMU_MODELS_R2_SECRET_ACCESS_KEY`
+- `GYMEMU_PUBLIC_R2_ENDPOINT_URL`
+- `GYMEMU_PUBLIC_R2_ACCESS_KEY_ID`
+- `GYMEMU_PUBLIC_R2_SECRET_ACCESS_KEY`
 - Optional `HF_TOKEN` for private datasets
 - `GYMEMU_IMAGE_REF`, the exact digest saved in `reproduction.json`
 
-Use R2 credentials scoped to the `gymemu` bucket. The macOS Keychain profile is
+Use separate R2 credentials scoped to the private `gymemu` and public
+`gymemu-public` buckets. The macOS Keychain profiles are
 unavailable inside Linux containers. For local-only runs, pass
 `wandb.mode=disabled r2.enabled=false`. Keep secrets out of images and Hydra overrides.
 
@@ -63,7 +69,7 @@ unavailable inside Linux containers. For local-only runs, pass
 
 Use the existing dstack 0.20.28 coordinator and `main` project through Gradlab's
 private operator SSH tunnel. Set `DSTACK_SERVER_URL` and `DSTACK_TOKEN` privately.
-The project needs the four named online secrets above. Private GHCR images also
+The project needs the seven named online secrets above. Private GHCR images also
 need registry pull credentials configured on the coordinator.
 
 ```bash

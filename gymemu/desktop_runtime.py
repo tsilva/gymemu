@@ -120,9 +120,7 @@ def runtime_executable() -> Path:
     with (cache / "install.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         relative = (
-            Path("Gymemu.app/Contents/MacOS/Gymemu")
-            if sys.platform == "darwin"
-            else Path("Gymemu")
+            Path("Gymemu.app/Contents/MacOS/Gymemu") if sys.platform == "darwin" else Path("Gymemu")
         )
         executable = root / relative
         if executable.is_file():

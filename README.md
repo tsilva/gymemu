@@ -12,6 +12,11 @@
 Gymemu is a Python toolkit for comparing learned game emulators. Train different models
 or multi-stage pipelines on recorded game frames and actions, then play their predictions.
 
+Published experiments follow Environment → Research Goal → Goal Revision or Variant →
+Run → Checkpoint → Player. The private R2 catalog records Run state and comparable
+held-out RGB MSE. See [training and publication](docs/training.md) for direct training,
+offline sync, and the checked-in recipe workflow.
+
 ## Desktop player
 
 `uv run gymemu play` opens the checkpoint navigator in a dedicated Gymemu window.
@@ -300,14 +305,15 @@ uv run gymemu play
 uv run gymemu play runs/breakout-direct/best.pt
 ```
 
-Omitting the checkpoint opens a navigator for local runs under `runs/` and published
-R2 runs. Select an
-environment ID, a training run, and a checkpoint to open the paused player. Use
-`--runs-dir /path/to/runs` to browse another directory. The navigator supports
+Omitting the checkpoint opens the private R2 research catalog. Select an
+Environment, Research Goal, Revision, Variant, Run, and Checkpoint to open the
+paused Player. Use `--local-only --runs-dir /path/to/runs` to browse unpublished
+local runs. The navigator supports
 expandable Search with a clear-and-close button, breadcrumbs, browser Back, and
 a Refresh icon for newly saved checkpoints.
-R2 checkpoints download with their saved starting scene when selected; retained
-versions appear in the checkpoint list. Use `--local-only` to browse offline.
+Published inference Checkpoints download from the public `gymemu-public` bucket
+with their saved starting scene and are checked against the Run manifest by size
+and SHA-256. Recovery files stay private. Use `--local-only` to browse offline.
 The player's **Checkpoints** link returns to the selected run. Runs without saved
 environment IDs appear under **Unknown environment**.
 
@@ -335,8 +341,8 @@ project view](docs/metrics.md) for chart meanings and configuration.
 Use `wandb.mode=offline` to collect logs locally or `wandb.mode=disabled` to turn tracking off.
 See [tracking options](docs/training.md#weights--biases) for teams and custom environments.
 
-Checkpoints also upload to the separate `gymemu` R2 bucket, together with the
-recorded start scene, metrics, and reproduction files. Each run has a unique prefix;
+Run artifacts upload to the private `gymemu` R2 bucket. Approved inference and
+playback files also upload to the public `gymemu-public` bucket. Each Run has a unique prefix;
 immutable objects and manifests retain successfully uploaded checkpoint versions.
 Use `r2.enabled=false` to keep artifacts local. Retry interrupted uploads with
 `uv run gymemu upload-checkpoints runs/my-run`.

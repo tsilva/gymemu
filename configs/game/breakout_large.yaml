@@ -2,3 +2,4 @@ defaults:
   - breakout
   - _self_
 revision: 676ff6388f4218d3c3a3ce9f2f33e075fa7314a3
+research_goal: breakout/next-frame

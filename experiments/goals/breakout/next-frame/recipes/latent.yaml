@@ -1,0 +1,11 @@
+# @package _global_
+# Representation fitting followed by frozen-codec latent prediction.
+defaults:
+  - override /approach: latent
+  - override /optimizer: adam
+  - _self_
+history: 8
+seed: 47
+trainer:
+  epochs: 10
+  learning_rate: 0.001

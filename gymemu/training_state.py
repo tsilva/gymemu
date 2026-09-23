@@ -120,7 +120,7 @@ def load_training(path):
 def training_contract(config):
     """Only routing and loader execution settings may change during a continuation."""
     contract = copy.deepcopy(config)
-    for key in ("output", "resume", "wandb", "r2", "hydra"):
+    for key in ("output", "resume", "run_id", "launch_overrides", "wandb", "r2", "hydra"):
         contract.pop(key, None)
     for key in ("frame_cache", "workers", "threads", "checkpoint_seconds"):
         contract["trainer"].pop(key, None)
