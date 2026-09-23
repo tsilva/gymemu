@@ -113,7 +113,9 @@ publication state, comparable held-out RGB MSE, recovery file names, and resolve
 Goal and Run YAML. Search, breadcrumbs, Refresh, and browser Back/Forward work at
 each level. Opening a Checkpoint starts the Player paused in teacher-forcing mode.
 
-The catalog reads only its Run projection. It does not scan local run directories or
+The catalog reads at most 50 Run projections per browser request. **Load more Runs**
+continues the R2 listing; search and comparable rank cover the loaded Runs, and
+rank is shown only after the last page is loaded. It does not scan local run directories or
 all R2 artifacts per request. An unavailable R2 catalog returns an error instead of
 an empty history. `resume.pt` is listed in recovery details and cannot be selected
 for playback. Inference Checkpoints and their starting scenes are downloaded into
@@ -332,7 +334,12 @@ for authentication and run settings.
 ## R2 checkpoint storage
 
 Online W&B training uploads Run artifacts and a catalog record to the private
-`gymemu` R2 bucket. Disabled or offline W&B mode keeps the Run local, even when
+`gymemu` R2 bucket. It copies only inference-ready Checkpoints and their playback
+scene to the separate public `gymemu-public` bucket at
+`https://gymemu-assets.tsilva.eu`. Recovery files, Run metadata, metrics, and
+diagnostics stay in the private bucket. The browser reads Run metadata with the
+private token, then downloads selected playback files over public HTTPS and checks
+their size and SHA-256 before loading them. Disabled or offline W&B mode keeps the Run local, even when
 `r2.enabled=true`. Use `gymemu sync RUN_DIRECTORY` after completion to publish
 that Run under its original ID. `r2.enabled=false` also keeps the Run local.
 
@@ -340,9 +347,15 @@ Provision the bucket once in the same Cloudflare account you use for Gradlab:
 
 1. In **R2 object storage**, create a bucket named `gymemu`. Keep it private.
 2. Create an R2 API token with **Object Read & Write** permission scoped to that bucket.
-3. Export its account endpoint, access key ID, and secret access key in the training
+3. Create a separate `gymemu-public` bucket and connect the public custom domain
+   `gymemu-assets.tsilva.eu`. Create an Object Read & Write token scoped only to
+   this bucket, with a limited lifetime; rotate it before expiry.
+4. Export the private token's account endpoint, access key ID, and secret access key in the training
    process as `GYMEMU_MODELS_R2_ENDPOINT_URL`, `GYMEMU_MODELS_R2_ACCESS_KEY_ID`, and
    `GYMEMU_MODELS_R2_SECRET_ACCESS_KEY`.
+5. Export the public token's matching account endpoint and keys as
+   `GYMEMU_PUBLIC_R2_ENDPOINT_URL`, `GYMEMU_PUBLIC_R2_ACCESS_KEY_ID`, and
+   `GYMEMU_PUBLIC_R2_SECRET_ACCESS_KEY`.
 
 See Cloudflare's [bucket creation](https://developers.cloudflare.com/r2/buckets/create-buckets/)
 and [R2 token instructions](https://developers.cloudflare.com/r2/api/tokens/).
@@ -369,6 +382,12 @@ secret_access_key = "eu.tsilva.gymemu.r2.secret-access-key"
 variables is set, all three must be supplied; the client never mixes environment
 values with Keychain credentials. On remote training hosts, inject the three variables
 through the host's secret manager or process environment.
+
+The public token can use an analogous `~/.config/gymemu/public-r2.toml` profile.
+Use `GYMEMU_PUBLIC_R2_CONFIG` to choose another path. Its `keychain` references
+must point to the public token, not the private token. A local installation can
+therefore upload both buckets without putting secrets in the repository. The public
+token created for this installation expires on 2027-09-23.
 
 ```bash
 # With W&B authentication and the three R2 variables already configured

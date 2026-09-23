@@ -52,10 +52,14 @@ outputs. Inject these runtime variables through private env files or provider se
 - `GYMEMU_MODELS_R2_ENDPOINT_URL`
 - `GYMEMU_MODELS_R2_ACCESS_KEY_ID`
 - `GYMEMU_MODELS_R2_SECRET_ACCESS_KEY`
+- `GYMEMU_PUBLIC_R2_ENDPOINT_URL`
+- `GYMEMU_PUBLIC_R2_ACCESS_KEY_ID`
+- `GYMEMU_PUBLIC_R2_SECRET_ACCESS_KEY`
 - Optional `HF_TOKEN` for private datasets
 - `GYMEMU_IMAGE_REF`, the exact digest saved in `reproduction.json`
 
-Use R2 credentials scoped to the `gymemu` bucket. The macOS Keychain profile is
+Use separate R2 credentials scoped to the private `gymemu` and public
+`gymemu-public` buckets. The macOS Keychain profiles are
 unavailable inside Linux containers. For local-only runs, pass
 `wandb.mode=disabled r2.enabled=false`. Keep secrets out of images and Hydra overrides.
 

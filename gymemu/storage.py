@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from gymemu.credentials import CREDENTIAL_PREFIX, r2_credentials
+from gymemu.credentials import CREDENTIAL_PREFIX, PUBLIC_CREDENTIAL_PREFIX, r2_credentials
 
 ARTIFACTS = (
     "run.json",
@@ -28,6 +28,12 @@ ARTIFACTS = (
     "metrics.jsonl",
     "summary.json",
 )
+
+
+def inference_artifact(name):
+    return name == "start-scene.npz" or (
+        name.endswith(".pt") and name != "resume.pt" and "/resume" not in name
+    )
 
 
 def validate_storage(config):
@@ -52,10 +58,11 @@ def validate_storage(config):
         raise ValueError("R2 uploads require game.env_id with the canonical environment ID")
 
 
-def r2_client():
+def r2_client(*, public=False):
     """Read credentials at runtime, never from saved Hydra/W&B configuration."""
-    values = r2_credentials()
-    missing = [f"{CREDENTIAL_PREFIX}_{name}" for name, value in values.items() if not value]
+    prefix = PUBLIC_CREDENTIAL_PREFIX if public else CREDENTIAL_PREFIX
+    values = r2_credentials(public=public)
+    missing = [f"{prefix}_{name}" for name, value in values.items() if not value]
     if missing:
         raise ValueError("R2 uploads require environment variables: " + ", ".join(missing))
     endpoint = urlparse(values["ENDPOINT_URL"])
@@ -69,7 +76,7 @@ def r2_client():
         or endpoint.fragment
         or endpoint.path not in ("", "/")
     ):
-        raise ValueError(f"{CREDENTIAL_PREFIX}_ENDPOINT_URL must be an HTTPS R2 account endpoint")
+        raise ValueError(f"{prefix}_ENDPOINT_URL must be an HTTPS R2 account endpoint")
     import boto3
     from botocore.config import Config
 
@@ -114,16 +121,44 @@ class CheckpointStore:
             return
         settings = config["r2"]
         self.bucket = settings["bucket"]
+        self.public_bucket = settings.get("public_bucket", "")
+        self.public_base_url = settings.get("public_base_url") or os.environ.get(
+            "GYMEMU_PUBLIC_R2_BASE_URL"
+        )
+        public_url = urlparse(self.public_base_url or "")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]", self.public_bucket):
+            raise ValueError("r2.public_bucket must name the separate public bucket")
+        if (
+            public_url.scheme != "https"
+            or not public_url.hostname
+            or public_url.username
+            or public_url.password
+            or public_url.query
+            or public_url.fragment
+        ):
+            raise ValueError("GYMEMU_PUBLIC_R2_BASE_URL must be an HTTPS bucket URL")
+        self.public_base_url = self.public_base_url.rstrip("/")
         self.catalog_prefix = settings["prefix"]
         self.client = r2_client()
+        self.public_client = r2_client(public=True)
         endpoint = self.client.meta.endpoint_url
+        if self.public_client.meta.endpoint_url != endpoint:
+            raise ValueError("Private and public R2 credentials must use the same account endpoint")
         # Fail before dataset loading or optimization when access is misconfigured.
         self.client.head_bucket(Bucket=self.bucket)
+        self.public_client.head_bucket(Bucket=self.public_bucket)
         receipt = self.output / "r2.json"
         if receipt.exists():
             self.state = json.loads(receipt.read_text())
             if self.state["bucket"] != self.bucket or self.state["endpoint_url"] != endpoint:
                 raise ValueError("R2 retry destination differs from the saved upload receipt")
+            if (
+                self.state.get("public_bucket") != self.public_bucket
+                or self.state.get("public_base_url") != self.public_base_url
+            ):
+                raise ValueError(
+                    "Public R2 retry destination differs from the saved upload receipt"
+                )
         else:
             run_file = self.output / "run.json"
             run_id = (
@@ -140,6 +175,9 @@ class CheckpointStore:
                 "run_id": run_id,
                 "env_id": config["game"]["env_id"],
                 "objects": {},
+                "public_bucket": self.public_bucket,
+                "public_base_url": self.public_base_url,
+                "public_objects": {},
                 "status": "pending",
             }
 
@@ -168,28 +206,64 @@ class CheckpointStore:
             key = f"{self.state['prefix']}/objects/{digest}"
             record = {"key": key, "sha256": digest, "size_bytes": size}
             relative = path.relative_to(self.output).as_posix()
-            if self.state["objects"].get(relative) == record:
-                return
-            # Identical root and stage checkpoint aliases share one immutable object.
-            if record not in self.state["objects"].values():
-                from boto3.s3.transfer import TransferConfig
-
-                self.client.upload_fileobj(
-                    stream,
-                    self.bucket,
-                    key,
-                    ExtraArgs={"Metadata": {"sha256": digest}},
-                    Config=TransferConfig(max_concurrency=2, use_threads=False),
-                )
-                head = self.client.head_object(Bucket=self.bucket, Key=key)
+            # boto3 closes its input; a duplicate descriptor keeps the same inode
+            # available even if an atomic checkpoint save replaces the pathname.
+            public_stream = (
+                os.fdopen(os.dup(stream.fileno()), "rb") if inference_artifact(relative) else None
+            )
+            try:
                 if (
-                    head["ContentLength"] != size
-                    or head.get("Metadata", {}).get("sha256") != digest
+                    self.state["objects"].get(relative) != record
+                    and record not in self.state["objects"].values()
                 ):
-                    raise RuntimeError(
-                        "R2 upload size or checksum metadata differs from local file"
+                    # Identical root and stage checkpoint aliases share one immutable object.
+                    from boto3.s3.transfer import TransferConfig
+
+                    self.client.upload_fileobj(
+                        stream,
+                        self.bucket,
+                        key,
+                        ExtraArgs={"Metadata": {"sha256": digest}},
+                        Config=TransferConfig(max_concurrency=2, use_threads=False),
                     )
-            self.state["objects"][relative] = record
+                    head = self.client.head_object(Bucket=self.bucket, Key=key)
+                    if (
+                        head["ContentLength"] != size
+                        or head.get("Metadata", {}).get("sha256") != digest
+                    ):
+                        raise RuntimeError(
+                            "R2 upload size or checksum metadata differs from local file"
+                        )
+                self.state["objects"][relative] = record
+                if public_stream:
+                    self._upload_public(public_stream, relative, digest, size)
+            finally:
+                if public_stream:
+                    public_stream.close()
+
+    def _upload_public(self, stream, relative, digest, size):
+        key = f"inference/{digest}"
+        record = {
+            "url": f"{self.public_base_url}/{key}",
+            "sha256": digest,
+            "size_bytes": size,
+        }
+        if self.state["public_objects"].get(relative) == record:
+            return
+        from boto3.s3.transfer import TransferConfig
+
+        stream.seek(0)
+        self.public_client.upload_fileobj(
+            stream,
+            self.public_bucket,
+            key,
+            ExtraArgs={"Metadata": {"sha256": digest}},
+            Config=TransferConfig(max_concurrency=2, use_threads=False),
+        )
+        head = self.public_client.head_object(Bucket=self.public_bucket, Key=key)
+        if head["ContentLength"] != size or head.get("Metadata", {}).get("sha256") != digest:
+            raise RuntimeError("Public R2 upload size or checksum differs from local file")
+        self.state["public_objects"][relative] = record
 
     def sync(self, *, final=False):
         if not self.enabled:
@@ -202,19 +276,30 @@ class CheckpointStore:
             manifest = {
                 key: value
                 for key, value in self.state.items()
-                if key not in ("status", "error_type")
+                if key not in ("status", "error_type", "manifest_etag", "catalog_etag")
             }
             manifest["status"] = "complete" if final else "running"
             payload = _json(manifest)
             digest = hashlib.sha256(payload).hexdigest()
             # Retain prior manifests so earlier periodic checkpoints remain discoverable.
-            for key in (
-                f"{self.state['prefix']}/manifests/{digest}.json",
-                f"{self.state['prefix']}/manifest.json",
-            ):
-                self.client.put_object(
-                    Bucket=self.bucket, Key=key, Body=payload, ContentType="application/json"
-                )
+            self.client.put_object(
+                Bucket=self.bucket,
+                Key=f"{self.state['prefix']}/manifests/{digest}.json",
+                Body=payload,
+                ContentType="application/json",
+            )
+            pointer = self.client.put_object(
+                Bucket=self.bucket,
+                Key=f"{self.state['prefix']}/manifest.json",
+                Body=payload,
+                ContentType="application/json",
+                **(
+                    {"IfMatch": self.state["manifest_etag"]}
+                    if self.state.get("manifest_etag")
+                    else {"IfNoneMatch": "*"}
+                ),
+            )
+            self.state["manifest_etag"] = pointer["ETag"]
             run_file = self.output / "run.json"
             run = json.loads(run_file.read_text()) if run_file.is_file() else {}
             summary_file = self.output / "summary.json"
@@ -243,12 +328,18 @@ class CheckpointStore:
                 "has_final_prediction": "best.pt" in manifest["objects"],
                 "manifest_key": f"{self.state['prefix']}/manifest.json",
             }
-            self.client.put_object(
+            projection = self.client.put_object(
                 Bucket=self.bucket,
                 Key=f"{self.catalog_prefix}/catalog/runs/{self.state['run_id']}.json",
                 Body=_json(index),
                 ContentType="application/json",
+                **(
+                    {"IfMatch": self.state["catalog_etag"]}
+                    if self.state.get("catalog_etag")
+                    else {"IfNoneMatch": "*"}
+                ),
             )
+            self.state["catalog_etag"] = projection["ETag"]
             self.state["status"] = manifest["status"]
             self.state.pop("error_type", None)
         except Exception as error:

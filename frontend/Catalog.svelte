@@ -14,6 +14,7 @@
     <div id="catalog-error" role="alert" hidden></div>
     <div class="catalog-table"><table><thead id="catalog-columns"></thead><tbody id="catalog-items"></tbody></table></div>
     <p id="catalog-empty" hidden></p>
+    <button id="load-more" type="button" hidden>Load more Runs</button>
     <section id="catalog-details" aria-label="Selection details"></section>
     <details id="catalog-warnings" hidden><summary>Some runs could not be read</summary><ul></ul></details>
     <p class="catalog-root" id="catalog-root"></p>

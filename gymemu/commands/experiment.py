@@ -26,6 +26,9 @@ SECRETS = (
     "GYMEMU_MODELS_R2_ENDPOINT_URL",
     "GYMEMU_MODELS_R2_ACCESS_KEY_ID",
     "GYMEMU_MODELS_R2_SECRET_ACCESS_KEY",
+    "GYMEMU_PUBLIC_R2_ENDPOINT_URL",
+    "GYMEMU_PUBLIC_R2_ACCESS_KEY_ID",
+    "GYMEMU_PUBLIC_R2_SECRET_ACCESS_KEY",
 )
 
 
@@ -133,6 +136,8 @@ def main(argv=None):
     verify_image_source(image)
     client = r2_client()
     client.head_bucket(Bucket=config.r2.bucket)
+    public_client = r2_client(public=True)
+    public_client.head_bucket(Bucket=config.r2.public_bucket)
     directory = args.output_dir or Path.home() / ".local/share/gymemu/launches" / run_id
     directory.mkdir(parents=True, exist_ok=False)
     (directory / "recipe.yaml").write_text(recipe)
