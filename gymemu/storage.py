@@ -238,8 +238,7 @@ class CheckpointStore:
                 "status": manifest["status"],
                 "best_mse": summary.get("best_mse"),
                 "checkpoint_count": sum(
-                    name.endswith(".pt") and name != "resume.pt"
-                    for name in manifest["objects"]
+                    name.endswith(".pt") and name != "resume.pt" for name in manifest["objects"]
                 ),
                 "has_final_prediction": "best.pt" in manifest["objects"],
                 "manifest_key": f"{self.state['prefix']}/manifest.json",

@@ -52,8 +52,8 @@ def test_paddle_factorization_decoding_freeze_training_and_reload(edge_features)
     torch.save(dict(model_spec=spec, model=model.state_dict()), buffer)
     buffer.seek(0)
     checkpoint = torch.load(buffer, weights_only=True)
-    restored = build_model(checkpoint['model_spec'])
-    restored.load_state_dict(checkpoint['model'])
+    restored = build_model(checkpoint["model_spec"])
+    restored.load_state_dict(checkpoint["model"])
     assert torch.equal(restored.predict(full), predicted)
 
 

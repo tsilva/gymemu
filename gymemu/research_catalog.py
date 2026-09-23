@@ -109,18 +109,21 @@ class ResearchCatalog(RemoteCatalog):
             if name == "resume.pt" or "/resume" in name:
                 recovery.append(name)
                 continue
-            identifier = "r2:" + hashlib.sha256(
-                f"{row['id']}/{name}/{record['sha256']}".encode()
-            ).hexdigest()
+            identifier = (
+                "r2:"
+                + hashlib.sha256(f"{row['id']}/{name}/{record['sha256']}".encode()).hexdigest()
+            )
             self.checkpoint_paths[identifier] = (manifest, name)
-            checkpoints.append({
-                "id": identifier,
-                "name": name,
-                "stage": name.split("/")[1] if name.startswith("stages/") else None,
-                "final": not name.startswith("stages/"),
-                "size_bytes": record["size_bytes"],
-                "modified": row["modified"],
-            })
+            checkpoints.append(
+                {
+                    "id": identifier,
+                    "name": name,
+                    "stage": name.split("/")[1] if name.startswith("stages/") else None,
+                    "final": not name.startswith("stages/"),
+                    "size_bytes": record["size_bytes"],
+                    "modified": row["modified"],
+                }
+            )
         return checkpoints, sorted(recovery), details
 
     def snapshot(self, run_id=None, refresh=False):
@@ -164,18 +167,26 @@ class ResearchCatalog(RemoteCatalog):
             checkpoints, recovery, details = (
                 self._checkpoints(row) if row["id"] == run_id else ([], [], {})
             )
-            runs.append({
-                "id": row["id"], "name": row["name"], "approach": row.get("approach"),
-                "status": row["status"], "best_mse": row.get("best_mse"),
-                "rank": ranks.get(row["id"]),
-                "comparability": row.get("comparability"), "modified": row["modified"],
-                "created": datetime.fromisoformat(row["created_at"]).timestamp()
-                if row.get("created_at") else row["modified"],
-                "wandb_url": row.get("wandb_url"),
-                "checkpoints": checkpoints, "recovery": recovery,
-                "checkpoint_count": row.get("checkpoint_count", len(checkpoints)),
-                **details,
-            })
+            runs.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "approach": row.get("approach"),
+                    "status": row["status"],
+                    "best_mse": row.get("best_mse"),
+                    "rank": ranks.get(row["id"]),
+                    "comparability": row.get("comparability"),
+                    "modified": row["modified"],
+                    "created": datetime.fromisoformat(row["created_at"]).timestamp()
+                    if row.get("created_at")
+                    else row["modified"],
+                    "wandb_url": row.get("wandb_url"),
+                    "checkpoints": checkpoints,
+                    "recovery": recovery,
+                    "checkpoint_count": row.get("checkpoint_count", len(checkpoints)),
+                    **details,
+                }
+            )
             if row.get("goal_contract"):
                 contracts.setdefault((row["environment"], row["goal"]), {})[
                     row.get("revision") or "Unversioned"
@@ -186,33 +197,37 @@ class ResearchCatalog(RemoteCatalog):
             for goal_id, revisions in sorted(goals.items()):
                 versions = []
                 for revision_id, variants in sorted(revisions.items()):
-                    versions.append({
-                        "id": revision_id,
-                        "variants": [
-                            {
-                                "id": variant,
-                                "runs": sorted(runs, key=lambda run: -run["modified"]),
-                                "run_count": len(runs),
-                                "first_activity": min(run["created"] for run in runs),
-                                "last_activity": max(run["modified"] for run in runs),
-                                "diff": differences.get(
-                                    (env_id, goal_id, revision_id, variant), []
-                                ),
-                            }
-                            for variant, runs in sorted(variants.items())
-                        ],
-                        "runs": sorted(
-                            [run for runs in variants.values() for run in runs],
-                            key=lambda run: -run["modified"],
-                        ),
-                    })
+                    versions.append(
+                        {
+                            "id": revision_id,
+                            "variants": [
+                                {
+                                    "id": variant,
+                                    "runs": sorted(runs, key=lambda run: -run["modified"]),
+                                    "run_count": len(runs),
+                                    "first_activity": min(run["created"] for run in runs),
+                                    "last_activity": max(run["modified"] for run in runs),
+                                    "diff": differences.get(
+                                        (env_id, goal_id, revision_id, variant), []
+                                    ),
+                                }
+                                for variant, runs in sorted(variants.items())
+                            ],
+                            "runs": sorted(
+                                [run for runs in variants.values() for run in runs],
+                                key=lambda run: -run["modified"],
+                            ),
+                        }
+                    )
                 details = contracts.get((env_id, goal_id), {})
-                items.append({
-                    "id": goal_id,
-                    "current": details.get("current"),
-                    "recipes": details.get("recipes", []),
-                    "revisions": versions,
-                })
+                items.append(
+                    {
+                        "id": goal_id,
+                        "current": details.get("current"),
+                        "recipes": details.get("recipes", []),
+                        "revisions": versions,
+                    }
+                )
             result.append({"id": env_id, "goals": items})
         return {"environments": result, "warnings": []}
 

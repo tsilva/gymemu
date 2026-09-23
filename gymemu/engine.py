@@ -464,9 +464,10 @@ def _train(cfg, stop_requested):
                 raise ValueError(f"Research Goal {field} differs from this Run")
         if trainer["limit_episodes"] is not None or trainer["eval_batches"] is not None:
             raise ValueError("Research Goal fixes all held-out targets; remove evaluation limits")
-        if not trainer.get("diagnostics", {}).get(
-            "enabled", False
-        ) or not model.predictive_objectives:
+        if (
+            not trainer.get("diagnostics", {}).get("enabled", False)
+            or not model.predictive_objectives
+        ):
             raise ValueError("Research Goal requires the fixed rollout probe")
     config["output"] = str(output)
     metadata = {
@@ -513,9 +514,8 @@ def _train(cfg, stop_requested):
         "recipe": {
             "sha256": recipe_sha256,
             "resolved": config,
-            "overrides": config.get("launch_overrides") or (
-                list(HydraConfig.get().overrides.task) if HydraConfig.initialized() else []
-            ),
+            "overrides": config.get("launch_overrides")
+            or (list(HydraConfig.get().overrides.task) if HydraConfig.initialized() else []),
         },
         "source": {"git_commit": reproduction["git_commit"], "image": reproduction["container"]},
         "stages": [stage["name"] for stage in spec["stages"]],

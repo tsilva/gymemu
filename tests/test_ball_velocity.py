@@ -95,9 +95,7 @@ def test_paddle_probe_excludes_bricks_and_contact_from_its_interface():
 
 
 def test_spatial_features_respect_memory_mask():
-    model = build_model(
-        {"kind": "ball_velocity_mlp", "spatial_features": True, "memory": False}
-    )
+    model = build_model({"kind": "ball_velocity_mlp", "spatial_features": True, "memory": False})
     source = source_rows()
     changed = source.clone()
     changed[:, 8] = 0
