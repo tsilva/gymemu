@@ -17,9 +17,10 @@ def main(argv=None):
     output = args.run.expanduser().resolve()
     run_path = output / "run.json"
     run = json.loads(run_path.read_text())
-    if run["status"] not in ("complete", "publication_pending") or not (
-        output / "summary.json"
-    ).is_file():
+    if (
+        run["status"] not in ("complete", "publication_pending")
+        or not (output / "summary.json").is_file()
+    ):
         parser.error("Only completed local Runs can be synced")
     config = OmegaConf.to_container(OmegaConf.load(output / "resolved.yaml"), resolve=True)
     config.setdefault("r2", {})["enabled"] = True

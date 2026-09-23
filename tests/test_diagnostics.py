@@ -197,9 +197,7 @@ def test_goal_probe_uses_exact_episode_offset_and_frame_ids(snapshot):
         horizon=2,
         starts=[{"episode": 2, "offset": 1, "frame_ids": [50, 60]}],
     )
-    assert probe.manifest()["starts"] == [
-        {"episode": 2, "offset": 1, "frame_ids": [50, 60]}
-    ]
+    assert probe.manifest()["starts"] == [{"episode": 2, "offset": 1, "frame_ids": [50, 60]}]
     with pytest.raises(ValueError, match="frame IDs"):
         RolloutProbe(
             dataset,

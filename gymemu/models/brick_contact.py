@@ -30,9 +30,7 @@ class BrickContact(nn.Module):
         with torch.no_grad():
             cells, numbers, occupied = self.layout.encode(source)
             logits = self.layout.forward_encoded(cells, numbers, occupied)
-            event_logits = torch.stack(
-                [logits[:, 0], torch.logsumexp(logits[:, 1:], dim=1)], dim=1
-            )
+            event_logits = torch.stack([logits[:, 0], torch.logsumexp(logits[:, 1:], dim=1)], dim=1)
             parts = [numbers, event_logits.softmax(dim=1)]
             if self.collision_geometry:
                 probabilities = logits.softmax(dim=1)[:, 1:]

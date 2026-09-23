@@ -676,9 +676,7 @@ def make_server(session, port=0, *, workspace_path=None, catalog=None, desktop_b
                     if desktop_browser is None or command.get("window") not in ("player", "stats"):
                         raise ValueError("Desktop window is unavailable")
                     path = "/player" if command["window"] == "player" else "/workspace/stats"
-                    target = (
-                        f"http://127.0.0.1:{self.server.server_port}{path}#token={token}"
-                    )
+                    target = f"http://127.0.0.1:{self.server.server_port}{path}#token={token}"
                     try:
                         desktop_browser.open(target, command["window"])
                     except Exception as error:
