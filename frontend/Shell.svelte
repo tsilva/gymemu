@@ -2,6 +2,7 @@
     <a class="app-wordmark" href="/" aria-label="Gymemu player">GYMEMU</a>
     <span class="header-divider" aria-hidden="true"></span>
     <div class="session-heading"><strong id="checkpoint">Connecting to checkpoint…</strong></div>
+    <span class="hotreload-warning" role="status" title="Live UI changes reload this player automatically">Hot reload active</span>
     <a id="browse-checkpoints" class="companion-tab" href="/browse" hidden>Checkpoints</a>
     <span id="inspection-position" class="inspection-position" hidden></span>
     <select id="mode" class="mode-badge" aria-label="Playback mode"><option value="autoregressive">Autoregressive</option><option value="teacher-forcing">Teacher forcing</option></select>

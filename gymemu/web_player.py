@@ -20,6 +20,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from gymemu.play_dev_assets import PlayerDevAssets, development_page, source_checkout_root
 from gymemu.player import PLAYBACK_FPS, handle_key
 from gymemu.replay import ReplayPlayer
 from gymemu.research_catalog import ResearchCatalog
@@ -529,16 +530,24 @@ class CatalogSession:
                 self.session.close()
 
 
-def serve_catalog(catalog, factory, *, port=0, open_browser=True):
+def serve_catalog(catalog, factory, *, port=0, open_browser=True, hot_reload=False):
+    checkout_root = source_checkout_root() if hot_reload else None
+    if hot_reload and checkout_root is None:
+        raise RuntimeError("--hotreload requires a source checkout")
+    dev_assets = PlayerDevAssets(checkout_root) if checkout_root else None
     session = CatalogSession(catalog, factory)
     server = None
     browser = None
     try:
+        if dev_assets:
+            print(f"Player hot reload: {dev_assets.start()}", flush=True)
         if open_browser:
             from gymemu.desktop_browser import PlaybackBrowser
 
             browser = PlaybackBrowser()
-        server, url = make_server(session, port, catalog=catalog, desktop_browser=browser)
+        server, url = make_server(
+            session, port, catalog=catalog, desktop_browser=browser, dev_assets=dev_assets
+        )
         print(f"Gymemu navigator: {url}", flush=True)
         print(f"Catalog: {catalog.root}", flush=True)
         if browser:
@@ -556,9 +565,13 @@ def serve_catalog(catalog, factory, *, port=0, open_browser=True):
         if browser:
             browser.close()
         session.close()
+        if dev_assets:
+            dev_assets.stop()
 
 
-def make_server(session, port=0, *, workspace_path=None, catalog=None, desktop_browser=None):
+def make_server(
+    session, port=0, *, workspace_path=None, catalog=None, desktop_browser=None, dev_assets=None
+):
     token = secrets.token_urlsafe(32)
     workspace_path = workspace_path or Path.home() / ".config/gymemu/player-workspace.json"
     workspace_lock = threading.Lock()
@@ -574,11 +587,16 @@ def make_server(session, port=0, *, workspace_path=None, catalog=None, desktop_b
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            vite_url = dev_assets.url if dev_assets else None
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; img-src 'self' data: blob:; "
-                "style-src 'self' 'unsafe-inline'; font-src 'self'; "
-                "connect-src 'self'; frame-ancestors 'none'",
+                f"style-src 'self' 'unsafe-inline' {vite_url or ''}; "
+                f"font-src 'self' {vite_url or ''}; "
+                f"script-src 'self' {vite_url or ''}; "
+                f"connect-src 'self' {vite_url or ''} "
+                f"{'ws://' + vite_url.removeprefix('http://') if vite_url else ''}; "
+                "frame-ancestors 'none'",
             )
             self.end_headers()
             try:
@@ -649,8 +667,13 @@ def make_server(session, port=0, *, workspace_path=None, catalog=None, desktop_b
                 return self.respond(404, b"Not found", "text/plain")
             if not path.resolve().is_relative_to(allowed_root.resolve()) or not path.is_file():
                 return self.respond(404, b"Not found", "text/plain")
+            body = path.read_bytes()
+            if dashboard and dev_assets:
+                body = development_page(
+                    body.decode(), dev_assets.url, catalog=navigator
+                ).encode()
             return self.respond(
-                200, path.read_bytes(), mimetypes.guess_type(path)[0] or "application/octet-stream"
+                200, body, mimetypes.guess_type(path)[0] or "application/octet-stream"
             )
 
         def do_POST(self):
@@ -723,18 +746,27 @@ def make_server(session, port=0, *, workspace_path=None, catalog=None, desktop_b
     return server, f"http://127.0.0.1:{server.server_port}/#token={token}"
 
 
-def serve(player, *, checkpoint, keymap, port=0, open_browser=True, scale=3, mode_factory=None):
+def serve(
+    player, *, checkpoint, keymap, port=0, open_browser=True, scale=3,
+    mode_factory=None, hot_reload=False,
+):
+    checkout_root = source_checkout_root() if hot_reload else None
+    if hot_reload and checkout_root is None:
+        raise RuntimeError("--hotreload requires a source checkout")
+    dev_assets = PlayerDevAssets(checkout_root) if checkout_root else None
     session = PlaybackSession(
         player, checkpoint, keymap, scale=scale, mode_factory=mode_factory
     ).start()
     server = None
     browser = None
     try:
+        if dev_assets:
+            print(f"Player hot reload: {dev_assets.start()}", flush=True)
         if open_browser:
             from gymemu.desktop_browser import PlaybackBrowser
 
             browser = PlaybackBrowser()
-        server, url = make_server(session, port, desktop_browser=browser)
+        server, url = make_server(session, port, desktop_browser=browser, dev_assets=dev_assets)
         player_url, stats_url = dashboard_urls(url)
         print(f"Gymemu player: {url}", flush=True)
         print(f"Gymemu diagnostics: {stats_url}", flush=True)
@@ -757,3 +789,5 @@ def serve(player, *, checkpoint, keymap, port=0, open_browser=True, scale=3, mod
         if browser:
             browser.close()
         session.close()
+        if dev_assets:
+            dev_assets.stop()

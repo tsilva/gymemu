@@ -157,6 +157,9 @@ def main(argv=None):
     )
     parser.add_argument("--port", default="auto", help="Local browser port, or auto")
     parser.add_argument("--no-browser", action="store_true", help="Print URL without opening it")
+    parser.add_argument(
+        "--hotreload", action="store_true", help="Reload source UI changes in the open player"
+    )
     startup = parser.add_mutually_exclusive_group()
     startup.add_argument(
         "--teacher-forcing",
@@ -212,6 +215,11 @@ def main(argv=None):
     parser.add_argument("--headless-actions", help="Comma-separated action values for a smoke")
     parser.add_argument("--output", type=Path, default=Path("logs/play.png"))
     args = parser.parse_args(argv)
+    if args.hotreload:
+        from gymemu.play_dev_assets import source_checkout_root
+
+        if source_checkout_root() is None:
+            parser.error("--hotreload requires a source checkout")
     if args.reconstruction:
         args.teacher_forcing = True
     if args.teacher_forcing is None:
@@ -267,6 +275,7 @@ def main(argv=None):
             session_factory,
             port=port,
             open_browser=not args.no_browser,
+            **({"hot_reload": True} if args.hotreload else {}),
         )
         return
     if args.list_start_states:
@@ -320,6 +329,7 @@ def main(argv=None):
         open_browser=not args.no_browser,
         mode_factory=mode_factory,
         scale=args.scale,
+        hot_reload=args.hotreload,
     )
 
 

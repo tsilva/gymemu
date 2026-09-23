@@ -647,8 +647,11 @@ the first tick initializes the frame without executing a game action.
 `play.py` serves the player on loopback and opens a dedicated Player app window.
 The **Diagnostics** button opens or focuses a second app window with its own icon.
 Both pages use a compiled Svelte shell and the existing playback controllers.
-Installed packages include the compiled assets; source UI changes require
-`pnpm build:web`. The native viewer uses a pinned, verified Neutralinojs runtime
+Installed packages include the compiled assets. In a source checkout,
+`--hotreload` starts Vite so changes to the Player and checkpoint navigator UI
+reload in their open windows; the header marks this mode. Without that flag,
+source UI changes require `pnpm build:web`. The native viewer uses a pinned,
+verified Neutralinojs runtime
 downloaded on first use. `--no-browser` skips that download and prints both complete URLs for opening
 manually or in Codex's in-app Browser. `--port auto`
 selects an unused port; `--port NUMBER` selects a specific port. Each server has one
