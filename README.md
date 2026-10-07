@@ -1,7 +1,9 @@
 <p align="center">
   <img src="logo.png" alt="gymemu" width="280" />
   <br />
+  <!-- repo-tagline:start -->
   <strong>🎮 Train on recordings, play the predictions 🧠</strong>
+  <!-- repo-tagline:end -->
 </p>
 
 <p align="center">
