@@ -141,10 +141,7 @@ class DesktopWindow:
         asyncio.run(self._listen_for_close(auth))
 
     async def _listen_for_close(self, auth: dict) -> None:
-        address = (
-            f"ws://127.0.0.1:{int(auth['nlPort'])}"
-            f"?connectToken={auth['nlConnectToken']}"
-        )
+        address = f"ws://127.0.0.1:{int(auth['nlPort'])}?connectToken={auth['nlConnectToken']}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(address) as socket:
