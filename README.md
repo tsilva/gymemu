@@ -1,7 +1,9 @@
 <p align="center">
   <img src="logo.png" alt="gymemu" width="280" />
   <br />
+  <!-- repo-tagline:start -->
   <strong>🎮 Train on recordings, play the predictions 🧠</strong>
+  <!-- repo-tagline:end -->
 </p>
 
 <p align="center">
@@ -696,7 +698,6 @@ columns survive unchanged. See [dataset annotations](docs/training.md#brick-data
 For the four-frame context / four-step rollout variant, use
 `recipe=breakout_detached_h4_r4`. It keeps detached feedback, four action-history
 slots, and the same dataset and objective, with a 1 → 2 → 4-step curriculum.
-
 
 `probe_paddle_history.py` studies the frame/action context needed to predict paddle
 position and native velocity from deterministic RGB-derived paddle features.
