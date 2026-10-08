@@ -19,16 +19,14 @@ def test_source_checkout_pages_use_vite_for_both_entries():
             catalog=entry == "catalog",
         )
         assert 'data-hot-reload="true"' in markup
-        assert f'{vite_url}/frontend/{entry}.js' in markup
-        assert f'{vite_url}/gymemu/web_assets/styles.css?import' in markup
+        assert f"{vite_url}/frontend/{entry}.js" in markup
+        assert f"{vite_url}/gymemu/web_assets/styles.css?import" in markup
         assert "/assets/dist/" not in markup
 
 
 def test_hot_reload_pages_keep_player_origin_and_allow_vite_assets():
     vite_url = "http://127.0.0.1:5173"
-    server, url = make_server(
-        object(), catalog=object(), dev_assets=SimpleNamespace(url=vite_url)
-    )
+    server, url = make_server(object(), catalog=object(), dev_assets=SimpleNamespace(url=vite_url))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -38,7 +36,7 @@ def test_hot_reload_pages_keep_player_origin_and_allow_vite_assets():
                 page = response.read().decode()
                 policy = response.headers["Content-Security-Policy"]
                 assert response.status == 200
-                assert f'{vite_url}/frontend/{entry}.js' in page
+                assert f"{vite_url}/frontend/{entry}.js" in page
                 assert vite_url in policy
                 assert "ws://127.0.0.1:5173" in policy
         with urlopen(root + "assets/tabler-icons.svg", timeout=5) as response:
