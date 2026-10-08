@@ -669,9 +669,7 @@ def make_server(
                 return self.respond(404, b"Not found", "text/plain")
             body = path.read_bytes()
             if dashboard and dev_assets:
-                body = development_page(
-                    body.decode(), dev_assets.url, catalog=navigator
-                ).encode()
+                body = development_page(body.decode(), dev_assets.url, catalog=navigator).encode()
             return self.respond(
                 200, body, mimetypes.guess_type(path)[0] or "application/octet-stream"
             )
@@ -747,8 +745,15 @@ def make_server(
 
 
 def serve(
-    player, *, checkpoint, keymap, port=0, open_browser=True, scale=3,
-    mode_factory=None, hot_reload=False,
+    player,
+    *,
+    checkpoint,
+    keymap,
+    port=0,
+    open_browser=True,
+    scale=3,
+    mode_factory=None,
+    hot_reload=False,
 ):
     checkout_root = source_checkout_root() if hot_reload else None
     if hot_reload and checkout_root is None:
