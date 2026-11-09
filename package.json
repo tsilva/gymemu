@@ -18,7 +18,11 @@
   "pnpm": {
     "overrides": {
       "devalue@>=5.0.0 <5.9.4": "5.9.4",
-      "source-map-js@<1.2.2": "1.2.2"
+      "source-map-js@<1.2.2": "1.2.2",
+      "@sveltejs/vite-plugin-svelte@6.2.4>deepmerge": "npm:@fastify/deepmerge@3.2.4"
+    },
+    "patchedDependencies": {
+      "@sveltejs/vite-plugin-svelte@6.2.4": "patches/svelte-vite-plugin-6.2.4.patch"
     }
   }
 }
